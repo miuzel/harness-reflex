@@ -34,12 +34,21 @@
    - **Codex CLI**：`.codex/config.json` 原生 MCP 挂载。
    - **Antigravity (AGY)**：支持全功能 Bundle 插件（`.agents/plugins/harness-reflex/`），内嵌 `plugin.json`、`mcp_config.json`、`hooks.json` 与 `rules/AGENTS.md`。
 
-2. **吸收实证工程精髓**：
-   - **Gate 反向 Fail-Closed**：证据不足或调用出错时落到 `escalate`，绝不允许“失败即放行”。
-   - **Prune 容错 Fail-Open**：剪枝失败或置信度不足时原样放行，确保不破坏 Agent 执行链。
-   - **排序不卡硬阈值**：原始概率仅用于 Top-K 优先推荐，避免校准漂移误伤。
-   - **同轮判定 Latch**：相同声明与上下文不重复触发，避免浪费。
-   - **台账与净收益追踪（Ledger）**：全量记录每次调用的延迟、节省 Token 与基线对比。
+2. **全套 System One 工具链（原生 MCP Tools 暴露给 Agent）**：
+   - **底层通用 API**：
+     - `reflex_choice`：多选一概率分布预测，毫秒级得出答案，零生成开销。
+     - `reflex_score`：对代码/陈述进行 0.0 ~ 1.0 的连续标准评分。
+     - `reflex_screen`：对不可信外部输入（工具输出、网页、PR 注释）做提示注入与指令劫持筛查。
+   - **高阶工作流工具**：
+     - `reflex_gate`：声明-证据核对门禁（反向 Fail-Closed，且支持加载离线校准曲线）。
+     - `reflex_prune`：长输出提炼与剪枝（容错 Fail-Open，支持 Shadow 模式）。
+     - `reflex_detect_stagnation`：停滞与死循环检测（识别重复重试、振荡与零进展）。
+     - `reflex_route`：技能与工具的意图排序（只排序，不卡死阈值）。
+     - `reflex_status_ledger`：决策台账与净节省 Token/成本统计。
+
+3. **离线拟合校准闭环（Isotonic PAVA & Platt 回归）**：
+   - 内置 `calibrate` 引擎，可基于历史标注集拟合单调映射曲线，计算 ECE 误差并输出校准配置；
+   - 线上运行时自动修正过度自信的模型原始概率，杜绝盲目放行。
 
 ---
 

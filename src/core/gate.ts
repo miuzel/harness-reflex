@@ -1,19 +1,23 @@
 import { DecisionBackend, GateRequest, GateResponse } from '../backend/types.js';
 import { DecisionLedger } from './ledger.js';
+import { Calibrator } from './calibrate.js';
 
 export interface GateOptions {
   strictness?: 'high' | 'normal' | 'lenient';
   latchCacheKey?: string;
+  calibrator?: Calibrator;
 }
 
 export class ReflexGateService {
   private backend: DecisionBackend;
   private ledger: DecisionLedger;
+  private calibrator: Calibrator;
   private latchedResults: Map<string, GateResponse> = new Map();
 
-  constructor(backend: DecisionBackend, ledger?: DecisionLedger) {
+  constructor(backend: DecisionBackend, ledger?: DecisionLedger, calibrator?: Calibrator) {
     this.backend = backend;
     this.ledger = ledger || DecisionLedger.getInstance();
+    this.calibrator = calibrator || Calibrator.getInstance();
   }
 
   /**
@@ -77,6 +81,25 @@ export class ReflexGateService {
         })),
         latencyMs: 0
       };
+    }
+
+    // Apply offline calibration curve if loaded
+    if (this.calibrator.isLoaded()) {
+      for (const item of result.results) {
+        const { calibrated } = this.calibrator.calibrate(item.confidence);
+        const rawPct = (item.confidence * 100).toFixed(1);
+        const calPct = (calibrated * 100).toFixed(1);
+        item.explanation += ` [Calibrated confidence: ${calPct}% (raw: ${rawPct}%)]`;
+
+        // If raw was claimed 'verified' but empirical calibrated probability is below threshold, escalate!
+        const minThreshold = options?.strictness === 'high' ? 0.85 : 0.65;
+        if (item.outcome === 'verified' && calibrated < minThreshold && options?.strictness !== 'lenient') {
+          item.outcome = 'escalate';
+          item.explanation += ` [Auto-Escalated: empirical accuracy (${calPct}%) below safety threshold (${(minThreshold * 100).toFixed(0)}%)]`;
+          result.passed = false;
+          result.needsEscalation = true;
+        }
+      }
     }
 
     this.latchedResults.set(latchKey, result);

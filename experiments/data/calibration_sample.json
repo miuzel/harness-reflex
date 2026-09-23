@@ -1,0 +1,14 @@
+[
+  { "rawProbability": 0.55, "groundTruth": 0 },
+  { "rawProbability": 0.60, "groundTruth": 0 },
+  { "rawProbability": 0.65, "groundTruth": 0 },
+  { "rawProbability": 0.70, "groundTruth": 1 },
+  { "rawProbability": 0.75, "groundTruth": 0 },
+  { "rawProbability": 0.80, "groundTruth": 1 },
+  { "rawProbability": 0.82, "groundTruth": 0 },
+  { "rawProbability": 0.85, "groundTruth": 1 },
+  { "rawProbability": 0.88, "groundTruth": 1 },
+  { "rawProbability": 0.90, "groundTruth": 1 },
+  { "rawProbability": 0.95, "groundTruth": 1 },
+  { "rawProbability": 0.98, "groundTruth": 1 }
+]

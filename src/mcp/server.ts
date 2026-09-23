@@ -24,13 +24,18 @@ interface JsonRpcResponse {
   };
 }
 
+import { ReflexScreenService } from '../core/screen.js';
+import { Calibrator } from '../core/calibrate.js';
+
 export class ReflexMcpServer {
   private backend = createDecisionBackend();
   private ledger = DecisionLedger.getInstance();
-  private gate = new ReflexGateService(this.backend, this.ledger);
+  private calibrator = Calibrator.getInstance();
+  private gate = new ReflexGateService(this.backend, this.ledger, this.calibrator);
   private pruner = new ToolResultPruner(this.backend, this.ledger);
   private stagnation = new StagnationDetector(this.backend, this.ledger);
   private router = new ReflexRouter(this.backend, this.ledger);
+  private screen = new ReflexScreenService(this.backend, this.ledger);
 
   start(): void {
     const rl = readline.createInterface({
@@ -197,6 +202,53 @@ export class ReflexMcpServer {
                   includeEntries: { type: 'boolean', description: 'Whether to include recent decision logs' }
                 }
               }
+            },
+            {
+              name: 'reflex_choice',
+              description: 'General-purpose System One multi-class choice. Evaluates a question over options and returns probability distribution in single-digit milliseconds without generative token overhead.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  question: { type: 'string', description: 'The question or classification prompt' },
+                  options: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'The candidate options to score'
+                  },
+                  context: { type: 'string', description: 'Optional background context' }
+                },
+                required: ['question', 'options']
+              }
+            },
+            {
+              name: 'reflex_score',
+              description: 'Score or evaluate a statement/code snippet against criteria on a 0.0 to 1.0 continuous scale.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  statement: { type: 'string', description: 'Statement, output, or code to evaluate' },
+                  criteria: { type: 'string', description: 'Evaluation rubric or criteria' },
+                  context: { type: 'string', description: 'Surrounding context or evidence' }
+                },
+                required: ['statement']
+              }
+            },
+            {
+              name: 'reflex_screen',
+              description: 'Screen untrusted content (e.g. tool output, external PR, web fetch, user input) for prompt injection, system overrides, or credential exfiltration attempts.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  content: { type: 'string', description: 'Untrusted content to screen' },
+                  source: {
+                    type: 'string',
+                    enum: ['tool_output', 'web_page', 'user_input', 'file_content'],
+                    description: 'Source of the content'
+                  },
+                  strict: { type: 'boolean', description: 'If true, enforce secondary deep model screening' }
+                },
+                required: ['content']
+              }
             }
           ]
         }
@@ -246,6 +298,53 @@ export class ReflexMcpServer {
             responsePayload.recentEntries = this.ledger.getEntries().slice(-10);
           }
           contentText = JSON.stringify(responsePayload, null, 2);
+        } else if (toolName === 'reflex_choice') {
+          const choiceRes = await this.backend.choice({
+            question: args.question,
+            options: args.options,
+            context: args.context
+          });
+
+          // If calibration is loaded, calibrate best option confidence
+          let calibratedConfidence: number | undefined;
+          if (this.calibrator.isLoaded()) {
+            const cal = this.calibrator.calibrate(choiceRes.confidence);
+            calibratedConfidence = cal.calibrated;
+          }
+
+          contentText = JSON.stringify({ ...choiceRes, calibratedConfidence }, null, 2);
+        } else if (toolName === 'reflex_score') {
+          // Standard System One scoring
+          const statement = args.statement || '';
+          const criteria = args.criteria || 'Rate alignment from 0.0 to 1.0';
+          const evalRes = await this.backend.choice({
+            question: `Evaluate the following statement against the criteria: "${criteria}". Is the quality/truth high, medium, or low?`,
+            options: ['High alignment (score ~0.9)', 'Moderate alignment (score ~0.5)', 'Poor alignment (score ~0.1)'],
+            context: `Statement: ${statement}\nContext: ${args.context || 'None'}`
+          });
+
+          const pHigh = evalRes.options.find((o) => o.label.includes('High'))?.probability || 0;
+          const pMed = evalRes.options.find((o) => o.label.includes('Moderate'))?.probability || 0;
+          const pLow = evalRes.options.find((o) => o.label.includes('Poor'))?.probability || 0;
+          const score = Number((pHigh * 0.9 + pMed * 0.5 + pLow * 0.1).toFixed(3));
+
+          contentText = JSON.stringify(
+            {
+              statement,
+              score,
+              distribution: { high: pHigh, medium: pMed, low: pLow },
+              latencyMs: evalRes.latencyMs
+            },
+            null,
+            2
+          );
+        } else if (toolName === 'reflex_screen') {
+          const screenRes = await this.screen.screen({
+            content: args.content || '',
+            source: args.source,
+            strict: args.strict
+          });
+          contentText = JSON.stringify(screenRes, null, 2);
         } else {
           return {
             jsonrpc: '2.0',

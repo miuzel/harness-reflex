@@ -10,6 +10,8 @@ import { createDecisionBackend } from '../backend/factory.js';
 import { ReflexGateService } from '../core/gate.js';
 import { ToolResultPruner } from '../core/prune.js';
 import { DecisionLedger } from '../core/ledger.js';
+import { ReflexScreenService } from '../core/screen.js';
+import { fitIsotonicRegression, calculateECE, CalibrationCurve, Calibrator } from '../core/calibrate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -113,6 +115,145 @@ async function main() {
       console.log(`Avg Latency:     ${summary.avgLatencyMs} ms`);
       console.log(`Gate Pass/Fail:  ${summary.gatePassedCount} passed / ${summary.gateFailedCount} failed`);
       console.log(`Stagnation Alarms: ${summary.stagnationAlerts}`);
+      break;
+    }
+
+    case 'screen': {
+      let content = '';
+      let strict = false;
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--content' || args[i] === '-c') content = args[++i];
+        if (args[i] === '--strict') strict = true;
+      }
+      if (!content && !process.stdin.isTTY) {
+        content = fs.readFileSync(0, 'utf8');
+      }
+
+      const backend = createDecisionBackend();
+      const screener = new ReflexScreenService(backend);
+      const res = await screener.screen({ content, strict });
+      console.log(JSON.stringify(res, null, 2));
+      process.exit(res.isSafe ? 0 : 1);
+    }
+
+    case 'choice': {
+      let question = '';
+      let optionsStr = '';
+      let context = '';
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--question' || args[i] === '-q') question = args[++i];
+        if (args[i] === '--options' || args[i] === '-o') optionsStr = args[++i];
+        if (args[i] === '--context') context = args[++i];
+      }
+      if (!question || !optionsStr) {
+        console.error('Usage: harness-reflex choice --question "..." --options "opt1,opt2" [--context "..."]');
+        process.exit(1);
+      }
+      const options = optionsStr.split(',').map((o) => o.trim());
+      const backend = createDecisionBackend();
+      const res = await backend.choice({ question, options, context });
+      console.log(JSON.stringify(res, null, 2));
+      break;
+    }
+
+    case 'score': {
+      let statement = '';
+      let criteria = 'Rate alignment on a scale from 0.0 to 1.0';
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--statement' || args[i] === '-s') statement = args[++i];
+        if (args[i] === '--criteria' || args[i] === '-c') criteria = args[++i];
+      }
+      if (!statement && !process.stdin.isTTY) {
+        statement = fs.readFileSync(0, 'utf8');
+      }
+      const backend = createDecisionBackend();
+      const evalRes = await backend.choice({
+        question: `Evaluate statement against criteria: "${criteria}". Is alignment high, moderate, or low?`,
+        options: ['High alignment (~0.9)', 'Moderate alignment (~0.5)', 'Poor alignment (~0.1)'],
+        context: statement
+      });
+      const pHigh = evalRes.options.find((o) => o.label.includes('High'))?.probability || 0;
+      const pMed = evalRes.options.find((o) => o.label.includes('Moderate'))?.probability || 0;
+      const pLow = evalRes.options.find((o) => o.label.includes('Poor'))?.probability || 0;
+      const score = Number((pHigh * 0.9 + pMed * 0.5 + pLow * 0.1).toFixed(3));
+      console.log(JSON.stringify({ statement, score, distribution: { pHigh, pMed, pLow } }, null, 2));
+      break;
+    }
+
+    case 'calibrate': {
+      let datasetPath = '';
+      let outputPath = path.join(process.cwd(), '.reflex', 'calibration.json');
+      let targetModel = process.env.SYSTEM_ONE_MODEL || 'default-model';
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--dataset' || args[i] === '-d') datasetPath = args[++i];
+        if (args[i] === '--output' || args[i] === '-o') outputPath = args[++i];
+        if (args[i] === '--model' || args[i] === '-m') targetModel = args[++i];
+      }
+
+      if (!datasetPath) {
+        console.error('Error: --dataset <file.json> is required for calibration.');
+        process.exit(1);
+      }
+
+      console.log(`[Calibration] Loading samples from ${datasetPath}...`);
+      const rawData = fs.readFileSync(datasetPath, 'utf8');
+      const samples = JSON.parse(rawData);
+
+      // Samples format: Array<{ rawProbability: number, groundTruth: 0 | 1 }>
+      // If samples contain assertions/evidence, run backend.gate() first to obtain raw probabilities
+      const fittedSamples: Array<{ rawProbability: number; groundTruth: 0 | 1 }> = [];
+      const backend = createDecisionBackend();
+
+      for (const s of samples) {
+        if (typeof s.rawProbability === 'number') {
+          fittedSamples.push({ rawProbability: s.rawProbability, groundTruth: s.groundTruth });
+        } else if (s.assertion && s.evidence) {
+          const res = await backend.gate({
+            assertions: [{ statement: s.assertion }],
+            evidence: s.evidence
+          });
+          const rawProb = res.results[0]?.confidence ?? 0.5;
+          fittedSamples.push({ rawProbability: rawProb, groundTruth: s.groundTruth });
+        }
+      }
+
+      console.log(`[Calibration] Fitting Isotonic Regression on ${fittedSamples.length} samples...`);
+      const bins = fitIsotonicRegression(fittedSamples);
+      const eceBefore = calculateECE(fittedSamples.map((s) => ({ probability: s.rawProbability, groundTruth: s.groundTruth })));
+
+      // Calibrate samples to compute ECE after
+      const calibratedSamples = fittedSamples.map((s) => {
+        let cal = s.rawProbability;
+        for (const bin of bins) {
+          if (s.rawProbability >= bin.rawMin && s.rawProbability <= bin.rawMax) {
+            cal = bin.calibrated;
+            break;
+          }
+        }
+        return { probability: cal, groundTruth: s.groundTruth };
+      });
+      const eceAfter = calculateECE(calibratedSamples);
+
+      const curve: CalibrationCurve = {
+        targetModel,
+        taskType: 'gate_verification',
+        method: 'isotonic',
+        createdAt: new Date().toISOString(),
+        bins,
+        eceBefore,
+        eceAfter
+      };
+
+      const outDir = path.dirname(outputPath);
+      if (!fs.existsSync(outDir)) {
+        fs.mkdirSync(outDir, { recursive: true });
+      }
+      fs.writeFileSync(outputPath, JSON.stringify(curve, null, 2), 'utf8');
+
+      console.log(`✓ Calibration curve saved to ${outputPath}`);
+      console.log(`  Target Model: ${targetModel}`);
+      console.log(`  ECE Before:   ${eceBefore} -> ECE After: ${eceAfter} (${(((eceBefore - eceAfter) / (eceBefore || 1)) * 100).toFixed(1)}% error reduction)`);
+      console.log(`  Fitted Bins:  ${bins.length}`);
       break;
     }
 
