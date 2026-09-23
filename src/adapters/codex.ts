@@ -27,8 +27,9 @@ export class CodexAdapter {
       command: 'node',
       args: [binaryPath, 'mcp'],
       env: {
-        REFLEX_BACKEND: process.env.REFLEX_BACKEND || 'mock',
-        JEV_API_KEY: process.env.JEV_API_KEY || ''
+        SYSTEM_ONE_BACKEND: process.env.SYSTEM_ONE_BACKEND || process.env.REFLEX_BACKEND || 'mock',
+        SYSTEM_ONE_API_KEY: process.env.SYSTEM_ONE_API_KEY || process.env.JEV_API_KEY || '',
+        SYSTEM_ONE_BASE_URL: process.env.SYSTEM_ONE_BASE_URL || process.env.JEV_BASE_URL || ''
       }
     };
 

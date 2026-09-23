@@ -1,8 +1,8 @@
-# Harness Reflex (System 1 Decision Runtime for Codex / Claude Code / AGY)
+# Harness Reflex (System One Decision Runtime for Codex / Claude Code / AGY)
 
-跨 Harness（**Codex CLI**、**Claude Code**、**Antigravity / AGY**）的 System 1 快速决策与 Jev API 兼容插件。
+跨 Harness（**Codex CLI**、**Claude Code**、**Antigravity / AGY**）的 System One 快速决策与判定运行时插件。
 
-汲取社区优秀实践（`lldois/dsh-jev` 与 `HorusJiang/dsh-jev-tools`），并专注于两大核心护城河：**跨 Harness 原生兼容** 与 **停滞检测 / 工具剪枝 / 严格验收门禁**。
+统一支持各类 **System One API**（包括官方 Jev、vLLM/OpenAI logits 读出、自托管模型与本地启发式决策后端），让 Harness 在不调用笨重 System Two 推理的情况下，毫秒级实现门禁验证、上下文剪枝与死循环拦截。
 
 ---
 
@@ -62,18 +62,22 @@ node dist/cli/index.js setup codex
 node dist/cli/index.js setup agy
 ```
 
-### 3. 配置决策后端（可选）
-默认使用本地快速模拟与启发式决策器（`<5ms` 延迟，零外部依赖）。如需接入真实模型：
+### 3. 配置 System One 决策后端（可选）
+默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
 
 ```bash
-# 方式 A：接入官方 Jev API
-export REFLEX_BACKEND=jev
-export JEV_API_KEY="your-api-key"
-export JEV_BASE_URL="https://api.jev.ai"
+# 切换 Provider A：官方 Jev API
+export SYSTEM_ONE_BACKEND=jev
+export SYSTEM_ONE_API_KEY="your-api-key"
+export SYSTEM_ONE_BASE_URL="https://api.jev.ai"
 
-# 方式 B：接入本地 / 远程 vLLM (支持 Qwen / DeepSeek 无权重改动的 next-token logits 读出)
-export REFLEX_BACKEND=simple-jev
-export VLLM_BASE_URL="http://localhost:8000"
+# 切换 Provider B：通用 open-weights 模型 logits 读出 (vLLM / simple-jev / OpenAI 兼容接口)
+export SYSTEM_ONE_BACKEND=simple-jev
+export SYSTEM_ONE_BASE_URL="http://localhost:8000"
+export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
+
+# 切换 Provider C：离线/本地基准模拟后端 (默认)
+export SYSTEM_ONE_BACKEND=mock
 ```
 
 ---

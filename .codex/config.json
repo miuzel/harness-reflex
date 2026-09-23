@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "harness-reflex": {
+      "command": "node",
+      "args": [
+        "/home/miuzel/workspace/personal/harness-reflex/dist/cli/index.js",
+        "mcp"
+      ],
+      "env": {
+        "SYSTEM_ONE_BACKEND": "mock",
+        "SYSTEM_ONE_API_KEY": "",
+        "SYSTEM_ONE_BASE_URL": ""
+      }
+    }
+  }
+}

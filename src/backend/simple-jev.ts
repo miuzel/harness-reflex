@@ -20,22 +20,37 @@ export interface SimpleJevConfig {
 }
 
 /**
- * Simple-Jev Decision Backend (Zero-RLCD, Next-Token Logits Scoring via vLLM / OpenAI API)
+ * Logits-based System One Provider (Zero-RLCD, Next-Token Logits Scoring via vLLM / OpenAI API)
  *
- * Implements System 1 decision API on top of standard open LLM weights (e.g. Qwen2.5 / DeepSeek)
+ * Implements System One decision API on top of standard open LLM weights (e.g. Qwen2.5 / DeepSeek)
  * using next-token logprobs with max_tokens: 1.
  */
-export class SimpleJevDecisionBackend implements DecisionBackend {
-  readonly name = 'simple-jev-logits';
+export class LogitsSystemOneBackend implements DecisionBackend {
+  readonly name = 'system-one-logits';
   readonly model: string;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
 
   constructor(config?: SimpleJevConfig) {
-    this.baseUrl = (config?.vllmBaseUrl || process.env.VLLM_BASE_URL || process.env.OPENAI_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
-    this.apiKey = config?.apiKey || process.env.VLLM_API_KEY || process.env.OPENAI_API_KEY || 'dummy';
-    this.model = config?.model || process.env.VLLM_MODEL || 'Qwen/Qwen2.5-7B-Instruct';
+    this.baseUrl = (
+      config?.vllmBaseUrl ||
+      process.env.SYSTEM_ONE_BASE_URL ||
+      process.env.VLLM_BASE_URL ||
+      process.env.OPENAI_BASE_URL ||
+      'http://localhost:8000'
+    ).replace(/\/$/, '');
+    this.apiKey =
+      config?.apiKey ||
+      process.env.SYSTEM_ONE_API_KEY ||
+      process.env.VLLM_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      'dummy';
+    this.model =
+      config?.model ||
+      process.env.SYSTEM_ONE_MODEL ||
+      process.env.VLLM_MODEL ||
+      'Qwen/Qwen2.5-7B-Instruct';
     this.timeoutMs = config?.timeoutMs || 8000;
   }
 
@@ -299,3 +314,6 @@ Answer (A or B):`;
     };
   }
 }
+
+export const SimpleJevDecisionBackend = LogitsSystemOneBackend;
+

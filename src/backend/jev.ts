@@ -20,20 +20,33 @@ export interface JevBackendConfig {
 }
 
 /**
- * Official Jev API Adapter
+ * Jev System One Provider Adapter
  * Connects to Jev Decision Gateway (or compatible proxy)
  */
 export class JevDecisionBackend implements DecisionBackend {
-  readonly name = 'jev-api';
+  readonly name = 'system-one-jev';
   readonly model: string;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
 
   constructor(config?: JevBackendConfig) {
-    this.baseUrl = (config?.baseUrl || process.env.JEV_BASE_URL || 'https://api.jev.ai').replace(/\/$/, '');
-    this.apiKey = config?.apiKey || process.env.JEV_API_KEY || '';
-    this.model = config?.model || process.env.JEV_MODEL || 'jev-1.13.0';
+    this.baseUrl = (
+      config?.baseUrl ||
+      process.env.SYSTEM_ONE_BASE_URL ||
+      process.env.JEV_BASE_URL ||
+      'https://api.jev.ai'
+    ).replace(/\/$/, '');
+    this.apiKey =
+      config?.apiKey ||
+      process.env.SYSTEM_ONE_API_KEY ||
+      process.env.JEV_API_KEY ||
+      '';
+    this.model =
+      config?.model ||
+      process.env.SYSTEM_ONE_MODEL ||
+      process.env.JEV_MODEL ||
+      'jev-1.13.0';
     this.timeoutMs = config?.timeoutMs || 10000;
   }
 

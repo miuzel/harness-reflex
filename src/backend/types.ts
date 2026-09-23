@@ -1,5 +1,5 @@
 /**
- * Core types for Jev API and System 1 Decision Runtime
+ * Core types for System One Decision Runtime & APIs (Jev, vLLM/Simple-Jev, DSPy, etc.)
  */
 
 export interface ChoiceOption {
@@ -115,3 +115,6 @@ export interface DecisionBackend {
   checkStagnation(req: StagnationCheckRequest): Promise<StagnationCheckResponse>;
   route(req: RouteRequest): Promise<RouteResponse>;
 }
+
+export type SystemOneBackend = DecisionBackend;
+

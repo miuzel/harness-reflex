@@ -126,7 +126,7 @@ async function main() {
     case 'help':
     default: {
       console.log(`
-Harness Reflex - System 1 Decision Runtime for Codex, Claude Code & AGY
+Harness Reflex - System One Decision Runtime for Codex, Claude Code & AGY
 
 Usage:
   harness-reflex <command> [options]
@@ -140,10 +140,10 @@ Commands:
   help                Display this help message
 
 Environment Variables:
-  REFLEX_BACKEND      'jev' | 'simple-jev' | 'mock' (default: mock)
-  JEV_API_KEY         API key for official Jev API
-  JEV_BASE_URL        Base URL for Jev Gateway (default: https://api.jev.ai)
-  VLLM_BASE_URL       Base URL for vLLM / OpenAI logits endpoint
+  SYSTEM_ONE_BACKEND  System One provider: 'jev' | 'vllm' | 'simple-jev' | 'mock' (default: mock)
+  SYSTEM_ONE_API_KEY  API key for the chosen System One provider (or JEV_API_KEY)
+  SYSTEM_ONE_BASE_URL Base URL for System One provider (or JEV_BASE_URL, VLLM_BASE_URL)
+  SYSTEM_ONE_MODEL    Model identifier (e.g. 'jev-1.13.0', 'Qwen/Qwen2.5-7B-Instruct')
 `);
       break;
     }
