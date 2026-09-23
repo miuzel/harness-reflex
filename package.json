@@ -1,0 +1,39 @@
+{
+  "name": "harness-reflex",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "System 1 decision runtime and Jev-compatible reflex layer for Codex, Claude Code, and Antigravity (AGY)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "harness-reflex": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/cli/index.js",
+    "mcp": "node dist/cli/index.js mcp",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "keywords": [
+    "jev",
+    "system-one",
+    "agent-harness",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "mcp",
+    "llm-evaluation",
+    "context-pruning",
+    "stagnation-detection"
+  ],
+  "author": "miuzel",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.5.0"
+  }
+}
