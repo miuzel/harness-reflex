@@ -78,7 +78,7 @@ node dist/cli/index.js setup agy
 # 切换 Provider A：官方 Jev API
 export SYSTEM_ONE_BACKEND=jev
 export SYSTEM_ONE_API_KEY="your-api-key"
-export SYSTEM_ONE_BASE_URL="https://api.jev.ai"
+export SYSTEM_ONE_BASE_URL="https://api.typesafe.ai/v1/systemone"
 
 # 切换 Provider B：通用 open-weights 模型 logits 读出 (vLLM / simple-jev / OpenAI 兼容接口)
 export SYSTEM_ONE_BACKEND=simple-jev

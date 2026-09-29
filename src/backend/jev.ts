@@ -35,7 +35,7 @@ export class JevDecisionBackend implements DecisionBackend {
       config?.baseUrl ||
       process.env.SYSTEM_ONE_BASE_URL ||
       process.env.JEV_BASE_URL ||
-      'https://api.jev.ai'
+      'https://api.typesafe.ai/v1/systemone'
     ).replace(/\/$/, '');
     this.apiKey =
       config?.apiKey ||
@@ -50,8 +50,17 @@ export class JevDecisionBackend implements DecisionBackend {
     this.timeoutMs = config?.timeoutMs || 10000;
   }
 
+  private resolveUrl(path: string): string {
+    const cleanBase = this.baseUrl.replace(/\/$/, '');
+    if (cleanBase.endsWith('/v1/systemone') || cleanBase.endsWith('/systemone')) {
+      const subPath = path.replace(/^\/v1/, '');
+      return `${cleanBase}${subPath}`;
+    }
+    return `${cleanBase}${path}`;
+  }
+
   private async postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    const url = this.resolveUrl(path);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
