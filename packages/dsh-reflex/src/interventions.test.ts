@@ -27,6 +27,8 @@ import {
   pruneMarker,
   suspicionOf,
   textOfContent,
+  WAIT_QUERY_TOOLS,
+  isWaitQuery,
   type InterventionEngineOptions
 } from './interventions.js';
 import {
@@ -515,6 +517,60 @@ test('active denies a repeated call through the real registry without any reflex
     assert.equal(report.active.actualSavedTokens, 0, 'a refusal removes nothing from the context');
     assert.ok(report.active.injectedTokens > 0, 'the refusal text is the one thing it adds');
     assert.equal(runs.length > 0, true, 'no reflex_* tool was involved: the harness intervened by itself');
+  } finally {
+    await ctx.fiber.dispose();
+  }
+});
+
+test('a repeated job query through the real registry is exempt, while the same query without a job handle is not', async () => {
+  const ctx = await createToolContext();
+  try {
+    const runtime = applyReflex(ctx, {
+      backend: 'mock',
+      interventions: { mode: 'active', capabilities: { stagnation: 'active' } }
+    });
+    const runs: (string | undefined)[] = [];
+    ctx.tools.register(
+      defineTool({
+        name: 'job_output',
+        description: 'Test-only stand-in for the Host background-job query tool.',
+        parameters: { job_id: { type: 'string' }, wait: { type: 'boolean' } },
+        output: {
+          schema: { type: 'json' as const },
+          render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }]
+        },
+        async execute(args: { job_id?: string }) {
+          runs.push(args.job_id);
+          return { status: 'running', job: args.job_id ?? null };
+        }
+      })
+    );
+    let calls = 0;
+    const execute = (jobId?: string): Promise<ToolExecutionResult> =>
+      ctx.tools.execute({
+        callId: `job-${++calls}` as never,
+        name: 'job_output',
+        arguments: jobId === undefined ? { wait: true } : { job_id: jobId, wait: true },
+        signal: new AbortController().signal
+      });
+
+    for (let index = 0; index < 5; index += 1) {
+      assert.equal((await execute('job-7')).isError, false, 'every poll of the same job runs');
+    }
+    assert.equal(runs.length, 5, 'the polls reached the tool body rather than a refusal');
+    const report = runtime.interventions!.report();
+    assert.equal(report.active.applied, 0, 'no intervention is applied to a legitimate wait');
+    assert.equal(report.active.plans, 0);
+    assert.equal(report.active.injectedTokens, 0);
+    assert.ok((report.skips['wait-query'] ?? 0) >= 1, 'and the wait is reported rather than silently ignored');
+
+    // The shape is what earns the exemption: a query with no job handle names no
+    // job, so it is an unidentified repetition like any other call.
+    assert.equal((await execute()).isError, false);
+    assert.equal((await execute()).isError, false);
+    const third = await execute();
+    assert.equal(third.isError, true, 'the third handle-less query is refused');
+    assert.match(resultText(third), /Reflex intervention/);
   } finally {
     await ctx.fiber.dispose();
   }
@@ -2490,4 +2546,157 @@ test('a retention that fails books no action and leaves the allowance for the ne
   assert.ok(installed.length < textOfContent(second.content as never).length, 'the next payload still has the turn’s allowance');
   assert.equal(engine.stateOf('retention-quota')!.interventions, 1);
   assert.equal(engine.report().active.applied, 1);
+});
+
+// ── g-012: legitimate waits are exempt from stagnation, wording is not ──────
+
+test('the wait exemption is decided by tool identity and argument shape, never by wording', () => {
+  // The documented default: the Host's own background-job query tools. A reader
+  // can see the whole scope of the exemption in one place.
+  assert.deepEqual(Object.keys(WAIT_QUERY_TOOLS).sort(), ['job_list', 'job_output'], 'the exemption covers job queries only');
+
+  assert.equal(isWaitQuery(execOf('job_output', { job_id: 'job-7', wait: true })), true, 'a named job handle is the poll shape');
+  assert.equal(isWaitQuery(execOf('job_output', '{"job_id":"job-7"}')), true, 'the same shape survives a stringified argument payload');
+  assert.equal(isWaitQuery(execOf('job_output', { wait: true })), false, 'a poll with no job handle is not identifiable');
+  assert.equal(isWaitQuery(execOf('job_output', { job_id: '' })), false, 'an empty handle names no job');
+  assert.equal(isWaitQuery(execOf('job_list', {})), true, 'listing ones own jobs is a status query');
+  assert.equal(isWaitQuery(execOf('job_list', { all: true })), false, 'and only its declared, argument-less shape is');
+  assert.equal(isWaitQuery(execOf('job_kill', { job_id: 'job-7' })), false, 'terminating a job is an action, not a wait');
+
+  // Counterexamples: only the tool's identity decides, so neither a command, an
+  // output, nor a suggestive name can talk its way into the exemption.
+  assert.equal(isWaitQuery(execOf('bash', { command: 'poll the job; wait; sleep 1' })), false);
+  assert.equal(isWaitQuery(execOf('wait', { job_id: 'job-7' })), false, 'a name that reads like a wait is not the Host job query');
+  assert.equal(isWaitQuery(execOf('job_output_wait', { job_id: 'job-7' })), false, 'and neither is a lookalike');
+  assert.equal(isWaitQuery(execOf('job_list', [])), false, 'an array is not an argument object');
+});
+
+test('a repeated background-job poll is never denied, corrected, or booked — in either mode', async () => {
+  const run = async (mode: 'observe' | 'active') => {
+    const stagnation = stagnationStub();
+    const engine = engineFor({ mode, capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
+    const agent = fakeAgent({ id: `poll-${mode}` });
+    const poll = (): ToolExecution => execOf('job_output', { job_id: 'job-42', wait: true }, agent);
+    const running = resultOf('build still running');
+    for (let index = 0; index < 5; index += 1) {
+      await engine.toolResult(poll(), running, async () => acceptOf(running));
+    }
+    // The sixth identical poll is proposed where an ordinary call would already
+    // be a repetition (five recorded plus one pending against a threshold of 3).
+    const decision = await engine.toolCall(poll(), async () => ({ kind: 'allow' }));
+    const messages = [message('still waiting')];
+    const step = (await engine.preStep(stepPayload(agent, 1, 6, messages), async () => ({
+      kind: 'enter' as const,
+      messages
+    }))) as { messages: UserMessage[] };
+    const report = engine.report()[mode];
+    const state = engine.stateOf(`poll-${mode}`)!;
+    return {
+      decision,
+      stepped: step.messages.length,
+      judgments: stagnation.calls.length,
+      plans: report.plans,
+      applied: report.applied,
+      booked: state.interventions,
+      steps: state.steps,
+      judgmentsSession: state.judgmentsSession,
+      waitSkips: engine.report().skips['wait-query'] ?? 0
+    };
+  };
+
+  const observed = await run('observe');
+  const acted = await run('active');
+  assert.deepEqual(observed.decision, { kind: 'allow' }, 'the repeated poll is not refused');
+  assert.deepEqual(observed, acted, 'observe plans exactly the nothing active would do');
+  assert.equal(observed.stepped, 1, 'no corrective context is attached after a wait');
+  assert.equal(observed.judgments, 0, 'no System 1 judgment is bought for a wait');
+  assert.equal(observed.plans, 0);
+  assert.equal(observed.applied, 0);
+  assert.equal(observed.booked, 0, 'and no intervention allowance is spent');
+  assert.equal(observed.judgmentsSession, 0, 'nor any judgment allowance');
+  assert.equal(observed.steps, 5, 'the polls are still recorded, so the audit trail stays complete');
+  assert.ok(observed.waitSkips >= 1, 'the exemption is reported rather than silently dropped');
+});
+
+test('a real loop either side of a wait is still refused at the unchanged threshold', async () => {
+  const stagnation = stagnationStub();
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
+  const agent = fakeAgent({ id: 'loop-across-wait' });
+  const command = execOf('bash', { command: 'npm test' }, agent);
+  const poll = execOf('job_output', { job_id: 'job-42', wait: true }, agent);
+  const ok = resultOf('1 failed, 11 passed');
+  await engine.toolResult(command, ok, async () => acceptOf(ok));
+  for (let index = 0; index < 4; index += 1) {
+    await engine.toolResult(poll, ok, async () => acceptOf(ok));
+  }
+  await engine.toolResult(command, ok, async () => acceptOf(ok));
+
+  // Without the exemption's window this proposal would count two trailing
+  // repeats — the waits sit between them — and slip through.
+  const denied = (await engine.toolCall(command, async () => ({ kind: 'allow' }))) as { kind: string; reason?: string };
+  assert.equal(denied.kind, 'deny', 'the third identical command is refused even with waits in between');
+  assert.match(denied.reason ?? '', /repetition/i);
+  assert.equal(stagnation.calls.length, 1);
+  assert.deepEqual(
+    stagnation.calls[0]!.map((step) => step.tool),
+    ['bash', 'bash', 'bash'],
+    'the judgment sees the loop, not the waits'
+  );
+
+  // The threshold and its contract are unchanged: a fresh, unrelated call is
+  // still allowed, and two repeats are still below the trigger.
+  const fresh = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
+  const other = fakeAgent({ id: 'fresh-threshold' });
+  const single = execOf('bash', { command: 'ls -la' }, other);
+  await fresh.toolResult(single, ok, async () => acceptOf(ok));
+  await fresh.toolResult(poll, ok, async () => acceptOf(ok));
+  assert.deepEqual(await fresh.toolCall(single, async () => ({ kind: 'allow' })), { kind: 'allow' }, 'two repeats are not stagnation');
+});
+
+test('output wording never earns the exemption: a command that prints wait, poll, or sleep is still a loop', async () => {
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } });
+  const agent = fakeAgent({ id: 'wording' });
+  const chatter = resultOf('poll the job, then wait; sleep 1 between reads');
+  const exec = execOf('bash', { command: 'curl -s /status' }, agent);
+  assert.equal(isWaitQuery(exec), false, 'the identity decides, not the words the result will carry');
+
+  await engine.toolResult(exec, chatter, async () => acceptOf(chatter));
+  await engine.toolResult(exec, chatter, async () => acceptOf(chatter));
+  const third = (await engine.toolCall(exec, async () => ({ kind: 'allow' }))) as { kind: string };
+  assert.equal(third.kind, 'deny', 'identical commands whose output says wait/sleep/poll are still refused');
+  assert.equal(engine.report().active.applied, 1);
+});
+
+test('off collects nothing, and the exemption never moves state or budget across agents', async () => {
+  const inert = engineFor({ mode: 'off' });
+  const quiet = fakeAgent({ id: 'inert' });
+  const ok = resultOf('ok');
+  for (let index = 0; index < 3; index += 1) {
+    await inert.toolResult(execOf('bash', { command: 'ls' }, quiet), ok, async () => acceptOf(ok));
+  }
+  assert.equal(inert.stateOf('inert'), undefined, 'off records no agent state at all');
+  assert.equal(inert.report().baseline.results, 0, 'and not even the baseline counter moves');
+  assert.deepEqual(
+    await inert.toolCall(execOf('bash', { command: 'ls' }, quiet), async () => ({ kind: 'allow' })),
+    { kind: 'allow' }
+  );
+
+  // A long wait of one agent leaves another agent's window and budget untouched.
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } });
+  const poller = fakeAgent({ id: 'poller' });
+  const stranger = fakeAgent({ id: 'stranger' });
+  const poll = execOf('job_output', { job_id: 'job-9', wait: true }, poller);
+  for (let index = 0; index < 8; index += 1) {
+    await engine.toolResult(poll, ok, async () => acceptOf(ok));
+  }
+  assert.equal(engine.stateOf('poller')!.interventions, 0, 'eight polls spend nothing');
+  assert.equal(engine.stateOf('poller')!.judgmentsSession, 0);
+  assert.equal(engine.stateOf('stranger'), undefined, 'and they created no state for anybody else');
+
+  const strangerExec = execOf('bash', { command: 'ls' }, stranger);
+  await engine.toolResult(strangerExec, ok, async () => acceptOf(ok));
+  await engine.toolResult(strangerExec, ok, async () => acceptOf(ok));
+  const third = (await engine.toolCall(strangerExec, async () => ({ kind: 'allow' }))) as { kind: string };
+  assert.equal(third.kind, 'deny', 'a fresh agent still reaches its own threshold');
+  assert.equal(engine.stateOf('stranger')!.interventions, 1, 'and books its own plan');
 });

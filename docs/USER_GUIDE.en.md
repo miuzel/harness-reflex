@@ -285,6 +285,28 @@ interventions:
 | `gate` | `tools/post-execute` | Rewrites the result into corrective feedback once one call has failed repeatedly; failure is read from the tool source's structured exit status or the Host's exit badge, never from wording |
 | `closing` | `agent/turn-stopping` | Re-checks the turn's claims against its evidence with `reflex_gate` and steers once when they contradict |
 
+### Why a legitimate wait is never treated as stagnation (the exemption default)
+
+Waiting on a background job is legitimate work, so `stagnation` exempts **structurally
+identifiable wait queries**. The decision reads two structured facts only — it never parses a
+tool's description and never reads any output text:
+
+1. **tool identity**: the call is one of the Host's own background-job query tools, `job_output`
+   or `job_list` (registered by `@deepseek-ai/dsh-tool-jobs`; the shell tools' background jobs go
+   through the same `job_output` verb);
+2. **call shape**: the arguments carry the job handle in the Host's own declared field — a
+   non-empty `job_id` string for `job_output`; `job_list` declares no parameters at all, so its
+   shape is the empty argument object.
+
+An exempt call is never refused, never gets corrective context, and spends none of the turn's
+intervention or judgment allowance; `observe` and `active` plan exactly the same thing. It is
+still recorded in the detection window, but it does not count as an unproductive repeat — the
+repetition, failing-retry, and oscillation triggers all skip it — so **a real loop does not
+disappear just because the run waited for a job in between**. `job_kill` is deliberately outside
+the exemption: it terminates a job rather than waiting for one. Output text that happens to
+contain `wait`, `sleep`, or `poll` earns nothing. The scope is the two tool names above; this is
+the documented default and needs no extra configuration.
+
 ### How to get a pruned original back
 
 `active` pruning retains first and replaces second, and that order is not a figure of speech:

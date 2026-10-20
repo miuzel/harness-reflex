@@ -327,6 +327,22 @@ const MUTATIONS = [
     file: 'src/interventions.ts',
     from: ['    this.#bookAction(state);', '    this.#conclude(', '      plan,'].join('\n'),
     to: ['    this.#conclude(', '      plan,'].join('\n')
+  },
+  // Stagnation exemptions for legitimate waits (g-012): the structured identity
+  // a wait is recognised by, and the window it must not dilute.
+  {
+    name: 'wait-exemption-ignores-shape',
+    area: 'a wait is identified by its tool and its job-handle shape',
+    file: 'src/interventions.ts',
+    from: "typeof args[field] === 'string' && (args[field] as string).length > 0",
+    to: 'true'
+  },
+  {
+    name: 'wait-steps-count-as-progress',
+    area: 'a wait is not progress a run can be repeating',
+    file: 'src/interventions.ts',
+    from: "return steps.some((step) => step.wait === true) ? steps.filter((step) => step.wait !== true) : steps;",
+    to: 'return steps;'
   }
 ];
 

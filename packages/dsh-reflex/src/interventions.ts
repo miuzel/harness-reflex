@@ -198,6 +198,70 @@ function callKeyOf(exec: ToolExecution): string {
   return typeof callId === 'string' && callId.length > 0 ? callId : exec.name;
 }
 
+/**
+ * The Host's background-job *query* tools, and the call shape each one needs
+ * before it counts as a legitimate wait.
+ *
+ * This is the documented default of the stagnation exemption, and it is
+ * deliberately identity-based rather than wording-based: the keys are the names
+ * the DSH Host itself registers for background jobs — `@deepseek-ai/dsh-tool-jobs`
+ * registers `job_output`, `job_list`, and `job_kill`, and the background modes
+ * of the shell tools hand their jobs to the same `job_output` verb. The
+ * tool's *description* is never parsed, and no result text is ever read, so an
+ * output that happens to contain `wait`, `sleep`, or `poll` earns nothing.
+ *
+ * The shape is the structured job handle the call is about, in the Host's own
+ * declared parameter name (`job_id`). `job_list` declares no parameters at all —
+ * it lists the caller's own jobs — so its shape is the empty argument object.
+ * `job_kill` is deliberately absent: it is a terminating action, not a query a
+ * waiting run repeats, and a run that repeats it is not waiting for anything.
+ */
+export const WAIT_QUERY_TOOLS: Readonly<Record<string, { handles: readonly string[]; argumentless?: boolean }>> = {
+  job_output: { handles: ['job_id'] },
+  job_list: { handles: [], argumentless: true }
+};
+
+/**
+ * One call's arguments as a plain object, or `undefined` when they are not one.
+ * @param exec - the execution.
+ * @returns the argument object, never an array or a primitive.
+ */
+function structuredArguments(exec: ToolExecution): Record<string, unknown> | undefined {
+  const raw: unknown = exec.arguments;
+  let value: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Whether one call is a legitimate wait rather than a candidate repetition.
+ *
+ * Two structured facts decide it, and nothing else: the tool's identity in
+ * {@link WAIT_QUERY_TOOLS}, and the argument shape that identity requires — a
+ * non-empty job handle in a string field the Host itself declares. A call that
+ * repeats the same handle is exactly the sanctioned poll of a background job, so
+ * its repetition carries no information about progress, while any other tool
+ * (however its output reads) is judged as before.
+ *
+ * @param exec - the call about to run.
+ * @returns whether the call is a wait query.
+ */
+export function isWaitQuery(exec: ToolExecution): boolean {
+  const shape = WAIT_QUERY_TOOLS[exec.name];
+  if (!shape) return false;
+  const args = structuredArguments(exec);
+  if (!args) return false;
+  if (shape.argumentless === true) return Object.keys(args).length === 0;
+  return shape.handles.some((field) => typeof args[field] === 'string' && (args[field] as string).length > 0);
+}
+
 /** One step of one agent's detection window. */
 interface ObservedStep {
   /** `tool:argumentsDigest` — the identity a repetition is measured on. */
@@ -209,6 +273,24 @@ interface ObservedStep {
   failed: boolean;
   turn: number;
   at: number;
+  /** Whether the step was a legitimate wait query (see {@link isWaitQuery}). */
+  wait?: boolean;
+}
+
+/**
+ * The window a stagnation trigger and its judgment are measured on.
+ *
+ * A wait query is not progress the run can be repeating: an identically repeated
+ * status/result query of the same background job is the sanctioned way to wait,
+ * so those steps are dropped before the repetition, failure, and oscillation
+ * triggers read the window. Genuine calls on either side of a wait stay adjacent
+ * instead of being separated by it, which is what keeps a real loop visible
+ * while a run is waiting.
+ * @param steps - observed steps, oldest first.
+ * @returns the steps that count as progress.
+ */
+function progressSteps(steps: readonly ObservedStep[]): readonly ObservedStep[] {
+  return steps.some((step) => step.wait === true) ? steps.filter((step) => step.wait !== true) : steps;
 }
 
 /** One agent's detection state, budgets, and counters. */
@@ -1149,6 +1231,14 @@ export class InterventionEngine {
     const capability = this.modeOf('stagnation');
     if (capability === 'off' || !this.config.enabled) return downstream;
     if (this.#ownTools.has(exec.name)) return downstream;
+    // A legitimate wait is never a stagnation episode: the same status/result
+    // query of the same background job is the sanctioned way to wait, so it is
+    // not judged, planned, refused, or booked against the turn's allowance —
+    // and observe measures exactly the same nothing that active would do.
+    if (isWaitQuery(exec)) {
+      this.#skip('wait-query');
+      return downstream;
+    }
     if (exec.signal?.aborted) return downstream;
 
     const started = this.#now();
@@ -1161,7 +1251,12 @@ export class InterventionEngine {
       // judgment has to see all three. The pending entry is local — it is not
       // committed to the agent's history, which the result records for real.
       const pending = this.#observed(state, exec, signature);
-      const suspicion = suspicionOf([...state.steps, pending], {
+      // Wait queries already in the window are dropped: they are not progress
+      // the run could be repeating, and keeping them would both hide a real loop
+      // that waits between its attempts and manufacture an oscillation out of
+      // two identical polls.
+      const window = progressSteps([...state.steps, pending]);
+      const suspicion = suspicionOf(window, {
         repeatThreshold: this.config.repeatThreshold,
         failureThreshold: this.config.failureThreshold,
         window: this.config.windowSize,
@@ -1177,7 +1272,7 @@ export class InterventionEngine {
         return downstream;
       }
 
-      const verdict = await this.#judge(state, exec.signal, [...state.steps, pending]);
+      const verdict = await this.#judge(state, exec.signal, window);
       const judgment = this.#judgmentCharge(verdict, started, this.#now());
       // Denial is latched per signature whether or not it was applied: in observe
       // mode the refusal is what would have happened, and `denied` is what keeps
@@ -1264,7 +1359,8 @@ export class InterventionEngine {
         error: failed ? clip(this.#errorOf(result), STEP_CHARS) : '',
         failed,
         turn: state.turn,
-        at: this.#now()
+        at: this.#now(),
+        wait: isWaitQuery(exec)
       });
 
       this.#baseline.results += 1;
@@ -1321,8 +1417,15 @@ export class InterventionEngine {
       if (capability === 'off' || !this.config.enabled) return downstream;
       if (payload.signal?.aborted || downstream.kind !== 'enter') return downstream;
 
-      const signature = state.steps[state.steps.length - 1]?.signature;
-      if (signature === undefined) return downstream;
+      const last = state.steps[state.steps.length - 1];
+      if (last === undefined) return downstream;
+      // A step entered right after a legitimate wait has nothing to correct: the
+      // run asked about a background job again, it did not repeat its work.
+      if (last.wait === true) {
+        this.#skip('wait-query');
+        return downstream;
+      }
+      const signature = last.signature;
       if (state.applied.has(`stagnation:${signature}`)) {
         this.#skip('duplicate-intervention');
         return downstream;
@@ -1331,7 +1434,10 @@ export class InterventionEngine {
         this.#skip('intervention-cap');
         return downstream;
       }
-      const suspicion = suspicionOf(state.steps, {
+      // The same window the pre-execute trigger measures: waits are not progress
+      // to count, so a real loop either side of them is still one loop.
+      const window = progressSteps(state.steps);
+      const suspicion = suspicionOf(window, {
         repeatThreshold: this.config.repeatThreshold,
         failureThreshold: this.config.failureThreshold,
         window: this.config.windowSize,
@@ -1339,7 +1445,7 @@ export class InterventionEngine {
       });
       if (!suspicion.suspicious) return downstream;
 
-      const verdict = await this.#judge(state, payload.signal);
+      const verdict = await this.#judge(state, payload.signal, window);
       const judgment = this.#judgmentCharge(verdict, started, this.#now());
       if (!verdict.useful) {
         this.#charge('stagnation', judgment);

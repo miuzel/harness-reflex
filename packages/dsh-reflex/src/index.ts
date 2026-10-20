@@ -43,7 +43,7 @@ export {
   resolveInterventionsConfig
 } from './config.js';
 export type { InterventionCapability, InterventionMode, InterventionSetting, ReflexInterventionsConfig, ResolvedInterventionsConfig } from './config.js';
-export { INTERVENTION_SOURCE_KIND, InterventionEngine, installInterventions } from './interventions.js';
+export { INTERVENTION_SOURCE_KIND, InterventionEngine, WAIT_QUERY_TOOLS, installInterventions, isWaitQuery } from './interventions.js';
 export type {
   InterventionAction,
   InterventionBaseline,
