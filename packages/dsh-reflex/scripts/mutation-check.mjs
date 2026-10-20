@@ -14,8 +14,8 @@
  * cache-affinity layer: the context size the decision is told, the policy it is
  * given, the sticky gate that keeps a warm session in place, the affinity fields
  * the router audits, the per-session memory the routing layer keeps, and the
- * panel projection of the switch flag) — and
- * requires the suite to fail for each.
+ * panel projection of the switch flag, the per-tool switches, and the effort
+ * capability switch) — and requires the suite to fail for each.
  *
  * Usage: `npm run test:mutation` (from the repository root).
  * Exit code 0 = every fault was caught; 1 = at least one fault survived, or the
@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 284;
+const EXPECTED_TESTS = 328;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -343,6 +343,24 @@ const MUTATIONS = [
     file: 'src/interventions.ts',
     from: "return steps.some((step) => step.wait === true) ? steps.filter((step) => step.wait !== true) : steps;",
     to: 'return steps;'
+  },
+  // The two capability switches (g-009): the effort layer's on/off answer, and
+  // the per-tool one. Each fault disables the switch itself, not a downstream
+  // behaviour, so only a suite that actually exercises the *off* branch of that
+  // switch can go red.
+  {
+    name: 'effort-switch-always-on',
+    area: 'the effort capability switch can turn the layer off',
+    file: 'src/config.ts',
+    from: '  const effortEnabled = effort.enabled ?? true;',
+    to: '  const effortEnabled = true;'
+  },
+  {
+    name: 'tool-switch-ignores-close',
+    area: 'a switched-off tool is not registered',
+    file: 'src/tools.ts',
+    from: '  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] !== false);',
+    to: '  return [...REFLEX_TOOL_SUFFIXES];'
   }
 ];
 
