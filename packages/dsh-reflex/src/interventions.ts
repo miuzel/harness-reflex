@@ -1604,9 +1604,13 @@ export class InterventionEngine {
           }
         // Both modes take the *real* candidate: `shadow` only decides whether the
         // backend hands its text back, while `prunedChars` is that candidate's size
-        // either way. Observe needs the same text active installs to compose the
-        // same form, so it asks for the same reduction and not for a measurement.
-        : await this.#prune.prune(text, { intent: this.config.intent });
+        // either way. Observe needs the same text active installs to compose the same
+        // form, so it asks for the same reduction — but it installs nothing, so it
+        // asks for it *measure-only*: the ledger keeps saying that no token has left
+        // the context yet, and only active, which really replaces the result, books
+        // the saving. (A withheld `shadowMode` measurement would hand back the raw
+        // text, which is not the input the floor composes from.)
+        : await this.#prune.prune(text, { intent: this.config.intent, measureOnly: capability !== 'active' });
 
     const originalTokens = estimateTokens(text);
     // One composition, both modes: the floored text the plan describes is the text

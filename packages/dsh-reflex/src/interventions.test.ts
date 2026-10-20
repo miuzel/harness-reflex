@@ -1831,18 +1831,26 @@ test('the real pruning service keeps observe and active on one form, one cost, o
   const actedPrunes = acted.ledger.filter((entry) => entry.type === 'prune');
   assert.equal(observedPrunes.length, actedPrunes.length, 'the service is called the same number of times');
   assert.equal(observedPrunes.length, 1, 'the second identical payload was answered from the memo, not from the service');
-  assert.equal(observedPrunes.every((entry) => entry.shadow === false), true, 'observe asks for the real reduction too');
+  assert.equal(observedPrunes.every((entry) => entry.shadow === true), true, 'observe asks for a measure-only reduction');
+  assert.equal(actedPrunes.every((entry) => entry.shadow === false), true, 'active asks for the real one it may install');
   assert.deepEqual(
-    observedPrunes.map((entry) => [entry.original, entry.pruned, entry.saved]),
-    actedPrunes.map((entry) => [entry.original, entry.pruned, entry.saved]),
-    'both modes read the same payload, the same candidate and the same candidate size'
+    observedPrunes.map((entry) => [entry.original, entry.pruned]),
+    actedPrunes.map((entry) => [entry.original, entry.pruned]),
+    'both modes read the same payload and the same candidate'
   );
   assert.ok(actedPrunes.every((entry) => entry.saved! > 0), 'the service really did reduce the payload');
-  // `tokensSaved` there is the service's measure of the reduction it produced, not a
-  // claim about what a mode installed: active already books a candidate the floor may
-  // refuse to install, and observe books the one it measured. What each mode really
-  // did is booked in the intervention columns asserted above — observe saved nothing
-  // for real, and active saved exactly the form it installed.
+  // `measureOnly` hands observe the candidate and still books no saving: the text is
+  // there to plan with, the number says nothing has left the context yet, and the
+  // candidate's size stays readable next to the zero. Active books the reduction the
+  // service produced, which for this payload is exactly the form it installs — so the
+  // number observe did not install is the number active really saved.
+  assert.deepEqual(observedPrunes.map((entry) => entry.saved), [0], 'a measured reduction saves nothing');
+  assert.deepEqual(
+    observedPrunes.map((entry) => entry.candidate),
+    actedPrunes.map((entry) => entry.saved),
+    'the candidate observe measured is the saving active booked'
+  );
+  assert.ok(observedPrunes.every((entry) => entry.candidate! > 0), 'and that candidate is still readable');
   assert.equal(observed.report.observe.actualSavedTokens, 0, 'the observe column stays honest');
   assert.equal(
     acted.report.active.actualSavedTokens,
@@ -1860,6 +1868,96 @@ test('the real pruning service keeps observe and active on one form, one cost, o
     'both modes book the same plan, provenance included'
   );
   assert.deepEqual(observed.records.map((record) => record.floorApplied), [true, true], 'the plan and its memo hit both carry the floor');
+});
+
+test('observe asks the service to measure only, and active to reduce for real', async () => {
+  const delegate = pruneStub((raw) => raw.slice(0, 40));
+  const seen: Array<{ intent?: string; measureOnly?: boolean; shadowMode?: boolean }> = [];
+  const run = async (mode: 'observe' | 'active') => {
+    seen.length = 0;
+    const engine = engineFor(
+      { mode },
+      {
+        prune: {
+          prune: async (raw: string, options?: { intent?: string; measureOnly?: boolean; shadowMode?: boolean }) => {
+            seen.push(options ?? {});
+            const response = await delegate.prune(raw);
+            // Only `shadowMode` withholds the candidate's text; a measure-only caller
+            // is handed the candidate it asked to see.
+            return { ...response, shadow: options?.shadowMode === true };
+          }
+        } as InterventionEngineOptions['prune']
+      }
+    );
+    const agent = fakeAgent({ id: `ask-${mode}` });
+    const messages = [message('go')];
+    await engine.preStep(stepPayload(agent, 1, 1, messages), async () => ({ kind: 'enter' as const, messages }));
+    await engine.toolResult(execOf('bash', { command: 'build' }, agent), resultOf(REDUCIBLE_RESULT), async () =>
+      acceptOf(resultOf(REDUCIBLE_RESULT))
+    );
+    return engine.report();
+  };
+
+  await run('observe');
+  assert.deepEqual(
+    seen,
+    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true }],
+    'observe installs nothing, so it asks for a measurement that still hands the candidate back'
+  );
+  await run('active');
+  assert.deepEqual(
+    seen,
+    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: false }],
+    'active may install, so it asks for the reduction itself'
+  );
+});
+
+test('an active reduction the engine refuses to install books nothing, whatever the service measured', async () => {
+  const ctx = await createToolContext();
+  try {
+    const runtime = applyReflex(ctx, { backend: 'mock', interventions: { mode: 'active' } });
+    const session = Session.create('refused-install' as SessionId);
+    const agent = { ...fakeAgent({ id: 'refused-install' }), session } as unknown as Agent;
+    const events = agentEvents(ctx, agent);
+    const messages = [message('go')];
+    await events.waterfall(
+      'agent/pre-step',
+      { turn: 1, step: 1, signal: new AbortController().signal, messages } as never,
+      async () => ({ kind: 'enter' as const, messages })
+    );
+    // A trace the service really reduces — one runaway progress line it drops whole —
+    // but whose aligned form would be bigger than the payload it replaces: taking that
+    // line whole, plus the marker, plus the tail, overshoots the original. The floor
+    // refuses rather than install a form that grew.
+    const payload = [
+      `=] progress 0 [${'='.repeat(1200)}]`,
+      'at /repo/src/file0.ts:1:1 warning unused variable',
+      'at /repo/src/file1.ts:2:1 warning unused variable',
+      'at /repo/src/file2.ts:3:1 warning unused variable',
+      'at /repo/src/file3.ts:4:1 warning unused variable',
+      'build finished ok'
+    ].join('\n');
+    const decision = await runtime.interventions!.toolResult(
+      execOf('bash', { command: 'build' }, agent),
+      resultOf(payload),
+      async () => acceptOf(resultOf(payload))
+    );
+    const report = runtime.interventions!.report();
+    assert.equal(installedText(decision as { content?: unknown }), payload, 'the payload is handed on untouched');
+    assert.equal(report.active.applied, 0, 'nothing was installed');
+    assert.equal(report.active.actualSavedTokens, 0, 'so nothing was saved');
+    assert.equal(report.active.potentialSavedTokens, 0, 'and nothing was planned as a saving either');
+    assert.ok((report.skips['no-reduction'] ?? 0) >= 1, 'the refusal is a skip, not a saving');
+    // The service ledger is written inside the call, before the engine decides, and
+    // cannot be retracted: it still books the reduction the service produced. That
+    // number measures the service; the installation truth is the zero above.
+    const measured = runtime.ledger.getEntries().filter((entry) => entry.type === 'prune');
+    assert.equal(measured.length, 1, 'the service was asked once');
+    assert.equal(measured[0]!.shadow, false, 'active does not ask for a measurement');
+    assert.ok(measured[0]!.tokensSaved! > 0, 'the service did reduce the payload it was shown');
+  } finally {
+    await ctx.fiber.dispose();
+  }
 });
 
 test('the observe column really has no latch of its own: mode changes the effect, never the plan', async () => {

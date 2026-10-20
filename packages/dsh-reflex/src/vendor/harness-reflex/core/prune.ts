@@ -5,6 +5,16 @@ export interface PruneOptions {
   intent?: string;
   maxTokens?: number;
   shadowMode?: boolean;
+  /**
+   * Hand the real candidate back, but do not book it as a saving.
+   *
+   * A caller that is still deciding needs the candidate's *text*, which `shadowMode`
+   * withholds; a caller that has installed nothing must not be reported as having
+   * saved tokens. `measureOnly` is both at once: `processedOutput` carries the
+   * candidate, while the ledger keeps `tokensSaved` at 0 and the candidate's size in
+   * `details.potentialTokensSaved`, exactly as it does for a shadow measurement.
+   */
+  measureOnly?: boolean;
   minCharsThreshold?: number;
 }
 
@@ -57,6 +67,12 @@ export class ToolResultPruner {
         latencyMs: 0
       };
     }
+
+    // A measure-only caller gets the candidate's text but has installed nothing, so
+    // the measurement is recorded as what it is: not a saving. Marking it here keeps
+    // the ledger's own rule — a shadowed measurement never claims one — and leaves
+    // `processedOutput` untouched.
+    if (options?.measureOnly) result = { ...result, shadow: true };
 
     this.ledger.record({
       type: 'prune',
