@@ -463,11 +463,19 @@ export function failureOf(result: Readonly<ToolExecutionResult> | undefined, tex
   return exitMarkerFailure(text);
 }
 
-/** The floor decision of one reduction, computed from lengths alone. */
+/**
+ * The floor decision of one reduction, computed from lengths alone.
+ *
+ * {@link pruneFloorPlan} returns the *decision*: whether the floor applies and
+ * the size that decision was modelled on. {@link applyPruneFloor} returns the
+ * same decision next to the size the composed text *really* has, because line
+ * alignment and duplicate removal move that size. Callers account for the text
+ * a mode really installs, so the composed numbers are the authoritative ones.
+ */
 export interface PruneFloorPlan {
   /** Whether the floor form replaces the judged candidate. */
   floored: boolean;
-  /** Characters the installed text will carry. */
+  /** Characters the installed text carries: modelled by the plan, real once composed. */
   resultChars: number;
   /** Characters the installed form does not carry. */
   omittedChars: number;
@@ -601,6 +609,127 @@ export function pruneMarker(locator: string): string {
   return `\n… [reflex prune: full original retrievable as ${locator}] …\n`;
 }
 
+/** Split one payload into whole lines, the terminator kept with its line. */
+function floorLines(text: string): string[] {
+  return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+
+/** The identity of one line for the duplicate test: its text without its terminator. */
+function floorLineIdentity(line: string): string {
+  return line.replace(/\r?\n$/, '').replace(/\r$/, '');
+}
+
+/**
+ * How many whole lines of the head a budget can pay for.
+ *
+ * The head never crosses its budget and never stops inside a line: a cut that
+ * cannot pay for the next line stops before it, so the kept prefix is always a
+ * run of complete lines.
+ * @param lines - the payload, split into whole lines.
+ * @param budget - characters the head may spend.
+ * @returns the number of lines to keep from the top.
+ */
+function alignedHeadLines(lines: readonly string[], budget: number): number {
+  let used = 0;
+  let count = 0;
+  for (const line of lines) {
+    if (used + line.length > budget) break;
+    used += line.length;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * How many whole lines of the tail a budget needs.
+ *
+ * The tail is the *shortest* run of complete lines from the end that still
+ * carries the budget. A payload whose lines are longer than the budget cannot
+ * honour it with a line-aligned suffix; the caller refuses instead of cutting
+ * one, because half a line is not a shorter answer but a broken one.
+ * @param lines - the payload, split into whole lines.
+ * @param budget - characters the tail must carry.
+ * @returns the number of lines to keep from the bottom.
+ */
+function alignedTailLines(lines: readonly string[], budget: number): number {
+  if (budget <= 0) return 0;
+  let used = 0;
+  let count = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    used += lines[index]!.length;
+    count += 1;
+    if (used >= budget) break;
+  }
+  return count;
+}
+
+/**
+ * Drop the candidate lines the kept context already shows verbatim.
+ *
+ * The judgment reads the whole payload, so its extract repeats the lines a
+ * reader can already see around it — `BEGIN`, `RESULT`, `END` in the trace that
+ * prompted this. Repeating them is pure cost: the same line twice in one
+ * message. Removal is per line and verbatim, so a diagnostic the context does
+ * *not* carry always survives.
+ * @param candidate - the judged extract.
+ * @param head - the kept head.
+ * @param tail - the kept tail.
+ * @returns the candidate without the lines the context already shows.
+ */
+function dedupeCandidateLines(candidate: string, head: string, tail: string): string {
+  const seen = new Set([...floorLines(head), ...floorLines(tail)].map(floorLineIdentity));
+  const lines = floorLines(candidate);
+  if (seen.size === 0 || lines.length === 0) return candidate;
+  return lines.filter((line) => !seen.has(floorLineIdentity(line))).join('');
+}
+
+/** One composed floor form and the sizes it really kept. */
+interface ComposedFloor {
+  text: string;
+  headChars: number;
+  tailChars: number;
+  markerChars: number;
+}
+
+/**
+ * Compose one floored form out of whole lines of the original.
+ * @param lines - the original, split into whole lines.
+ * @param headCount - lines kept from the top.
+ * @param tailCount - lines kept from the bottom.
+ * @param candidate - the judged extract.
+ * @param marker - the locator marker.
+ * @param secondMarker - the closing marker, or `''` when the share cannot pay for it.
+ * @returns the installed text and the sizes it really carries.
+ */
+function composeFloorLines(
+  lines: readonly string[],
+  headCount: number,
+  tailCount: number,
+  candidate: string,
+  marker: string,
+  secondMarker: string
+): ComposedFloor {
+  const head = lines.slice(0, headCount).join('');
+  const tail = tailCount === 0 ? '' : lines.slice(lines.length - tailCount).join('');
+  const middle = dedupeCandidateLines(candidate, head, tail);
+  // The marker opens with a newline so it sits on its own line after the head.
+  // With no head there is nothing to separate it from, and a leading blank line
+  // would be the first thing a reader sees.
+  const lead = head.length === 0 ? marker.replace(/^\n/, '') : marker;
+  const closing = middle.length === 0 ? '' : secondMarker;
+  return {
+    text: `${head}${lead}${middle}${closing}${tail}`,
+    headChars: head.length,
+    tailChars: tail.length,
+    markerChars: lead.length + closing.length
+  };
+}
+
+/** The plan of a reduction the composition refused: the original, untouched. */
+function refusedFloor(original: string): PruneFloorPlan & { text: string } {
+  return { ...idleFloorPlan(original.length), text: original };
+}
+
 /**
  * Enforce the deterministic floor of a judged reduction.
  *
@@ -612,10 +741,16 @@ export function pruneMarker(locator: string): string {
  * A candidate that is not actually smaller is refused outright, so a "reduction"
  * can never grow the context.
  *
- * The composition is exactly the {@link pruneFloorPlan} of the same lengths, with
- * the marker length taken from the locator the caller will publish. A payload
- * this function cannot install — no text blocks, a locator that would not fit —
- * is reported through the plan rather than through a silent short write.
+ * The context is composed out of *whole lines* of the original, never out of
+ * character slices: a cut that lands mid-line leaves the reader a fragment like
+ * `=] progress 092`, which is not a shorter answer but a broken one. The head is
+ * the longest run of complete lines its budget can pay for, the tail the shortest
+ * run of complete lines that still carries its own, and any candidate line the
+ * kept context already shows verbatim is dropped as a duplicate. Alignment and
+ * removal move the real size, so the decision's modelled size is replaced here by
+ * the size the text really has: a form that would fall short of the promised
+ * share, or that would not be smaller than the original at all, is refused and
+ * the original returned rather than installed short or as half-lines.
  *
  * @param original - the raw payload.
  * @param candidate - the judged reduction.
@@ -632,10 +767,54 @@ export function applyPruneFloor(
   if (!plan.floored) {
     return { ...plan, text: plan.resultChars === candidate.length ? candidate : original };
   }
-  const head = original.slice(0, plan.headChars);
-  const tail = plan.tailChars === 0 ? '' : original.slice(original.length - plan.tailChars);
-  const text = `${head}${marker}${candidate}${plan.markerChars > marker.length ? marker : ''}${tail}`;
-  return { ...plan, text };
+  const lines = floorLines(original);
+  const share = Math.min(1, Math.max(0, options.floorRatio));
+  const target = Math.ceil(original.length * share);
+  const secondMarker = plan.markerChars > marker.length ? marker : '';
+  let headCount = alignedHeadLines(lines, plan.headChars);
+  if (headCount === 0 && plan.headChars > 0 && lines.length > 0) {
+    // A first line longer than the head budget: taking it whole keeps a real line
+    // where a cut could only produce a fragment. Whether the enlarged form is
+    // installable at all is decided by the size checks below.
+    headCount = 1;
+  }
+  let tailCount = alignedTailLines(lines, plan.tailChars);
+  if (headCount + tailCount > lines.length) return refusedFloor(original);
+  let composed = composeFloorLines(lines, headCount, tailCount, candidate, marker, secondMarker);
+  // The share is a promise, and rounding to a boundary or dropping duplicates can
+  // fall short of it: widen by whole lines until the form really carries the
+  // share. A payload with no room left is refused by the checks below, never
+  // installed short.
+  while (composed.text.length < target) {
+    // Grow the smaller side first, so the two keep their configured proportion.
+    const order = composed.headChars <= composed.tailChars ? [0, 1] : [1, 0];
+    let grew = false;
+    for (const side of order) {
+      const nextHead = side === 0 ? headCount + 1 : headCount;
+      const nextTail = side === 1 ? tailCount + 1 : tailCount;
+      if (nextHead + nextTail > lines.length) continue;
+      const next = composeFloorLines(lines, nextHead, nextTail, candidate, marker, secondMarker);
+      if (next.text.length <= composed.text.length) continue;
+      headCount = nextHead;
+      tailCount = nextTail;
+      composed = next;
+      grew = true;
+      break;
+    }
+    if (!grew) break;
+  }
+  if (composed.text.length >= original.length || composed.text.length < target) {
+    return refusedFloor(original);
+  }
+  return {
+    ...plan,
+    resultChars: composed.text.length,
+    omittedChars: original.length - composed.text.length,
+    headChars: composed.headChars,
+    tailChars: composed.tailChars,
+    markerChars: composed.markerChars,
+    text: composed.text
+  };
 }
 
 /**
@@ -1423,19 +1602,32 @@ export class InterventionEngine {
             shadow: memo.text === undefined,
             latencyMs: 0
           }
-        : await this.#prune.prune(text, { intent: this.config.intent, shadowMode: capability !== 'active' });
+        // Both modes take the *real* candidate: `shadow` only decides whether the
+        // backend hands its text back, while `prunedChars` is that candidate's size
+        // either way. Observe needs the same text active installs to compose the
+        // same form, so it asks for the same reduction and not for a measurement.
+        : await this.#prune.prune(text, { intent: this.config.intent });
 
     const originalTokens = estimateTokens(text);
-    // `prunedChars` describes the candidate in *both* modes: a shadow measurement
-    // withholds the candidate's text but still reports its size, which is what lets
-    // observe plan — and pay for — the reduction active would install.
-    const floor = pruneFloorPlan(text.length, response.prunedChars, {
+    // One composition, both modes: the floored text the plan describes is the text
+    // active installs, byte for byte. Line alignment and duplicate removal move its
+    // real size away from the modelled one, so the number both modes account for is
+    // the length of the composed text — never a prediction about it.
+    const composed = applyPruneFloor(text, response.processedOutput, {
       floorRatio: this.config.pruneFloorRatio,
       headChars: this.config.pruneHeadChars,
       tailChars: this.config.pruneTailChars,
-      markerChars: pruneMarker(locator).length
+      locator
     });
-    const candidateTokens = Math.ceil(floor.resultChars / 4);
+    const candidateTokens = Math.ceil(composed.text.length / 4);
+    // A memo hit hands back a form that was composed for this payload already. It is
+    // its own fixed point — it carries the share, so the plan of the same lengths
+    // stays "not floored" and gives that text straight back — but its provenance is
+    // not readable from those lengths any more. The memo, which was written by the
+    // composition, answers for it: without this the audit would report a floored
+    // install as an unfloored one and flip the wording of the feedback with it.
+    const reusedFromMemo = !needsCandidate && memo?.text !== undefined ? memo : undefined;
+    const floorApplied = reusedFromMemo ? reusedFromMemo.floored : composed.floored;
     const judged = !memo || needsCandidate;
     const judgment: JudgmentCharge = {
       judgments: judged ? 1 : 0,
@@ -1456,10 +1648,10 @@ export class InterventionEngine {
       capability: 'prune',
       action: 'prune-result',
       reason: `${exec.name} returned ${originalTokens} tokens; the judged reduction carries ${candidateTokens}`,
-      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, floor.floored),
+      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, floorApplied),
       detail: {
         digest,
-        floorApplied: floor.floored,
+        floorApplied,
         confidence: response.reductionPercentage,
         turn: state.turn,
         step: state.step
@@ -1469,17 +1661,19 @@ export class InterventionEngine {
 
     if (capability !== 'active') {
       // Observe: the plan is real and charged, the surface is untouched, and the
-      // memo keeps the plan — never a reduction this mode never saw. A plan this
-      // mode records is the action active would have taken, so it books the slot
-      // active would have booked.
+      // memo keeps the composed form — the same form active would install, from the
+      // same candidate — so a later hit reports the reduction this mode really saw.
+      // A plan this mode records is the action active would have taken, so it books
+      // the slot active would have booked.
       this.#bookAction(state);
       this.#conclude(plan, false, exec.agent, planCosts, judgment);
       if (!memo) {
         this.#memoSet(state, digest, {
+          text: composed.text,
           originalChars: text.length,
-          prunedChars: floor.resultChars,
+          prunedChars: composed.text.length,
           tokensSaved: originalTokens - candidateTokens,
-          floored: floor.floored
+          floored: floorApplied
         });
       }
       return downstream;
@@ -1508,15 +1702,21 @@ export class InterventionEngine {
       return downstream;
     }
 
-    // The composition uses the locator the sink really published, which is what a
-    // reader has to type to recover the original; in production it is the same
-    // string the plan was built from, so the sizes agree exactly.
-    const installed = applyPruneFloor(text, memo?.text ?? response.processedOutput, {
-      floorRatio: this.config.pruneFloorRatio,
-      headChars: this.config.pruneHeadChars,
-      tailChars: this.config.pruneTailChars,
-      locator: retention.locator
-    });
+    // The form both modes accounted for is the form that gets installed: the locator
+    // is derived from the payload and the sink names its copy the same way, so the
+    // composition already published is reused byte for byte — with the provenance the
+    // plan gave it, rather than with what re-reading its own lengths would say. Only a
+    // sink that named the copy differently forces a rebuild, and then the real length
+    // and provenance of that rebuild are what gets accounted for.
+    const installed =
+      retention.locator === locator
+        ? { ...composed, floored: floorApplied }
+        : applyPruneFloor(text, response.processedOutput, {
+            floorRatio: this.config.pruneFloorRatio,
+            headChars: this.config.pruneHeadChars,
+            tailChars: this.config.pruneTailChars,
+            locator: retention.locator
+          });
     if (installed.text.length === 0 || installed.text.length >= text.length) {
       // The plan said the form is smaller; the form that was really built must be
       // too, or nothing is installed and nothing is saved.

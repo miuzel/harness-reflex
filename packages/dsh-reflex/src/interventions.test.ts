@@ -1059,10 +1059,12 @@ test('a floored reduction honours the share, keeps the judged middle, and names 
   assert.equal(plan.omittedChars, original.length - plan.resultChars);
 
   const floored = applyPruneFloor(original, judged, { floorRatio: 0.5, headChars: 500, tailChars: 500, locator });
-  assert.equal(floored.text.length, plan.resultChars, 'the plan predicted the installed size exactly');
+  assert.equal(floored.resultChars, floored.text.length, 'the returned plan reports the size the text really has');
   assert.equal(floored.floored, true);
   assert.ok(floored.text.startsWith(original.slice(0, floored.headChars)), 'the head survives verbatim');
   assert.ok(floored.text.endsWith(original.slice(original.length - floored.tailChars)), 'so does the tail');
+  assert.equal(original[floored.headChars - 1], '\n', 'the head ends where a line ends, never inside one');
+  assert.equal(original[original.length - floored.tailChars - 1], '\n', 'and the tail starts where a line starts');
   assert.ok(floored.text.includes(key), 'the middle diagnostic the judgment kept is not dropped by the floor');
   assert.ok(floored.text.includes(locator), 'the installed form says where the original is');
   assert.ok(floored.text.length >= Math.ceil(original.length * 0.5));
@@ -1088,8 +1090,159 @@ test('a floored reduction honours the share, keeps the judged middle, and names 
   assert.deepEqual(engine.report().retained.locators, [locator]);
 });
 
-test('a candidate that is not actually smaller is refused', async () => {
-  const engine = engineFor({ mode: 'active' }, { prune: pruneStub((raw) => `${raw}${raw}`) });
+test('the floor keeps whole lines, so no cut can leave a fragment of one behind', () => {
+  // The payload of the report that opened this: progress lines that begin with their
+  // own prefix, which a character slice cuts through the middle of — the reader saw
+  // `=] progress 092` where a whole line used to be.
+  const lines = Array.from({ length: 40 }, (_, index) => `=] progress ${String(index).padStart(3, '0')} ${'x'.repeat(40)}\n`);
+  const original = lines.join('');
+  const judged = 'KEY: cannot open shared object file\n';
+  const locator = locatorOf(original);
+  const floored = applyPruneFloor(original, judged, { floorRatio: 0.5, headChars: 400, tailChars: 400, locator });
+
+  assert.equal(floored.floored, true, 'a candidate far below the share is floored, not discarded');
+  assert.ok(floored.headChars > 0 && floored.tailChars > 0, 'both sides kept something');
+  assert.equal(original[floored.headChars - 1], '\n', 'the head stops at a line end, never inside a line');
+  assert.equal(original[original.length - floored.tailChars - 1], '\n', 'the tail starts at a line start');
+  // Every line the head kept is a whole line of the original…
+  const headText = floored.text.slice(0, floored.headChars);
+  assert.equal(headText.endsWith('\n'), true);
+  for (const line of headText.split('\n').slice(0, -1)) {
+    assert.equal(original.includes(`${line}\n`), true, `the head kept a whole line: ${line}`);
+  }
+  // …and the line the budget landed inside is dropped whole rather than trimmed: the
+  // fragment the report quoted must not appear anywhere in the installed form.
+  const straddled = original.slice(floored.headChars, original.indexOf('\n', floored.headChars));
+  assert.ok(straddled.startsWith('=] progress'), 'the head budget really lands inside a prefixed progress line');
+  assert.equal(floored.text.includes(straddled), false, 'that line is neither kept nor half-kept');
+  assert.equal(floored.text.includes('=] progress 006'), true, 'the last whole line inside the budget is kept');
+  assert.equal(floored.text.includes('=] progress 039'), true, 'and the tail keeps the last line');
+  assert.equal(floored.text.includes(judged.trim()), true, 'the judgment’s own extract survives the floor');
+  assert.ok(floored.text.length >= Math.ceil(original.length * 0.5), 'the promised share is really carried');
+  assert.ok(floored.text.length < original.length, 'and the form is still a reduction');
+});
+
+test('a CRLF payload keeps whole lines too, and never strands a carriage return', () => {
+  const lines = Array.from({ length: 40 }, (_, index) => `row ${String(index).padStart(2, '0')} ${'r'.repeat(50)}\r\n`);
+  const original = lines.join('');
+  const judged = 'KEY: crlf diagnostic\r\n';
+  const locator = locatorOf(original);
+  const floored = applyPruneFloor(original, judged, { floorRatio: 0.5, headChars: 400, tailChars: 400, locator });
+
+  assert.equal(floored.floored, true);
+  assert.equal(original[floored.headChars - 1], '\n', 'the head ends after a terminator');
+  assert.equal(original[floored.headChars - 2], '\r', 'and the terminator it ends after is the whole CRLF');
+  assert.equal(original[original.length - floored.tailChars - 1], '\n', 'the tail begins after a terminator');
+  assert.equal(original[original.length - floored.tailChars - 2], '\r');
+  assert.equal(/\r(?!\n)/.test(floored.text), false, 'no bare carriage return is stranded in the text');
+  assert.equal(floored.text.includes(judged.trim()), true, 'the judgment’s own extract survives');
+  assert.ok(floored.text.length >= Math.ceil(original.length * 0.5));
+  assert.ok(floored.text.length < original.length);
+});
+
+test('a payload with no line to keep is refused, never cut into a fragment', () => {
+  // One runaway line and no terminator at all: there is no whole line to keep, so
+  // there is no floor form — the original is handed back rather than chopped.
+  const original = 'L'.repeat(1200);
+  const floored = applyPruneFloor(original, 'L'.repeat(80), {
+    floorRatio: 0.5,
+    headChars: 400,
+    tailChars: 400,
+    locator: locatorOf(original)
+  });
+  assert.equal(floored.floored, false, 'the floor refuses a payload it cannot align');
+  assert.equal(floored.text, original, 'the original is handed back whole');
+  assert.equal(floored.resultChars, original.length);
+  assert.equal(floored.omittedChars, 0, 'nothing was left out, so nothing was claimed');
+  assert.equal(floored.text.includes('reflex prune'), false, 'and no marker was installed');
+});
+
+test('a first line longer than its budget is refused rather than trimmed', () => {
+  // The head budget cannot pay for a whole first line, and the tail cannot reach the
+  // share without overlapping it: the form would have to cut a line, so it is refused.
+  const original = `${'A'.repeat(600)}\n${Array.from({ length: 4 }, (_, index) => `tail line ${index}\n`).join('')}`;
+  const floored = applyPruneFloor(original, 'DIAGNOSTIC\n', {
+    floorRatio: 0.5,
+    headChars: 400,
+    tailChars: 400,
+    locator: locatorOf(original)
+  });
+  assert.equal(floored.floored, false);
+  assert.equal(floored.text, original);
+  assert.equal(floored.omittedChars, 0);
+  assert.equal(floored.text.includes('DIAGNOSTIC'), false, 'the refused form is the original, and nothing of the candidate');
+  assert.equal(floored.text.includes('reflex prune'), false, 'nothing half-line was installed');
+});
+
+test('the floor drops the candidate lines the kept context already shows, and keeps the unique ones', () => {
+  const rows = Array.from({ length: 40 }, (_, index) => `noise row ${String(index).padStart(2, '0')} ${'n'.repeat(60)}\n`);
+  const original = rows.join('');
+  const diagnostic = 'KEY: cannot open shared object file: No such file or directory\n';
+  // The judgment reads the whole payload, so its extract repeats rows the context
+  // already carries — the trace that prompted this showed BEGIN/RESULT/END twice.
+  const judged = `${rows[35]}${diagnostic}${rows[36]}`;
+  const floored = applyPruneFloor(original, judged, {
+    floorRatio: 0.5,
+    headChars: 400,
+    tailChars: 400,
+    locator: locatorOf(original)
+  });
+
+  assert.equal(floored.floored, true);
+  assert.equal(floored.text.includes(diagnostic.trim()), true, 'the diagnostic only the judgment saw survives');
+  const kept = floored.text.split('\n');
+  assert.equal(
+    kept.filter((line) => line === rows[35]!.replace(/\n$/, '')).length,
+    1,
+    'a line the tail already shows is carried once, not twice'
+  );
+  assert.equal(kept.filter((line) => line === rows[36]!.replace(/\n$/, '')).length, 1);
+  assert.equal(floored.text.split(diagnostic.trim()).length - 1, 1, 'the diagnostic is carried once as well');
+  assert.ok(floored.text.length >= Math.ceil(original.length * 0.5));
+  assert.ok(floored.text.length < original.length);
+});
+
+test('a candidate that was nothing but duplicates still composes a legal, complete form', () => {
+  const rows = Array.from({ length: 40 }, (_, index) => `noise row ${String(index).padStart(2, '0')} ${'n'.repeat(60)}\n`);
+  const original = rows.join('');
+  const locator = locatorOf(original);
+  // Every line of this extract is a line the tail already shows: the floor must not
+  // install an empty middle, a dangling closing marker, or a form short of the share.
+  const floored = applyPruneFloor(original, `${rows[36]}${rows[37]}`, {
+    floorRatio: 0.5,
+    headChars: 400,
+    tailChars: 400,
+    locator
+  });
+
+  assert.equal(floored.floored, true, 'the share can still be carried, so the form is installed');
+  const marker = pruneMarker(locator);
+  assert.equal(floored.text.indexOf(marker), floored.text.lastIndexOf(marker), 'no closing marker without a middle');
+  assert.equal(floored.text.includes(rows[37]!.trim()), true, 'the context still shows the line');
+  assert.equal(floored.text.split(rows[37]!.trim()).length - 1, 1, 'exactly once');
+  assert.ok(floored.text.length >= Math.ceil(original.length * 0.5), 'the promised share is still carried');
+  assert.ok(floored.text.length < original.length, 'and the form is still a reduction');
+});
+
+test('a composed form is its own fixed point, so a memo hit reinstalls the same bytes', () => {
+  // The engine answers a memo hit through the same composition the first install went
+  // through (the memo keeps the form, not the candidate). That is only sound while
+  // flooring an already floored form is a no-op: the form carries the share, so the
+  // plan of those lengths stays "not floored" and hands the text straight back.
+  const rows = Array.from({ length: 40 }, (_, index) => `noise row ${String(index).padStart(2, '0')} ${'n'.repeat(60)}\n`);
+  const original = rows.join('');
+  const options = { floorRatio: 0.5, headChars: 400, tailChars: 400, locator: locatorOf(original) };
+  const first = applyPruneFloor(original, 'KEY: cannot open shared object file\n', options);
+  assert.equal(first.floored, true);
+  assert.ok(first.text.length >= Math.ceil(original.length * 0.5), 'the form carries the share');
+
+  const second = applyPruneFloor(original, first.text, options);
+  assert.equal(second.text, first.text, 'the second pass returns the same bytes');
+  assert.equal(second.resultChars, first.text.length, 'and books the size it really has');
+  assert.equal(second.floored, false, 'it is not floored twice: it already carries the share');
+});
+
+test('a candidate that is not actually smaller is refused', async () => {  const engine = engineFor({ mode: 'active' }, { prune: pruneStub((raw) => `${raw}${raw}`) });
   const result = resultOf(LONG_RESULT);
   const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
   assert.equal(installedText(decision as { content?: unknown }), LONG_RESULT);
@@ -1425,7 +1578,9 @@ test('active reduces the payload the registry really returns, and retains the or
 
 test('the reduction is computed from the content the waterfall really returns, not from the raw result', async () => {
   const ctx = await createToolContext();
-  const replaced = `${'E'.repeat(3000)}\nsecond line\nthird line\nfourth line\nthe tail`;
+  // Line-oriented, like the compiler output this reduction exists for: the floor
+  // composes whole lines, so a payload that is one runaway line has no floor at all.
+  const replaced = `${Array.from({ length: 40 }, () => `${'E'.repeat(70)}\n`).join('')}the tail`;
   const seen: string[] = [];
   try {
     ctx.tools.register(
@@ -1553,7 +1708,7 @@ test('nothing is replaced when the original cannot be retained', async () => {
   assert.equal(appendPrunedOriginal({} as never, request), undefined);
 });
 
-test('the real shadow service keeps observe and active on one plan, one cost, one budget', async () => {
+test('the real pruning service keeps observe and active on one form, one cost, one budget', async () => {
   const run = async (mode: 'observe' | 'active') => {
     const ctx = await createToolContext();
     try {
@@ -1586,12 +1741,14 @@ test('the real shadow service keeps observe and active on one plan, one cost, on
       // Two identical reducible payloads (the second must hit the memo), then a
       // second step of the same turn, then the turn boundary.
       const payload = REDUCIBLE_RESULT;
+      const installed: string[] = [];
       for (let index = 0; index < 2; index += 1) {
-        await runtime.interventions!.toolResult(
+        const decision = await runtime.interventions!.toolResult(
           execOf('bash', { command: 'build' }, agent),
           resultOf(payload),
           async () => acceptOf(resultOf(payload))
         );
+        installed.push(installedText(decision as { content?: unknown }));
       }
       await enter(1, 2);
       runtime.interventions!.observeAssistantStream({
@@ -1600,19 +1757,33 @@ test('the real shadow service keeps observe and active on one plan, one cost, on
       });
       await runtime.interventions!.turnStopping({ agent, turn: 1 });
       const report = runtime.interventions!.report();
+      // The audit of the session: the per-decision record is where the provenance of
+      // each plan is written, memo hits included.
+      const records = interventionRecordsOf(session.ownEvents()).filter((record) => record.capability === 'prune');
       // The real ledger of the real service, which is the only place that can say
-      // whether observe asked for a shadow reduction or a real one.
+      // whether observe asked for a withheld measurement or for the real reduction.
       const ledger = runtime.ledger.getEntries().map((entry) => ({
         type: entry.type,
         shadow: entry.shadow,
-        // What the ledger says the harness stopped carrying…
+        // What the service says the harness stopped carrying…
         saved: entry.tokensSaved,
-        // …and, for a shadow measurement, the size of the candidate it did not install.
+        // …and, when a caller asked for a withheld measurement, the size it did not install.
         candidate: (entry.details as { potentialTokensSaved?: number } | undefined)?.potentialTokensSaved,
         original: entry.originalTokens,
         pruned: entry.prunedTokens
       }));
-      return { report, ledger };
+      // One more call to the very same service, made *after* both snapshots, to
+      // recompose the form independently of the engine: what the plan column books
+      // has to be exactly this text, and active has to install exactly it.
+      const engineConfig = runtime.interventions!.config;
+      const probe = await runtime.pruneService.prune(payload);
+      const expected = applyPruneFloor(payload, probe.processedOutput, {
+        floorRatio: engineConfig.pruneFloorRatio,
+        headChars: engineConfig.pruneHeadChars,
+        tailChars: engineConfig.pruneTailChars,
+        locator: locatorOf(payload)
+      });
+      return { report, ledger, installed, records, expected: expected.text };
     } finally {
       await ctx.fiber.dispose();
     }
@@ -1644,26 +1815,51 @@ test('the real shadow service keeps observe and active on one plan, one cost, on
   assert.equal(observed.report.observe.judgeTokens, acted.report.active.judgeTokens);
   assert.equal(observed.report.observe.memoHits, acted.report.active.memoHits, 'the memo behaves the same in both modes');
   assert.equal(observed.report.skips['duplicate-intervention'], acted.report.skips['duplicate-intervention']);
-  // The real service was asked to shadow in observe and to reduce in active, and
-  // both asked the same number of times: the mode changes the payload, not the plan.
-  const shadowed = observed.ledger.filter((entry) => entry.type === 'prune');
-  const reduced = acted.ledger.filter((entry) => entry.type === 'prune');
-  assert.equal(shadowed.length, reduced.length, 'the service is called the same number of times');
-  assert.equal(shadowed.every((entry) => entry.shadow === true), true, 'observe asks for a shadow reduction');
-  assert.equal(reduced.every((entry) => entry.shadow === false), true, 'active asks for the real one');
-  // The ledger itself refuses to call a shadow measurement a saving, and keeps the
-  // candidate's size next to it: the same plan, one honest number in each mode.
-  assert.equal(shadowed.every((entry) => entry.saved === 0), true, 'a shadow measurement saves nothing');
+  // One form, planned by both modes and installed by the one allowed to install it.
+  assert.equal(observed.installed[0], REDUCIBLE_RESULT, 'observe hands the payload on untouched');
+  assert.equal(observed.installed[1], REDUCIBLE_RESULT, 'and again on the memo hit');
+  assert.equal(acted.installed[0], observed.expected, 'active installs exactly the form the plan describes');
+  assert.equal(acted.installed[0], acted.expected, 'and both modes compose that form from the same candidate');
+  assert.equal(acted.installed[1], observed.expected, 'the memo hit reinstalls the same bytes');
+  assert.equal(observed.report.observe.candidateTokens, 2 * estimateTokens(observed.expected), 'the plan books that form’s size, once per planned payload');
+  assert.ok(observed.expected.length < REDUCIBLE_RESULT.length, 'the form really is a reduction');
+  // Both modes now ask the service for the *real* reduction: the candidate's text is
+  // what the floor composes from, so a withheld measurement would not be the same
+  // input at all. Both therefore read the same payload, the same candidate and the
+  // same candidate size out of it — one plan, one cost, one budget, one number.
+  const observedPrunes = observed.ledger.filter((entry) => entry.type === 'prune');
+  const actedPrunes = acted.ledger.filter((entry) => entry.type === 'prune');
+  assert.equal(observedPrunes.length, actedPrunes.length, 'the service is called the same number of times');
+  assert.equal(observedPrunes.length, 1, 'the second identical payload was answered from the memo, not from the service');
+  assert.equal(observedPrunes.every((entry) => entry.shadow === false), true, 'observe asks for the real reduction too');
   assert.deepEqual(
-    shadowed.map((entry) => entry.candidate),
-    reduced.map((entry) => entry.saved),
-    'and the candidate the shadow measured is the number active really saved'
+    observedPrunes.map((entry) => [entry.original, entry.pruned, entry.saved]),
+    actedPrunes.map((entry) => [entry.original, entry.pruned, entry.saved]),
+    'both modes read the same payload, the same candidate and the same candidate size'
   );
+  assert.ok(actedPrunes.every((entry) => entry.saved! > 0), 'the service really did reduce the payload');
+  // `tokensSaved` there is the service's measure of the reduction it produced, not a
+  // claim about what a mode installed: active already books a candidate the floor may
+  // refuse to install, and observe books the one it measured. What each mode really
+  // did is booked in the intervention columns asserted above — observe saved nothing
+  // for real, and active saved exactly the form it installed.
+  assert.equal(observed.report.observe.actualSavedTokens, 0, 'the observe column stays honest');
+  assert.equal(
+    acted.report.active.actualSavedTokens,
+    observed.report.observe.potentialSavedTokens,
+    'and the active column books exactly the saving both columns planned'
+  );
+  // The audit books the same plan in both modes, memo hit included: the reused form
+  // keeps the provenance of the plan that composed it instead of degrading to "not
+  // floored" just because its own lengths now satisfy the share.
+  assert.equal(observed.records.length, 2, 'one record per payload, the second one the memo hit');
+  assert.deepEqual(observed.records.map((record) => record.memoHit === true), [false, true], 'the second payload was answered from the memo');
   assert.deepEqual(
-    shadowed.map((entry) => [entry.original, entry.pruned]),
-    reduced.map((entry) => [entry.original, entry.pruned]),
-    'both modes measured the same payload and the same candidate'
+    observed.records.map((record) => [record.floorApplied, record.originalTokens, record.candidateTokens]),
+    acted.records.map((record) => [record.floorApplied, record.originalTokens, record.candidateTokens]),
+    'both modes book the same plan, provenance included'
   );
+  assert.deepEqual(observed.records.map((record) => record.floorApplied), [true, true], 'the plan and its memo hit both carry the floor');
 });
 
 test('the observe column really has no latch of its own: mode changes the effect, never the plan', async () => {
