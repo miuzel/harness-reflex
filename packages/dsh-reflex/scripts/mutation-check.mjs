@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 329;
+const EXPECTED_TESTS = 334;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -235,6 +235,17 @@ const MUTATIONS = [
     file: 'src/client/panel.ts',
     from: "export const ADAPTIVE_EFFORT_LEVELS: readonly string[] = ['off', 'low', 'medium', 'high'];",
     to: "export const ADAPTIVE_EFFORT_LEVELS: readonly string[] = ['off', 'high'];"
+  },
+  {
+    name: 'panel-addresses-a-group-name-that-is-not-a-schema-path',
+    area: 'every path the panel writes is a path the host declares volatile',
+    // The reported bug, in one line: the runtime page's fields live at four
+    // top-level paths (`toolPrefix`, `ledgerPath`, `pruneThreshold`,
+    // `calibrationPath`), and addressing them by the page's own group name made
+    // the host refuse the whole save as "not volatile".
+    file: 'src/client/panel.ts',
+    from: "        { path: ['pruneThreshold'], value: asNumber(draft.runtime.pruneThreshold) ?? 500 },",
+    to: "        { path: [group], value: asNumber(draft.runtime.pruneThreshold) ?? 500 },"
   },
   {
     name: 'system-one-timeout-unchecked',

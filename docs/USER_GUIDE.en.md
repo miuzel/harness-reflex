@@ -428,12 +428,14 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence, **adaptive-effort switch** |
 | Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
 | Tools | A per-tool switch for each of the eight tools, each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`) |
-| System 1 backend | Implementation, base URL, model id, API-key variable name, timeout |
+| System 1 backend | Implementation, base URL, model id, API-key variable name, timeout; plus the tool-name prefix, prune threshold, ledger JSONL path and calibration-curve path |
 | Decision ledger | Live metrics, recent-decision table, JSONL sink, clear (confirmed twice) |
 | **Guide** | **A read-only view of this manual, following the DSH interface language** |
 
 - Saving is **whole-group**: editing one field validates and writes the entire
-  configuration group.
+  configuration group on every configuration path it covers (the System 1
+  backend page spans `backend`, `systemOne`, `toolPrefix`, `ledgerPath`,
+  `pruneThreshold` and `calibrationPath`).
 - When the Host settings document is read-only the page becomes read-only and
   every write control is disabled.
 - Panel routes under `/api/dsh-reflex/*` accept loopback clients only, and
@@ -443,8 +445,8 @@ The plugin declares its browser half through `dsh.client` and registers into the
 
 The panel always shows the **currently effective values**, and saving goes
 through the Host settings document's only write channel (a per-group `set` plus
-the revision check) — there is no second write path. The three switch groups
-differ in how much they write:
+the revision check) — there is no second write path. The groups differ in how
+much they write:
 
 - **Interventions: whole-group write-back.** Saving that group writes the
   group's **current mode and every budget value in full**, exactly like the
@@ -459,6 +461,16 @@ differ in how much they write:
 - **The reasoning-effort switch is always written explicitly.** `effort.enabled`
   is saved with the group's current value, so there is no "the panel shows it
   enabled but the configuration actually omits it" ambiguity.
+- **System 1 backend: one whole value per schema path.** The Host settings
+  document is addressed by **configuration path**, and this page covers
+  `backend` (a scalar), `systemOne` (the connection block), and the four
+  top-level fields `toolPrefix`, `ledgerPath`, `pruneThreshold` and
+  `calibrationPath`: saving writes each of those paths in full (only for the
+  group that changed), and a **page name is never used as a configuration key** —
+  `runtime` is not a field of `Config`, so writing under that name is refused by
+  the Host outright and the whole save fails with it. A blank `ledgerPath` or
+  `calibrationPath` is written as "unset", which keeps the layer below instead of
+  storing an empty string.
 
 An illegal value (an unknown tool suffix, a non-boolean, an out-of-range budget,
 an invalid three-state value) is rejected by the same Host-side `resolveConfig`

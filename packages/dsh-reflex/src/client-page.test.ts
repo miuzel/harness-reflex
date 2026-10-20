@@ -6,7 +6,7 @@ import vm from 'node:vm';
 
 import type { LedgerEntry, LedgerSummary } from './vendor/harness-reflex/index.js';
 
-import { INTERVENTION_CAPABILITIES, INTERVENTION_MODES, INTERVENTION_SETTINGS, resolveConfig, type ReflexConfig } from './config.js';
+import { INTERVENTION_CAPABILITIES, INTERVENTION_MODES, INTERVENTION_SETTINGS, Config, resolveConfig, type ReflexConfig } from './config.js';
 import { ADAPTIVE_EFFORT_LEVELS, EFFORT_LEVELS, EFFORT_TRIGGERS } from './effort.js';
 import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 import {
@@ -1096,6 +1096,145 @@ test('the backend page reports a missing key variable', async () => {
   assert.ok(textOf(tree).includes('环境变量为空'), 'a missing key is not reported');
   assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
   mounted.unmount();
+});
+
+//#region host write contract
+
+/** The part of a schemastery node the write contract walks. */
+interface HostSchemaNode {
+  meta: { volatile?: boolean };
+  dict?: Record<string, HostSchemaNode>;
+}
+
+/** The plugin's schema, narrowed to the shape the contract check walks. */
+const HOST_CONFIG = Config as unknown as HostSchemaNode;
+
+/**
+ * Whether the Host would let a settings form write at `path`.
+ *
+ * Transcribed from `@deepseek-ai/dsh-settings`: a write is refused unless every
+ * path it addresses is *volatile*, and a path is volatile when the schema node it
+ * names — or any node above it — carries the `volatile` meta. The browser half
+ * cannot import the Host schema, so the panel's real output is checked against the
+ * plugin's own `Config` here. The panel did get this wrong once: it addressed the
+ * Host with its own view group name `runtime`, which is not a field of `Config`,
+ * and the whole write was refused.
+ * @param schema - schema node to walk.
+ * @param path - path segments, outermost first.
+ * @returns whether the Host would accept a write there.
+ */
+function hostAcceptsPath(schema: HostSchemaNode, path: readonly string[]): boolean {
+  if (schema.meta.volatile) return true;
+  const [key, ...rest] = path;
+  const child = key === undefined ? undefined : schema.dict?.[key];
+  return child !== undefined && hostAcceptsPath(child, rest);
+}
+
+/** Apply path ops to a section the way the Host does, so the resolver can read it. */
+function applyOps(ops: readonly { op: string; path: string[]; value?: unknown }[]): Record<string, unknown> {
+  const section: Record<string, unknown> = {};
+  const edit = (at: Record<string, unknown>, path: readonly string[], op: { op: string; value?: unknown }): void => {
+    const [head, ...rest] = path;
+    if (head === undefined) return;
+    if (rest.length === 0) {
+      if (op.op === 'set') at[head] = op.value;
+      else delete at[head];
+      return;
+    }
+    const child = (at[head] ?? {}) as Record<string, unknown>;
+    at[head] = child;
+    edit(child, rest, op);
+  };
+  for (const op of ops) edit(section, op.path, op);
+  return section;
+}
+
+/**
+ * Type the two fields that change on the System 1 backend page.
+ * @param tree - the rendered page.
+ */
+function editBackendPage(tree: unknown): void {
+  type(inputElement(tree, '超时（毫秒）'), '9000');
+  type(inputElement(tree, '工具名前缀'), 'rv_');
+}
+
+//#endregion
+
+test('the System 1 backend page writes the scalar and its block, on the paths the Host declares', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  editBackendPage(tree);
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  await mounted.runtime.flush();
+
+  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
+  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.deepEqual(
+    ops.map((op) => [op.op, op.path]),
+    [
+      ['set', ['backend']],
+      ['set', ['systemOne']],
+      ['set', ['toolPrefix']],
+      ['unset', ['ledgerPath']],
+      ['set', ['pruneThreshold']],
+      ['unset', ['calibrationPath']]
+    ],
+    'the backend page must address the fields the Host declares, never its own group name'
+  );
+  assert.equal(ops[0]?.value, 'jev', '`backend` is a scalar union, never a block');
+  const systemOne = (ops[1]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(systemOne.timeoutMs, 9000);
+  assert.equal(systemOne.baseUrl, 'http://127.0.0.1:8000/v1', 'an untouched field must round-trip');
+
+  // The Host accepts what the page wrote, and each field lands where it belongs.
+  const resolved = resolveConfig({ ...AUTHORED, ...applyOps(ops) } as ReflexConfig);
+  assert.equal(resolved.backend, 'jev');
+  assert.equal(resolved.toolPrefix, 'rv_');
+  assert.equal(resolved.systemOne.timeoutMs, 9000);
+  assert.equal(resolved.systemOne.baseUrl, 'http://127.0.0.1:8000/v1');
+  assert.equal(resolved.pruneThreshold, 500);
+  mounted.unmount();
+});
+
+test('every path the panel writes is a path the Host declares volatile', async () => {
+  // One save per page, each one changing the group that page owns: the union of
+  // the ops is then the complete write surface, and every path in it has to pass
+  // the Host's own pre-check.
+  const perturbs: { tab: string; edit: (tree: unknown) => void }[] = [
+    { tab: '虚拟 Provider', edit: (tree) => fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } }) },
+    { tab: '推理强度', edit: (tree) => fire(checkboxOf(tree, '启用自适应推理强度'), 'onChange', { target: { checked: false } }) },
+    { tab: 'System 1 后端', edit: editBackendPage },
+    { tab: '自动干预', edit: (tree) => fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } }) },
+    { tab: '工具开关', edit: (tree) => fire(find(tree, 'button', '应用推荐组合'), 'onClick') }
+  ];
+  const paths = new Set<string>();
+  for (const perturb of perturbs) {
+    const { form, mutations } = settingsForm(AUTHORED);
+    const mounted = await mountPanel({ facts: facts(true), form });
+    openTab(mounted.tree, perturb.tab);
+    let tree = await mounted.runtime.flush();
+    perturb.edit(tree);
+    tree = await mounted.runtime.flush();
+    fire(find(tree, 'button', '保存'), 'onClick');
+    await mounted.runtime.flush();
+
+    assert.equal(mutations.length, 1, `${perturb.tab}: saving did not reach the settings form`);
+    const ops = plain(mutations[0]?.ops) as { op: string; path: string[] }[];
+    for (const op of ops) {
+      assert.ok(hostAcceptsPath(HOST_CONFIG, op.path), `${perturb.tab} writes ${op.path.join('.')}, which the Host refuses as non-volatile`);
+      paths.add(op.path.join('.'));
+    }
+    mounted.unmount();
+  }
+  assert.deepEqual(
+    [...paths].sort(),
+    ['backend', 'calibrationPath', 'effort', 'interventions', 'ledgerPath', 'pruneThreshold', 'routing', 'systemOne', 'toolPrefix', 'tools'],
+    'the pages stopped covering every writable field, so this fence is no longer checking them all'
+  );
 });
 
 test('the ledger page lists decisions and clears only after confirmation', async () => {

@@ -525,17 +525,35 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   return { errors: [...new Set(errors)], ok: errors.length === 0 };
 }
 
+/** One Host schema path a draft group authors, and the value it writes there. */
+export interface GroupWrite {
+  /** Absolute schema path, e.g. `['systemOne']` or `['pruneThreshold']`. */
+  path: string[];
+  /** The value to write; omitted means "unset this path". */
+  value?: unknown;
+}
+
 /**
- * Convert a draft group into the JSON value the Host stores at that path.
+ * Convert a draft group into the Host schema paths it authors.
+ *
+ * A group is a *view* concept; the Host addresses configuration by schema path,
+ * and two of the six groups are not one path: `backend` is the scalar union that
+ * sits next to the `systemOne` block, and `runtime` is four separate top-level
+ * fields. Addressing the Host by group name is refused — every field of the
+ * System 1 backend page failed with either `Config field "runtime" is not
+ * volatile` (the runtime group) or `$.backend expected "auto" | "mock" | "jev" |
+ * "vllm" but got {"backend":...}` (the backend group) — so a group is always
+ * expanded to real schema paths here.
  *
  * Absent-means-default is expressed by *omission*: a blank text field yields no
  * key, so the field keeps whatever the composition layer below says instead of
- * being pinned to an empty string.
+ * being pinned to an empty string. A path with no value at all is written as an
+ * `unset` op, which says the same thing for a top-level field.
  * @param draft - the draft to convert.
  * @param group - which group to convert.
- * @returns the serializable section value.
+ * @returns one entry per Host schema path the group authors, in schema order.
  */
-export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown {
+export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWrite[] {
   const present = (text: string): string | undefined => {
     const trimmed = text.trim();
     return trimmed.length === 0 ? undefined : trimmed;
@@ -554,31 +572,45 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
         }));
       }
       const fallback = present(draft.routing.fallback);
-      return {
-        enabled: draft.routing.enabled,
-        ...(present(draft.routing.virtualProvider) === undefined ? {} : { virtualProvider: draft.routing.virtualProvider.trim() }),
-        ...(fallback === undefined ? {} : { fallback }),
-        ...(asNumber(draft.routing.maxTaskChars) === undefined ? {} : { maxTaskChars: asNumber(draft.routing.maxTaskChars) }),
-        models
-      };
+      return [
+        {
+          path: [group],
+          value: {
+            enabled: draft.routing.enabled,
+            ...(present(draft.routing.virtualProvider) === undefined ? {} : { virtualProvider: draft.routing.virtualProvider.trim() }),
+            ...(fallback === undefined ? {} : { fallback }),
+            ...(asNumber(draft.routing.maxTaskChars) === undefined ? {} : { maxTaskChars: asNumber(draft.routing.maxTaskChars) }),
+            models
+          }
+        }
+      ];
     }
     case 'effort':
-      return {
-        enabled: draft.effort.enabled,
-        ...(present(draft.effort.setting) === undefined ? {} : { reasoningEffort: draft.effort.setting.trim() }),
-        ...(present(draft.effort.fallback) === undefined ? {} : { fallback: draft.effort.fallback.trim() }),
-        ...(asNumber(draft.effort.minConfidence) === undefined ? {} : { minConfidence: asNumber(draft.effort.minConfidence) })
-      };
-    case 'backend':
-      return {
-        ...(present(draft.backend.backend) === undefined ? {} : { backend: draft.backend.backend.trim() }),
-        systemOne: {
-          ...(present(draft.backend.baseUrl) === undefined ? {} : { baseUrl: draft.backend.baseUrl.trim() }),
-          ...(present(draft.backend.model) === undefined ? {} : { model: draft.backend.model.trim() }),
-          ...(present(draft.backend.apiKeyEnv) === undefined ? {} : { apiKeyEnv: draft.backend.apiKeyEnv.trim() }),
-          ...(asNumber(draft.backend.timeoutMs) === undefined ? {} : { timeoutMs: asNumber(draft.backend.timeoutMs) })
+      return [
+        {
+          path: [group],
+          value: {
+            enabled: draft.effort.enabled,
+            ...(present(draft.effort.setting) === undefined ? {} : { reasoningEffort: draft.effort.setting.trim() }),
+            ...(present(draft.effort.fallback) === undefined ? {} : { fallback: draft.effort.fallback.trim() }),
+            ...(asNumber(draft.effort.minConfidence) === undefined ? {} : { minConfidence: asNumber(draft.effort.minConfidence) })
+          }
         }
-      };
+      ];
+    case 'backend':
+      // One page, two Host paths: the scalar backend choice and its own block.
+      return [
+        { path: ['backend'], value: present(draft.backend.backend) ?? 'auto' },
+        {
+          path: ['systemOne'],
+          value: {
+            ...(present(draft.backend.baseUrl) === undefined ? {} : { baseUrl: draft.backend.baseUrl.trim() }),
+            ...(present(draft.backend.model) === undefined ? {} : { model: draft.backend.model.trim() }),
+            ...(present(draft.backend.apiKeyEnv) === undefined ? {} : { apiKeyEnv: draft.backend.apiKeyEnv.trim() }),
+            ...(asNumber(draft.backend.timeoutMs) === undefined ? {} : { timeoutMs: asNumber(draft.backend.timeoutMs) })
+          }
+        }
+      ];
     case 'interventions': {
       // Only the capability settings that were authored are written, so an
       // inherited capability stays inherited instead of being frozen to the
@@ -595,7 +627,7 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
         const parsed = asNumber(text);
         return parsed === undefined ? undefined : parsed;
       };
-      return {
+      const section = {
         ...(present(draft.interventions.mode) === undefined ? {} : { mode: draft.interventions.mode.trim() }),
         ...(Object.keys(capabilities).length === 0 ? {} : { capabilities }),
         ...(count(draft.interventions.maxInterventionsPerTurn) === undefined
@@ -628,6 +660,7 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
           : { pruneTailChars: count(draft.interventions.pruneTailChars) }),
         ...(present(draft.interventions.intent) === undefined ? {} : { intent: draft.interventions.intent.trim() })
       };
+      return [{ path: [group], value: section }];
     }
     case 'tools': {
       // Enabled is the default, so only the closed tools are authored. Reopening
@@ -637,18 +670,22 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
       for (const suffix of REFLEX_TOOL_SUFFIXES) {
         if (draft.tools.enabled[suffix] === false) enabled[suffix] = false;
       }
-      return { enabled };
+      return [{ path: [group], value: { enabled } }];
     }
     case 'runtime':
     default:
-      return {
-        ...(present(draft.runtime.toolPrefix) === undefined ? {} : { toolPrefix: draft.runtime.toolPrefix.trim() }),
-        ...(present(draft.runtime.ledgerPath) === undefined ? {} : { ledgerPath: draft.runtime.ledgerPath.trim() }),
-        ...(asNumber(draft.runtime.pruneThreshold) === undefined ? {} : { pruneThreshold: asNumber(draft.runtime.pruneThreshold) }),
-        ...(present(draft.runtime.calibrationPath) === undefined
-          ? {}
-          : { calibrationPath: draft.runtime.calibrationPath.trim() })
-      };
+      // The runtime group is four top-level fields in the Host schema, not a
+      // `runtime` block: writing `['runtime']` is refused as "not volatile".
+      return [
+        { path: ['toolPrefix'], value: present(draft.runtime.toolPrefix) ?? 'reflex_' },
+        present(draft.runtime.ledgerPath) === undefined
+          ? { path: ['ledgerPath'] }
+          : { path: ['ledgerPath'], value: draft.runtime.ledgerPath.trim() },
+        { path: ['pruneThreshold'], value: asNumber(draft.runtime.pruneThreshold) ?? 500 },
+        present(draft.runtime.calibrationPath) === undefined
+          ? { path: ['calibrationPath'] }
+          : { path: ['calibrationPath'], value: draft.runtime.calibrationPath.trim() }
+      ];
   }
 }
 
@@ -670,9 +707,13 @@ function sameValue(left: unknown, right: unknown): boolean {
 /**
  * Diff two drafts into the path operations that turn the first into the second.
  *
- * Group granularity is deliberate: each group is one `set` of its whole section,
- * so one edit can never leave a half-written block behind, and a blanked field
- * simply stops being present in the value it sends.
+ * Group granularity is deliberate: a group is dirty or it is not, and a dirty
+ * group is written in full to every schema path it authors, so one edit can
+ * never leave a half-written block behind and a blanked field simply stops being
+ * present in the value it sends. Every path emitted here is a path the Host
+ * declares volatile — `client-page.test.ts` checks that against the plugin's own
+ * schema, because addressing a group name the schema does not have (`runtime`)
+ * makes the Host refuse the whole write.
  * @param original - the draft seeded from the Host.
  * @param draft - the edited draft.
  * @returns the ops to send, empty when nothing changed.
@@ -680,16 +721,19 @@ function sameValue(left: unknown, right: unknown): boolean {
 export function diffDraft(original: PanelDraft, draft: PanelDraft): SettingsOp[] {
   const ops: SettingsOp[] = [];
   for (const group of DRAFT_GROUPS) {
-    const before = groupValue(original, group);
-    const after = groupValue(draft, group);
-    if (!sameValue(before, after)) ops.push({ op: 'set', path: [group], value: after });
+    const before = groupWrites(original, group);
+    const after = groupWrites(draft, group);
+    if (sameValue(before, after)) continue;
+    for (const write of after) {
+      ops.push(write.value === undefined ? { op: 'unset', path: write.path } : { op: 'set', path: write.path, value: write.value });
+    }
   }
   return ops;
 }
 
 /** Which groups of a draft differ from the seeded original. */
 export function dirtyGroups(original: PanelDraft, draft: PanelDraft): (keyof PanelDraft)[] {
-  return DRAFT_GROUPS.filter((group) => !sameValue(groupValue(original, group), groupValue(draft, group)));
+  return DRAFT_GROUPS.filter((group) => !sameValue(groupWrites(original, group), groupWrites(draft, group)));
 }
 
 /** Append an empty virtual model to a draft. */
