@@ -73,7 +73,8 @@ test('resolveConfig validates and fills every field', () => {
     'pruneThreshold',
     'routing',
     'systemOne',
-    'toolPrefix'
+    'toolPrefix',
+    'tools'
   ]);
   assert.equal(resolved.routing.enabled, true);
   assert.equal(resolved.routing.virtualProvider, 'reflex');
@@ -84,13 +85,22 @@ test('resolveConfig validates and fills every field', () => {
   assert.equal(resolved.pruneThreshold, 500);
   assert.equal(resolved.ledgerPath, undefined);
   assert.equal(resolved.calibrationPath, undefined);
-  assert.deepEqual(resolved.effort, { fallback: 'medium', minConfidence: 0.3 }, 'no trigger, no pinned level');
+  assert.deepEqual(
+    resolved.effort,
+    { enabled: true, fallback: 'medium', minConfidence: 0.3 },
+    'no trigger, no pinned level, adaptive effort on by default'
+  );
   assert.equal('setting' in resolved.effort, false, 'an unset marker must stay unset, not become a default level');
+  assert.deepEqual(
+    resolved.tools,
+    { enabled: Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, true])) },
+    'every tool is on unless it was switched off'
+  );
 });
 
 test('Config accepts the reflex/auto marker and every effort level', () => {
   assert.equal(plainConfig(Config({})).effort?.reasoningEffort, undefined);
-  assert.deepEqual(plainConfig(Config({ effort: {} })).effort, { fallback: 'medium', minConfidence: 0.3 });
+  assert.deepEqual(plainConfig(Config({ effort: {} })).effort, { enabled: true, fallback: 'medium', minConfidence: 0.3 });
   assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'reflex' } })).effort?.reasoningEffort, 'reflex');
   assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'auto' } })).effort?.reasoningEffort, 'auto');
   assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'low' } })).effort?.reasoningEffort, 'low');
@@ -106,11 +116,13 @@ test('Config accepts the reflex/auto marker and every effort level', () => {
 
 test('resolveConfig normalizes the effort marker and refuses a broken block', () => {
   assert.deepEqual(resolveConfig({ effort: { reasoningEffort: 'auto' } }).effort, {
+    enabled: true,
     setting: 'auto',
     fallback: 'medium',
     minConfidence: 0.3
   });
   assert.deepEqual(resolveConfig({ effort: { reasoningEffort: 'high', fallback: 'low', minConfidence: 0 } }).effort, {
+    enabled: true,
     setting: 'high',
     fallback: 'low',
     minConfidence: 0

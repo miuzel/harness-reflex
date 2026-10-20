@@ -35,10 +35,19 @@ import {
 } from './panel';
 
 /** Pages of the panel. */
-export type PanelTab = 'overview' | 'routing' | 'effort' | 'backend' | 'ledger' | 'guide';
+export type PanelTab = 'overview' | 'routing' | 'effort' | 'backend' | 'interventions' | 'tools' | 'ledger' | 'guide';
 
 /** Every page, in navigation order. */
-export const PANEL_TABS: readonly PanelTab[] = ['overview', 'routing', 'effort', 'backend', 'ledger', 'guide'];
+export const PANEL_TABS: readonly PanelTab[] = [
+  'overview',
+  'routing',
+  'effort',
+  'backend',
+  'interventions',
+  'tools',
+  'ledger',
+  'guide'
+];
 
 /** One Host settings section, as the client form API reports it. */
 export interface FormSnapshotLike {

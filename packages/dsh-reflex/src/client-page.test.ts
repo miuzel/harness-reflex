@@ -6,8 +6,9 @@ import vm from 'node:vm';
 
 import type { LedgerEntry, LedgerSummary } from './vendor/harness-reflex/index.js';
 
-import { resolveConfig, type ReflexConfig } from './config.js';
+import { INTERVENTION_CAPABILITIES, INTERVENTION_MODES, INTERVENTION_SETTINGS, resolveConfig, type ReflexConfig } from './config.js';
 import { ADAPTIVE_EFFORT_LEVELS, EFFORT_LEVELS, EFFORT_TRIGGERS } from './effort.js';
+import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 import {
   PANEL_ROUTES,
   buildPanelSnapshot,
@@ -113,6 +114,13 @@ function checkboxOf(tree: unknown, label: string): Element {
   const box = elements(field(tree, label)).find((element) => element.type === 'input' && element.props.type === 'checkbox');
   assert.ok(box !== undefined, `no checkbox labelled "${label}"`);
   return box as Element;
+}
+
+/** The single `<select>` of the field labelled `label`. */
+function selectOf(tree: unknown, label: string): Element {
+  const select = elements(field(tree, label)).find((element) => element.type === 'select');
+  assert.ok(select !== undefined, `no select labelled "${label}"`);
+  return select as Element;
 }
 
 /** Cross-realm comparison: JSON round-trips values out of the VM's realm. */
@@ -332,6 +340,7 @@ function facts(apiKeyPresent: boolean): PanelRuntimeFacts {
     backendName: 'jev',
     pools: [{ model: 'reflex-pro', entries: [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] }],
     routingActive: true,
+    toolSurface: REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`),
     ledger: {
       getSummary: () => LEDGER_SUMMARY,
       getEntries: () => LEDGER_ENTRIES,
@@ -738,7 +747,7 @@ test('the group the page writes satisfies the Host validator', () => {
   assert.equal(resolved.routing.fallback?.model, 'deepseek-chat');
   assert.equal(resolved.routing.maxTaskChars, 400);
   // The resolved block normalises the authored `reasoningEffort` to `setting`.
-  assert.deepEqual(plain(resolved.effort), { setting: 'reflex', fallback: 'low', minConfidence: 0.3 });
+  assert.deepEqual(plain(resolved.effort), { enabled: true, setting: 'reflex', fallback: 'low', minConfidence: 0.3 });
 });
 
 test('the candidate pool can be extended, reordered, and written back', async () => {
@@ -809,6 +818,188 @@ test('the effort page offers exactly the levels the Host accepts', async () => {
   assert.deepEqual(optionsOf(tree, '兜底档位'), [...ADAPTIVE_EFFORT_LEVELS]);
   assert.equal(inputOf(tree, '最小置信度'), '0.3');
   assert.ok(textOf(tree).includes('0.82'), 'the last decision confidence is not shown');
+  mounted.unmount();
+});
+
+test('the interventions page writes the three-state block the Host validates', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '自动干预');
+  let tree = await mounted.runtime.flush();
+
+  const cap = elements(tree).find((e) => e.type === 'label' && textOf(e) === '停滞豁免');
+  // The master mode cannot inherit; a capability can, and does by default.
+  assert.deepEqual(optionsOf(tree, '主模式'), [...INTERVENTION_MODES], 'the master mode offers the wrong settings');
+  const capabilityLabels = ['停滞豁免', '结果裁剪', '失败门禁', '收尾异议'];
+  assert.equal(capabilityLabels.length, INTERVENTION_CAPABILITIES.length, 'a capability is not on the page');
+  for (const capability of capabilityLabels) {
+    assert.deepEqual(optionsOf(tree, capability), [...INTERVENTION_SETTINGS], `${capability} cannot express every setting`);
+    assert.equal(String(selectOf(tree, capability).props.value), 'inherit', `${capability} is not seeded as inherited`);
+  }
+  assert.equal(inputOf(tree, '窗口大小'), '6');
+  assert.ok(textOf(tree).includes('观察（observe）'), 'the effective mode from the snapshot is not shown');
+
+  fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } });
+  fire(selectOf(tree, '结果裁剪'), 'onChange', { target: { value: 'off' } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
+  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
+  assert.deepEqual(ops.map((op) => [op.op, op.path]), [['set', ['interventions']]]);
+  const value = ops[0]?.value ?? {};
+  assert.equal(value.mode, 'active');
+  assert.deepEqual(value.capabilities, { prune: 'off' }, 'only the capability the user changed is authored');
+  assert.equal(value.windowSize, 6, 'a budget must be written as a number, not as the field text');
+  assert.equal(typeof value.minConfidence, 'number');
+  assert.equal('intent' in value, false, 'a blank intent must be omitted, not pinned to an empty string');
+
+  // The Host accepts exactly what the page wrote, and derives the rest.
+  const resolved = resolveConfig({ ...AUTHORED, interventions: value as ReflexConfig['interventions'] });
+  assert.equal(resolved.interventions.mode, 'active');
+  assert.deepEqual(resolved.interventions.capabilities, { stagnation: 'active', prune: 'off', gate: 'active', closing: 'active' });
+  mounted.unmount();
+});
+
+test('the interventions page refuses a budget the Host would refuse', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '自动干预');
+  let tree = await mounted.runtime.flush();
+
+  type(inputElement(tree, '重复阈值'), '1');
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.ok(textOf(tree).includes('预算与阈值必须是'), `the refusal is not explained: ${textOf(tree).slice(0, 200)}`);
+  assert.deepEqual(mutations, [], 'a draft the Host would refuse reached the Host');
+  mounted.unmount();
+});
+
+test('the switch pages seed the documented defaults and pin nothing when nothing was authored', async () => {
+  const { form, mutations } = settingsForm({});
+  const mounted = await mountPanel({ facts: facts(true), form });
+
+  openTab(mounted.tree, '自动干预');
+  let tree = await mounted.runtime.flush();
+  assert.equal(String(selectOf(tree, '主模式').props.value), 'observe', 'the master mode does not default to observe');
+  assert.equal(inputOf(tree, '每轮最大干预数'), '3');
+  assert.equal(inputOf(tree, '每会话最大判定数'), '20');
+  assert.equal(inputOf(tree, '裁剪保留下限比例'), '0.5');
+
+  openTab(tree, '工具开关');
+  tree = await mounted.runtime.flush();
+  for (const suffix of REFLEX_TOOL_SUFFIXES) {
+    assert.equal(checkboxOf(tree, `reflex_${suffix}`).props.checked, true, `${suffix} does not default to on`);
+  }
+
+  fire(find(tree, 'button', '保存'), 'onClick');
+  await mounted.runtime.flush();
+  const ops = plain(mutations.flatMap((entry) => entry.ops as unknown[])) as { path: string[] }[];
+  for (const op of ops) {
+    assert.equal(['interventions', 'tools'].includes(op.path[0] ?? ''), false, `visiting the page pinned ${op.path.join('.')}`);
+  }
+  mounted.unmount();
+});
+
+test('authored switches are read back, and rewriting them does not freeze what was inherited', async () => {
+  const authored = {
+    ...AUTHORED,
+    tools: { enabled: { gate: false, status_ledger: false } },
+    interventions: { mode: 'off', capabilities: { gate: 'observe' } }
+  } as ReflexConfig;
+  const { form, mutations } = settingsForm(authored);
+  const mounted = await mountPanel({ facts: facts(true), form });
+
+  openTab(mounted.tree, '工具开关');
+  let tree = await mounted.runtime.flush();
+  assert.equal(checkboxOf(tree, 'reflex_gate').props.checked, false, 'an authored switch is not read back');
+  assert.equal(checkboxOf(tree, 'reflex_status_ledger').props.checked, false, 'status_ledger has no always-on exception');
+  assert.equal(checkboxOf(tree, 'reflex_choice').props.checked, true);
+
+  // Reopening one tool must *remove* its key instead of pinning it to true.
+  fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: true } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  const tools = plain(mutations[0]?.ops) as { path: string[]; value: unknown }[];
+  assert.deepEqual(tools.map((op) => op.path), [['tools']]);
+  assert.deepEqual(tools[0]?.value, { enabled: { status_ledger: false } });
+
+  // The interventions page keeps the authored override and changes only the mode.
+  mutations.length = 0;
+  openTab(tree, '自动干预');
+  tree = await mounted.runtime.flush();
+  assert.equal(String(selectOf(tree, '主模式').props.value), 'off', 'the authored mode is not read back');
+  assert.equal(String(selectOf(tree, '失败门禁').props.value), 'observe', 'the authored capability override is not read back');
+  assert.equal(String(selectOf(tree, '结果裁剪').props.value), 'inherit');
+  fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  await mounted.runtime.flush();
+  const interventions = plain(mutations[0]?.ops) as { path: string[]; value: Record<string, unknown> }[];
+  assert.deepEqual(interventions.map((op) => op.path), [['interventions']]);
+  assert.equal(interventions[0]?.value.mode, 'active');
+  assert.deepEqual(
+    interventions[0]?.value.capabilities,
+    { gate: 'observe' },
+    'an authored override must survive the write and an inherited one must stay omitted'
+  );
+  mounted.unmount();
+});
+
+test('the tools page closes one tool and writes exactly that switch', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '工具开关');
+  let tree = await mounted.runtime.flush();
+
+  // One switch per suffix, labelled with the registered name under the draft prefix.
+  for (const suffix of REFLEX_TOOL_SUFFIXES) {
+    assert.equal(checkboxOf(tree, `reflex_${suffix}`).props.checked, true, `${suffix} does not start enabled`);
+  }
+  const effective = textOf(tree);
+  assert.ok(!effective.includes('尚未读取到运行时状态'), 'the Host projection of the registered surface was not read');
+  for (const suffix of REFLEX_TOOL_SUFFIXES) {
+    assert.ok(effective.includes(`reflex_${suffix}`), `the effective registration omits ${suffix}`);
+  }
+
+  fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
+  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: unknown }[];
+  assert.deepEqual(ops.map((op) => [op.op, op.path]), [['set', ['tools']]]);
+  assert.deepEqual(ops[0]?.value, { enabled: { gate: false } }, 'an open tool must be omitted, not written as true');
+
+  // The Host takes the written block and closes exactly that tool.
+  const resolved = resolveConfig({ ...AUTHORED, tools: ops[0]?.value as ReflexConfig['tools'] });
+  assert.equal(resolved.tools.enabled.gate, false);
+  assert.equal(resolved.tools.enabled.status_ledger, true, 'status_ledger has no always-on exception');
+  assert.equal(Object.values(resolved.tools.enabled).filter((on) => !on).length, 1);
+  mounted.unmount();
+});
+
+test('the effort page can turn adaptive effort off, and writes it with its group', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '推理强度');
+  let tree = await mounted.runtime.flush();
+
+  assert.equal(checkboxOf(tree, '启用自适应推理强度').props.checked, true, 'adaptive effort does not start enabled');
+  fire(checkboxOf(tree, '启用自适应推理强度'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  assert.ok(textOf(tree).includes('不再做自适应判定'), 'the consequence of switching off is not explained');
+  fire(find(tree, 'button', '保存'), 'onClick');
+  await mounted.runtime.flush();
+
+  const ops = plain(mutations[0]?.ops) as { path: string[]; value: Record<string, unknown> }[];
+  assert.deepEqual(ops.map((op) => op.path), [['effort']]);
+  assert.equal(ops[0]?.value.enabled, false);
+  assert.equal(ops[0]?.value.reasoningEffort, 'reflex', 'the group write must keep the level that was authored');
+  assert.equal(resolveConfig({ ...AUTHORED, effort: ops[0]?.value as ReflexConfig['effort'] }).effort.enabled, false);
   mounted.unmount();
 });
 

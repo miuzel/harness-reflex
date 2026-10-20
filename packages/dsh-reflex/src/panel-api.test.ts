@@ -26,6 +26,7 @@ import {
   type PanelRuntimeFacts,
   type PanelSource
 } from './panel-api.js';
+import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 
 /**
  * The `/api/dsh-reflex/*` surface: what it publishes, what it refuses, and what
@@ -84,6 +85,7 @@ function facts(count = 3, overrides: Partial<PanelRuntimeFacts> = {}): PanelRunt
     backendName: 'jev',
     pools: [{ model: 'reflex-pro', entries: [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] }],
     routingActive: true,
+    toolSurface: REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`),
     ledger: { getSummary: () => SUMMARY, getEntries: () => entries, getLogPath: () => '/tmp/reflex-ledger.jsonl' },
     effort: {
       level: 'high',
@@ -176,6 +178,7 @@ test('the snapshot carries exactly the projected facts', () => {
     setting: 'reflex',
     fallback: 'low',
     minConfidence: 0.3,
+    enabled: true,
     decisions: 1,
     latest: {
       level: 'high',
@@ -200,6 +203,16 @@ test('the snapshot carries exactly the projected facts', () => {
     model: 'jev-small',
     apiKeyEnv: 'REFLEX_TEST_KEY',
     timeoutMs: 2500
+  });
+  assert.deepEqual(snapshot.interventions, {
+    mode: 'observe',
+    enabled: true,
+    acting: false,
+    capabilities: { stagnation: 'observe', prune: 'observe', gate: 'observe', closing: 'observe' }
+  });
+  assert.deepEqual(snapshot.tools, {
+    enabled: Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, true])),
+    active: REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`)
   });
   assert.equal(snapshot.ledger.summary, SUMMARY);
   assert.equal(snapshot.ledger.logPath, '/tmp/reflex-ledger.jsonl');

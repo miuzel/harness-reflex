@@ -77,6 +77,70 @@ export interface EffortDraft {
   setting: string;
   fallback: string;
   minConfidence: string;
+  /** Draft of `enabled`: whether adaptive effort may decide anything. */
+  enabled: boolean;
+}
+
+/**
+ * The three-state intervention vocabulary.
+ *
+ * The browser bundle cannot value-import a Host module, so the client restates
+ * these lists and `client-contract.test.ts` holds them equal to the Host's.
+ */
+export const INTERVENTION_MODES = ['off', 'observe', 'active'] as const;
+
+/** Capability settings: the three states plus `inherit`. */
+export const INTERVENTION_SETTINGS = ['off', 'observe', 'active', 'inherit'] as const;
+
+/** The capabilities that may carry their own setting. */
+export const INTERVENTION_CAPABILITIES = ['stagnation', 'prune', 'gate', 'closing'] as const;
+
+/** One capability name in the panel vocabulary. */
+export type PanelInterventionCapability = (typeof INTERVENTION_CAPABILITIES)[number];
+
+/** The eight tool suffixes, in registration order. Restated; see above. */
+export const REFLEX_TOOL_SUFFIXES = [
+  'choice',
+  'score',
+  'route',
+  'screen',
+  'gate',
+  'prune',
+  'detect_stagnation',
+  'status_ledger'
+] as const;
+
+/** One tool suffix in the panel vocabulary. */
+export type PanelToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
+
+/** Editable draft of the automatic-intervention block. */
+export interface InterventionsDraft {
+  /** Master mode; `inherit` is not legal here. */
+  mode: string;
+  /** Capability → setting, `inherit` included. */
+  capabilities: Record<string, string>;
+  maxInterventionsPerTurn: string;
+  maxJudgmentsPerTurn: string;
+  maxJudgmentsPerSession: string;
+  repeatThreshold: string;
+  failureThreshold: string;
+  minConfidence: string;
+  windowSize: string;
+  pruneFloorRatio: string;
+  pruneHeadChars: string;
+  pruneTailChars: string;
+  intent: string;
+}
+
+/**
+ * Editable draft of the per-tool switches.
+ *
+ * Keyed by suffix, never by registered name: a deployment that renames
+ * `toolPrefix` must not have to rewrite its switches.
+ */
+export interface ToolsDraft {
+  /** Suffix → enabled. Every suffix is present; `true` is the default. */
+  enabled: Record<string, boolean>;
 }
 
 /** Editable draft of the System One connection block. */
@@ -102,17 +166,52 @@ export interface PanelDraft {
   effort: EffortDraft;
   backend: BackendDraft;
   runtime: RuntimeDraft;
+  interventions: InterventionsDraft;
+  tools: ToolsDraft;
 }
 
 /** Group names, in the order the page presents them. */
-export const DRAFT_GROUPS: readonly (keyof PanelDraft)[] = ['routing', 'effort', 'backend', 'runtime'];
+export const DRAFT_GROUPS: readonly (keyof PanelDraft)[] = [
+  'routing',
+  'effort',
+  'backend',
+  'runtime',
+  'interventions',
+  'tools'
+];
+
+/** Every tool suffix enabled, which is the documented default. */
+function allToolsEnabled(): Record<string, boolean> {
+  return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, true]));
+}
+
+/** Every capability inheriting the master mode, which is the documented default. */
+function allCapabilitiesInherit(): Record<string, string> {
+  return Object.fromEntries(INTERVENTION_CAPABILITIES.map((capability) => [capability, 'inherit']));
+}
 
 /** An empty draft: the Host defaults, with every text field blank rather than `undefined`. */
 export const EMPTY_DRAFT: PanelDraft = {
   routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
-  effort: { setting: '', fallback: 'low', minConfidence: '0.3' },
+  effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
   backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '' },
-  runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' }
+  runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
+  interventions: {
+    mode: 'observe',
+    capabilities: allCapabilitiesInherit(),
+    maxInterventionsPerTurn: '3',
+    maxJudgmentsPerTurn: '3',
+    maxJudgmentsPerSession: '20',
+    repeatThreshold: '3',
+    failureThreshold: '3',
+    minConfidence: '0.6',
+    windowSize: '6',
+    pruneFloorRatio: '0.5',
+    pruneHeadChars: '400',
+    pruneTailChars: '400',
+    intent: ''
+  },
+  tools: { enabled: allToolsEnabled() }
 };
 
 /** Read a plain object field. */
@@ -230,6 +329,10 @@ export function draftFromConfig(value: unknown): PanelDraft {
   const routing = asRecord(section.routing);
   const effort = asRecord(section.effort);
   const systemOne = asRecord(section.systemOne);
+  const interventions = asRecord(section.interventions);
+  const authoredCapabilities = asRecord(interventions.capabilities);
+  const tools = asRecord(section.tools);
+  const authoredTools = asRecord(tools.enabled);
   return {
     routing: {
       enabled: asBoolean(routing.enabled, EMPTY_DRAFT.routing.enabled),
@@ -243,7 +346,8 @@ export function draftFromConfig(value: unknown): PanelDraft {
     effort: {
       setting: asText(effort.reasoningEffort),
       fallback: asText(effort.fallback) || EMPTY_DRAFT.effort.fallback,
-      minConfidence: asText(effort.minConfidence) || EMPTY_DRAFT.effort.minConfidence
+      minConfidence: asText(effort.minConfidence) || EMPTY_DRAFT.effort.minConfidence,
+      enabled: asBoolean(effort.enabled, EMPTY_DRAFT.effort.enabled)
     },
     backend: {
       backend: asText(section.backend) || EMPTY_DRAFT.backend.backend,
@@ -257,6 +361,34 @@ export function draftFromConfig(value: unknown): PanelDraft {
       ledgerPath: asText(section.ledgerPath),
       pruneThreshold: asText(section.pruneThreshold) || EMPTY_DRAFT.runtime.pruneThreshold,
       calibrationPath: asText(section.calibrationPath)
+    },
+    // Every field of the section is carried, including the three the switch page
+    // does not feature prominently: a group write replaces the whole section, so
+    // a field left out of the draft would be deleted by an unrelated edit.
+    interventions: {
+      mode: asText(interventions.mode) || EMPTY_DRAFT.interventions.mode,
+      capabilities: Object.fromEntries(
+        INTERVENTION_CAPABILITIES.map((capability) => [
+          capability,
+          asText(authoredCapabilities[capability]) || 'inherit'
+        ])
+      ),
+      maxInterventionsPerTurn: asText(interventions.maxInterventionsPerTurn) || EMPTY_DRAFT.interventions.maxInterventionsPerTurn,
+      maxJudgmentsPerTurn: asText(interventions.maxJudgmentsPerTurn) || EMPTY_DRAFT.interventions.maxJudgmentsPerTurn,
+      maxJudgmentsPerSession: asText(interventions.maxJudgmentsPerSession) || EMPTY_DRAFT.interventions.maxJudgmentsPerSession,
+      repeatThreshold: asText(interventions.repeatThreshold) || EMPTY_DRAFT.interventions.repeatThreshold,
+      failureThreshold: asText(interventions.failureThreshold) || EMPTY_DRAFT.interventions.failureThreshold,
+      minConfidence: asText(interventions.minConfidence) || EMPTY_DRAFT.interventions.minConfidence,
+      windowSize: asText(interventions.windowSize) || EMPTY_DRAFT.interventions.windowSize,
+      pruneFloorRatio: asText(interventions.pruneFloorRatio) || EMPTY_DRAFT.interventions.pruneFloorRatio,
+      pruneHeadChars: asText(interventions.pruneHeadChars) || EMPTY_DRAFT.interventions.pruneHeadChars,
+      pruneTailChars: asText(interventions.pruneTailChars) || EMPTY_DRAFT.interventions.pruneTailChars,
+      intent: asText(interventions.intent)
+    },
+    tools: {
+      enabled: Object.fromEntries(
+        REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, asBoolean(authoredTools[suffix], true)])
+      )
     }
   };
 }
@@ -324,6 +456,35 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   if (pruneThreshold === undefined || !Number.isInteger(pruneThreshold) || pruneThreshold < 0) {
     errors.push('errPruneThreshold');
   }
+
+  // The intervention page repeats the Host's own rules so a refused write is not
+  // how the user learns that a budget field holds text.
+  if (!INTERVENTION_MODES.includes(draft.interventions.mode as (typeof INTERVENTION_MODES)[number])) {
+    errors.push('errInterventionMode');
+  }
+  for (const capability of INTERVENTION_CAPABILITIES) {
+    if (!INTERVENTION_SETTINGS.includes(draft.interventions.capabilities[capability] as (typeof INTERVENTION_SETTINGS)[number])) {
+      errors.push('errInterventionCapability');
+    }
+  }
+  const budgets: Array<[string, number]> = [
+    [draft.interventions.maxInterventionsPerTurn, 0],
+    [draft.interventions.maxJudgmentsPerTurn, 0],
+    [draft.interventions.maxJudgmentsPerSession, 0],
+    [draft.interventions.repeatThreshold, 2],
+    [draft.interventions.failureThreshold, 2],
+    [draft.interventions.windowSize, 3],
+    [draft.interventions.pruneHeadChars, 0],
+    [draft.interventions.pruneTailChars, 0]
+  ];
+  for (const [text, minimum] of budgets) {
+    const parsed = asNumber(text);
+    if (parsed === undefined || !Number.isInteger(parsed) || parsed < minimum) errors.push('errInterventionBudget');
+  }
+  for (const text of [draft.interventions.minConfidence, draft.interventions.pruneFloorRatio]) {
+    const parsed = asNumber(text);
+    if (parsed === undefined || parsed < 0 || parsed > 1) errors.push('errInterventionRatio');
+  }
   return { errors: [...new Set(errors)], ok: errors.length === 0 };
 }
 
@@ -366,6 +527,7 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
     }
     case 'effort':
       return {
+        enabled: draft.effort.enabled,
         ...(present(draft.effort.setting) === undefined ? {} : { reasoningEffort: draft.effort.setting.trim() }),
         ...(present(draft.effort.fallback) === undefined ? {} : { fallback: draft.effort.fallback.trim() }),
         ...(asNumber(draft.effort.minConfidence) === undefined ? {} : { minConfidence: asNumber(draft.effort.minConfidence) })
@@ -380,6 +542,66 @@ export function groupValue(draft: PanelDraft, group: keyof PanelDraft): unknown 
           ...(asNumber(draft.backend.timeoutMs) === undefined ? {} : { timeoutMs: asNumber(draft.backend.timeoutMs) })
         }
       };
+    case 'interventions': {
+      // Only the capability settings that were authored are written, so an
+      // inherited capability stays inherited instead of being frozen to the
+      // master mode it happens to resolve to today.
+      const capabilities: Record<string, string> = {};
+      for (const capability of INTERVENTION_CAPABILITIES) {
+        const setting = present(draft.interventions.capabilities[capability] ?? '');
+        // `inherit` *is* the omission: writing it explicitly would record a
+        // choice the user never made, and the Host derives it from the mode.
+        if (setting === undefined || setting === 'inherit') continue;
+        capabilities[capability] = setting;
+      }
+      const count = (text: string): number | undefined => {
+        const parsed = asNumber(text);
+        return parsed === undefined ? undefined : parsed;
+      };
+      return {
+        ...(present(draft.interventions.mode) === undefined ? {} : { mode: draft.interventions.mode.trim() }),
+        ...(Object.keys(capabilities).length === 0 ? {} : { capabilities }),
+        ...(count(draft.interventions.maxInterventionsPerTurn) === undefined
+          ? {}
+          : { maxInterventionsPerTurn: count(draft.interventions.maxInterventionsPerTurn) }),
+        ...(count(draft.interventions.maxJudgmentsPerTurn) === undefined
+          ? {}
+          : { maxJudgmentsPerTurn: count(draft.interventions.maxJudgmentsPerTurn) }),
+        ...(count(draft.interventions.maxJudgmentsPerSession) === undefined
+          ? {}
+          : { maxJudgmentsPerSession: count(draft.interventions.maxJudgmentsPerSession) }),
+        ...(count(draft.interventions.repeatThreshold) === undefined
+          ? {}
+          : { repeatThreshold: count(draft.interventions.repeatThreshold) }),
+        ...(count(draft.interventions.failureThreshold) === undefined
+          ? {}
+          : { failureThreshold: count(draft.interventions.failureThreshold) }),
+        ...(count(draft.interventions.minConfidence) === undefined
+          ? {}
+          : { minConfidence: count(draft.interventions.minConfidence) }),
+        ...(count(draft.interventions.windowSize) === undefined ? {} : { windowSize: count(draft.interventions.windowSize) }),
+        ...(count(draft.interventions.pruneFloorRatio) === undefined
+          ? {}
+          : { pruneFloorRatio: count(draft.interventions.pruneFloorRatio) }),
+        ...(count(draft.interventions.pruneHeadChars) === undefined
+          ? {}
+          : { pruneHeadChars: count(draft.interventions.pruneHeadChars) }),
+        ...(count(draft.interventions.pruneTailChars) === undefined
+          ? {}
+          : { pruneTailChars: count(draft.interventions.pruneTailChars) }),
+        ...(present(draft.interventions.intent) === undefined ? {} : { intent: draft.interventions.intent.trim() })
+      };
+    }
+    case 'tools': {
+      // Enabled is the default, so only the closed tools are authored. Reopening
+      // a tool therefore *removes* its key, which is what "back to default"
+      // means here — and what keeps a later change of the default effective.
+      const enabled: Record<string, boolean> = {};
+      for (const suffix of REFLEX_TOOL_SUFFIXES) {
+        if (draft.tools.enabled[suffix] === false) enabled[suffix] = false;
+      }
+      return { enabled };
+    }
     case 'runtime':
     default:
       return {
@@ -589,6 +811,8 @@ export interface PanelSnapshotLike {
     setting?: string | null;
     fallback?: string;
     minConfidence?: number;
+    /** Whether adaptive effort may decide anything. */
+    enabled?: boolean;
     decisions?: number;
     latest?: {
       level?: string;
@@ -618,6 +842,23 @@ export interface PanelSnapshotLike {
     apiKeyEnv?: string;
     apiKeyPresent?: boolean;
     timeoutMs?: number;
+  };
+  /** Effective automatic-intervention state, as the runtime resolved it. */
+  interventions?: {
+    mode?: string;
+    /** Whether any capability acts at all. */
+    enabled?: boolean;
+    /** Whether any capability resolves to `active` rather than merely observing. */
+    acting?: boolean;
+    /** Capability → effective mode, with inheritance already resolved. */
+    capabilities?: Record<string, string>;
+  };
+  /** Effective tool registration, as the runtime surface reports it. */
+  tools?: {
+    /** Registered tool names, in registration order. */
+    active?: string[];
+    /** Suffix → authored switch; every suffix is answered. */
+    enabled?: Record<string, boolean>;
   };
   ledger?: {
     summary?: {

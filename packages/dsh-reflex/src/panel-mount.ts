@@ -110,6 +110,9 @@ export function panelFacts(
     backendName: runtime.backendName,
     pools: panelPools(runtime),
     routingActive: routingActive(runtime.config),
+    // Copied, not aliased: the runtime republishes its surface on every
+    // `tools/change`, and a snapshot must not follow it after the fact.
+    toolSurface: [...runtime.toolSurface],
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
     apiKeyPresent: resolveApiKey(runtime.config.systemOne, env) !== undefined,

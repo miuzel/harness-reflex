@@ -19,6 +19,10 @@ import {
   BACKEND_CHOICES,
   EFFORT_LEVELS,
   EFFORT_TRIGGERS,
+  INTERVENTION_CAPABILITIES,
+  INTERVENTION_MODES,
+  INTERVENTION_SETTINGS,
+  REFLEX_TOOL_SUFFIXES,
   interpolate,
   ledgerRows,
   levelTone,
@@ -567,6 +571,13 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
       children: h(
         'div',
         { style: S.field },
+        Toggle({
+          checked: draft.effort.enabled,
+          label: t('labelEffortEnabled'),
+          disabled,
+          onChange: (checked) => setEffort({ enabled: checked })
+        }),
+        h('div', { style: S.hint }, t('effortDisabledHint')),
         h(
           'div',
           { style: S.fieldRow },
@@ -785,6 +796,200 @@ function GuideTab(props: { t: Translate }): ReactNode {
   );
 }
 
+/** Copy key of one three-state (or `inherit`) intervention setting. */
+function interventionModeCopyKey(value: string): string {
+  switch (value) {
+    case 'off':
+      return 'modeOff';
+    case 'active':
+      return 'modeActive';
+    case 'inherit':
+      return 'modeInherit';
+    default:
+      return 'modeObserve';
+  }
+}
+
+/** Options of an intervention mode select; `inherit` only where it is legal. */
+function interventionModeOptions(t: Translate, withInherit: boolean): { value: string; label: string }[] {
+  return (withInherit ? INTERVENTION_SETTINGS : INTERVENTION_MODES).map((value) => ({
+    value,
+    label: t(interventionModeCopyKey(value))
+  }));
+}
+
+/** Capability name → copy key of its field label. */
+const CAPABILITY_COPY: Record<string, string> = {
+  stagnation: 'labelCapabilityStagnation',
+  prune: 'labelCapabilityPrune',
+  gate: 'labelCapabilityGate',
+  closing: 'labelCapabilityClosing'
+};
+
+/** Automatic-intervention page: the master mode, the per-capability overrides, and the budgets. */
+function InterventionsTab(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
+  const { t, state, store } = props;
+  const draft = state.draft;
+  const disabled = !state.writable;
+  const setInterventions = (patch: Partial<PanelDraft['interventions']>): void => {
+    store.edit((current) => ({ ...current, interventions: { ...current.interventions, ...patch } }));
+  };
+  const setCapability = (capability: string, value: string): void => {
+    store.edit((current) => ({
+      ...current,
+      interventions: { ...current.interventions, capabilities: { ...current.interventions.capabilities, [capability]: value } }
+    }));
+  };
+  const effective = state.snapshot?.interventions;
+  const budgetField = (label: string, key: keyof PanelDraft['interventions'], placeholder: string): ReactNode =>
+    h(
+      Field,
+      { key: String(key), label: t(label) },
+      TextInput({
+        value: String(draft.interventions[key] ?? ''),
+        disabled,
+        placeholder,
+        onChange: (value) => setInterventions({ [key]: value } as Partial<PanelDraft['interventions']>)
+      })
+    );
+  return h(
+    'div',
+    { style: S.root },
+    Card({
+      title: t('groupInterventions'),
+      children: h(
+        'div',
+        { style: S.field },
+        h('div', { style: S.hint }, t('interventionsHint')),
+        h(
+          'div',
+          { style: S.fieldRow },
+          Field({
+            label: t('labelInterventionMode'),
+            hint: t('interventionModeHint'),
+            children: Select({
+              value: draft.interventions.mode,
+              options: interventionModeOptions(t, false),
+              disabled,
+              onChange: (value) => setInterventions({ mode: value })
+            })
+          }),
+          ...INTERVENTION_CAPABILITIES.map((capability) =>
+            h(
+              Field,
+              { key: capability, label: t(CAPABILITY_COPY[capability] ?? capability) },
+              Select({
+                value: draft.interventions.capabilities[capability] ?? 'inherit',
+                options: interventionModeOptions(t, true),
+                disabled,
+                onChange: (value) => setCapability(capability, value)
+              })
+            )
+          )
+        ),
+        h(
+          'div',
+          { style: S.fieldRow },
+          budgetField('labelMaxInterventionsPerTurn', 'maxInterventionsPerTurn', '3'),
+          budgetField('labelMaxJudgmentsPerTurn', 'maxJudgmentsPerTurn', '3'),
+          budgetField('labelMaxJudgmentsPerSession', 'maxJudgmentsPerSession', '20'),
+          budgetField('labelRepeatThreshold', 'repeatThreshold', '3'),
+          budgetField('labelFailureThreshold', 'failureThreshold', '3'),
+          budgetField('labelWindowSize', 'windowSize', '6'),
+          budgetField('labelInterventionMinConfidence', 'minConfidence', '0.6'),
+          budgetField('labelPruneFloorRatio', 'pruneFloorRatio', '0.5'),
+          budgetField('labelPruneHeadChars', 'pruneHeadChars', '400'),
+          budgetField('labelPruneTailChars', 'pruneTailChars', '400'),
+          Field({
+            label: t('labelPruneIntent'),
+            children: TextInput({
+              value: draft.interventions.intent,
+              disabled,
+              onChange: (value) => setInterventions({ intent: value })
+            })
+          })
+        )
+      )
+    }),
+    Card({
+      title: t('interventionsEffective'),
+      children:
+        effective === undefined
+          ? h('div', { style: S.empty }, t('effectiveUnknown'))
+          : h(
+              'table',
+              { style: S.table },
+              h(
+                'tbody',
+                null,
+                ...[
+                  [t('labelInterventionMode'), String(effective.mode ?? '')],
+                  [t('effectiveActing'), t(effective.acting === true ? 'modeActive' : effective.enabled === true ? 'modeObserve' : 'modeOff')],
+                  ...INTERVENTION_CAPABILITIES.map((capability) => [
+                    t(CAPABILITY_COPY[capability] ?? capability),
+                    String(effective.capabilities?.[capability] ?? '')
+                  ])
+                ].map(([label, value]) =>
+                  h('tr', { key: label }, h('td', { style: { ...S.td, ...S.label, width: '180px' } }, label), h('td', { style: S.td }, value))
+                )
+              )
+            )
+    })
+  );
+}
+
+/** Tool-switch page: one toggle per reflex tool, plus the effective registration. */
+function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
+  const { t, state, store } = props;
+  const draft = state.draft;
+  const disabled = !state.writable;
+  const setTool = (suffix: string, enabled: boolean): void => {
+    store.edit((current) => ({ ...current, tools: { enabled: { ...current.tools.enabled, [suffix]: enabled } } }));
+  };
+  const active = state.snapshot?.tools?.active;
+  return h(
+    'div',
+    { style: S.root },
+    Card({
+      title: t('groupTools'),
+      children: h(
+        'div',
+        { style: S.field },
+        h('div', { style: S.hint }, t('toolsHint')),
+        h(
+          'div',
+          { style: S.grid },
+          // The label is the *registered* name under the current draft prefix, so
+          // renaming the prefix shows up here immediately; the switch itself is
+          // keyed by suffix and therefore survives the rename.
+          ...REFLEX_TOOL_SUFFIXES.map((suffix) =>
+            h(
+              'div',
+              { key: suffix, style: S.field },
+              Toggle({
+                checked: draft.tools.enabled[suffix] !== false,
+                label: `${draft.runtime.toolPrefix}${suffix}`,
+                disabled,
+                onChange: (checked) => setTool(suffix, checked)
+              }),
+              h('span', { style: S.hint }, t('toolsSwitchHint'))
+            )
+          )
+        )
+      )
+    }),
+    Card({
+      title: t('toolsEffective'),
+      children:
+        active === undefined
+          ? h('div', { style: S.empty }, t('effectiveUnknown'))
+          : active.length === 0
+            ? h('div', { style: S.empty }, t('toolsAllClosed'))
+            : h('div', { style: S.mono }, ...active.map((toolName) => h('div', { key: toolName }, toolName)))
+    })
+  );
+}
+
 /** Page body. */
 function Body(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
   switch (props.state.tab) {
@@ -794,6 +999,10 @@ function Body(props: { t: Translate; state: PanelState; store: PanelStore }): Re
       return EffortTab(props);
     case 'backend':
       return BackendTab(props);
+    case 'interventions':
+      return InterventionsTab(props);
+    case 'tools':
+      return ToolsTab(props);
     case 'ledger':
       return LedgerTab(props);
     case 'guide':
@@ -918,6 +1127,10 @@ function tabCopyKey(tab: PanelTab): string {
       return 'tabEffort';
     case 'backend':
       return 'tabBackend';
+    case 'interventions':
+      return 'tabInterventions';
+    case 'tools':
+      return 'tabTools';
     case 'ledger':
       return 'tabLedger';
     case 'guide':

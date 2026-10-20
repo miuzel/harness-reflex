@@ -2,6 +2,11 @@ import z from '@deepseek-ai/schemastery';
 
 import { ADAPTIVE_EFFORT_LEVELS, EFFORT_LEVELS, EFFORT_TRIGGERS, type AdaptiveEffortLevel, type ReasoningEffortSetting } from './effort.js';
 import { parseFallback, type ModelPoolEntry, type ModelPools, type PhysicalTarget } from './router.js';
+// Runtime import, not a type-only one: the tool vocabulary is owned by the
+// registry module, and validating `tools.enabled` against a second copy of the
+// list is exactly the drift this import removes. `./tools.js` imports this
+// module for types only, so no runtime cycle exists.
+import { REFLEX_TOOL_SUFFIXES, type ReflexToolSuffix } from './tools.js';
 
 /**
  * Deployment configuration for the reflex plugin.
@@ -191,6 +196,13 @@ export interface ResolvedInterventionsConfig {
 /** Authored adaptive reasoning-effort configuration. */
 export interface ReflexEffortConfig {
   /**
+   * Whether adaptive reasoning effort may run at all. Default `true`, which is
+   * the pre-existing behaviour: `reflex`/`auto` and the virtual-route default
+   * keep deciding per turn. `false` stops every adaptive decision and withdraws
+   * the plugin-injected `reflex` level, leaving concrete levels untouched.
+   */
+  enabled?: boolean;
+  /**
    * `'reflex'`/`'auto'` makes every turn decide its own effort through System 1;
    * one concrete level (`off`/`low`/`medium`/`high`) pins requests that carry no
    * effort of their own. Omitted = the plugin never touches `reasoningEffort`.
@@ -200,6 +212,19 @@ export interface ReflexEffortConfig {
   fallback?: AdaptiveEffortLevel;
   /** Minimum System 1 confidence for its answer to be trusted. Default `0.3`. */
   minConfidence?: number;
+}
+
+/**
+ * Authored per-tool switches, indexed by tool *suffix* rather than tool name.
+ *
+ * The suffix is what a user writes (`choice`, `detect_stagnation`, …); the
+ * registered name is `toolPrefix` + suffix, so a switch keyed by name would
+ * break the moment a deployment renames its prefix. An omitted suffix stays
+ * enabled, and every suffix — including `status_ledger` — can be turned off.
+ */
+export interface ReflexToolsConfig {
+  /** Suffix → enabled. Omitted entries default to `true`; unknown keys are rejected. */
+  enabled?: Partial<Record<ReflexToolSuffix, boolean>>;
 }
 
 /** Deployment configuration for the reflex tool bundle. */
@@ -228,6 +253,8 @@ export interface ReflexConfig {
   routing?: ReflexRoutingConfig;
   /** Per-turn adaptive reasoning effort. */
   effort?: ReflexEffortConfig;
+  /** Per-tool switches of the eight reflex tools. */
+  tools?: ReflexToolsConfig;
   /** Automatic interventions on the Host's tool and agent lifecycle hooks. */
   interventions?: ReflexInterventionsConfig;
 }
@@ -257,6 +284,8 @@ export interface ResolvedSystemOneConfig {
 
 /** Effort configuration after defaults and validation have been applied. */
 export interface ResolvedEffortConfig {
+  /** Whether adaptive effort may decide anything; `true` unless authored otherwise. */
+  enabled: boolean;
   /**
    * The adaptive trigger marker or the pinned level; `undefined` (the default)
    * leaves `reasoningEffort` entirely to the caller.
@@ -266,6 +295,12 @@ export interface ResolvedEffortConfig {
   fallback: AdaptiveEffortLevel;
   /** Minimum System 1 confidence for its answer to be trusted. */
   minConfidence: number;
+}
+
+/** Per-tool switches after defaults: every suffix of the vocabulary is answered. */
+export interface ResolvedToolsConfig {
+  /** Suffix → whether the tool is registered. Every suffix has an entry. */
+  enabled: Record<ReflexToolSuffix, boolean>;
 }
 
 /** Configuration after defaults and validation have been applied. */
@@ -278,6 +313,7 @@ export interface ResolvedReflexConfig {
   systemOne: ResolvedSystemOneConfig;
   routing: ResolvedRoutingConfig;
   effort: ResolvedEffortConfig;
+  tools: ResolvedToolsConfig;
   interventions: ResolvedInterventionsConfig;
 }
 
@@ -329,6 +365,10 @@ const RoutingSchema = z.object({
 
 /** Schemastery schema for the adaptive reasoning-effort block. */
 const EffortSchema = z.object({
+  enabled: z
+    .boolean()
+    .default(true)
+    .description('Whether adaptive reasoning effort may run. Default true; false withdraws the plugin-injected adaptive level.'),
   reasoningEffort: z
     .union([...EFFORT_TRIGGERS, ...EFFORT_LEVELS])
     .description(
@@ -357,6 +397,23 @@ const SystemOneSchema = z.object({
 }).volatile();
 
 /**
+ * Schemastery schema for the per-tool switch block.
+ *
+ * Deliberately an open dictionary rather than an object with eight declared
+ * keys: schemastery drops what an object does not declare, and a dropped typo
+ * would read as "the tool stayed on" instead of failing. {@link resolveToolsConfig}
+ * therefore owns the rejection of unknown suffixes.
+ */
+const ToolsSchema = z
+  .object({
+    enabled: z
+      .dict(z.boolean())
+      .default({})
+      .description(`Suffix → enabled (${REFLEX_TOOL_SUFFIXES.join(', ')}). Omitted suffixes stay enabled.`)
+  })
+  .volatile();
+
+/**
  * Schemastery schema the Cordis loader validates the deployment config with.
  *
  * The explicit `Schemastery<ReflexConfig>` annotation is deliberate: the
@@ -376,6 +433,7 @@ export const Config: Schemastery<any> = z.object({
   systemOne: SystemOneSchema.default({}),
   routing: RoutingSchema.default({}),
   effort: EffortSchema.default({}),
+  tools: ToolsSchema.default({}),
   interventions: InterventionsSchema.default({})
 });
 
@@ -641,6 +699,10 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
   if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
     throw new Error(`effort.minConfidence must be a number in [0, 1] (got "${String(effort.minConfidence)}")`);
   }
+  const effortEnabled = effort.enabled ?? true;
+  if (typeof effortEnabled !== 'boolean') {
+    throw new Error(`effort.enabled must be a boolean (got "${String(effort.enabled)}")`);
+  }
 
   return {
     backend: validated.backend ?? 'auto',
@@ -657,12 +719,65 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
       ...(fallback ? { fallback } : {})
     },
     effort: {
+      enabled: effortEnabled,
       ...(setting === undefined ? {} : { setting }),
       fallback: effortFallback,
       minConfidence
     },
+    tools: resolveToolsConfig(validated.tools),
     interventions: resolveInterventionsConfig(validated.interventions)
   };
+}
+
+/**
+ * Validate the per-tool switch block and fill in every omitted suffix.
+ *
+ * Both failure modes are answered here, not by the schema: an unknown suffix
+ * (a typo, or a tool this build does not ship) and a non-boolean value. A
+ * deployment that cannot be honoured fails at resolution time rather than
+ * half-registering its tools.
+ *
+ * A programmatic caller that passes the switch map itself (instead of wrapping
+ * it in `enabled`) is rejected too: silently reading it as "nothing authored"
+ * would turn that typo into a deployment where everything stays registered.
+ *
+ * @param authored - the authored `tools` block.
+ * @returns every suffix of the vocabulary mapped to its effective switch.
+ * @throws Error when the block, a key, or a value cannot be honoured.
+ */
+export function resolveToolsConfig(authored: ReflexToolsConfig | undefined): ResolvedToolsConfig {
+  if (authored !== undefined && (authored === null || typeof authored !== 'object' || Array.isArray(authored))) {
+    throw new Error(`tools must be an object mapping tool suffixes to booleans (got "${String(authored)}")`);
+  }
+  const block = authored ?? {};
+  const extraKeys = Object.keys(block).filter((key) => key !== 'enabled');
+  if (extraKeys.length > 0) {
+    const rendered = extraKeys.map((key) => JSON.stringify(key)).join(', ');
+    throw new Error(
+      `tools has unknown key${extraKeys.length === 1 ? '' : 's'} ${rendered}; only "enabled" is supported`
+    );
+  }
+  const switches = block.enabled;
+  if (switches !== undefined && (switches === null || typeof switches !== 'object' || Array.isArray(switches))) {
+    throw new Error(`tools.enabled must be an object mapping tool suffixes to booleans (got "${String(switches)}")`);
+  }
+  const authoredSwitches = switches ?? {};
+  const unknown = Object.keys(authoredSwitches).filter((key) => !(REFLEX_TOOL_SUFFIXES as readonly string[]).includes(key));
+  if (unknown.length > 0) {
+    const rendered = unknown.map((key) => JSON.stringify(key)).join(', ');
+    throw new Error(
+      `tools.enabled has unknown tool ${unknown.length === 1 ? 'switch' : 'switches'} ${rendered}; legal suffixes are ${REFLEX_TOOL_SUFFIXES.join(', ')}`
+    );
+  }
+  const enabled = {} as Record<ReflexToolSuffix, boolean>;
+  for (const suffix of REFLEX_TOOL_SUFFIXES) {
+    const value = authoredSwitches[suffix];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(`tools.enabled.${suffix} must be a boolean (got "${String(value)}")`);
+    }
+    enabled[suffix] = value ?? true;
+  }
+  return { enabled };
 }
 
 /**

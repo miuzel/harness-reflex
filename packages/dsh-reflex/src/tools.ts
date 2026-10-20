@@ -23,12 +23,30 @@ export const REFLEX_TOOL_SUFFIXES = [
 export type ReflexToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
 
 /**
- * Compose the registered tool names for one deployment.
+ * The suffixes this activation actually registers, in registration order.
+ *
+ * Reads the resolved switch block rather than the authored one, so the tool
+ * names, the tool definitions, and `runtime.toolSurface` all derive from the
+ * same answer. A suffix is off only when it was explicitly switched off: an
+ * omitted entry — and a config resolved before this block existed — stays on.
  * @param config - resolved plugin configuration.
- * @returns the eight prefixed tool names, in registration order.
+ * @returns the enabled suffixes.
+ */
+export function enabledReflexToolSuffixes(config: ResolvedReflexConfig): ReflexToolSuffix[] {
+  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] !== false);
+}
+
+/**
+ * Compose the registered tool names for one deployment.
+ *
+ * A disabled tool contributes no name at all: the panel, the registry, and the
+ * runtime surface must not disagree about whether a tool exists. Closing a tool
+ * is unregistration, not a placeholder that answers "disabled".
+ * @param config - resolved plugin configuration.
+ * @returns the enabled prefixed tool names, in registration order.
  */
 export function reflexToolNames(config: ResolvedReflexConfig): string[] {
-  return REFLEX_TOOL_SUFFIXES.map((suffix) => `${config.toolPrefix}${suffix}`);
+  return enabledReflexToolSuffixes(config).map((suffix) => `${config.toolPrefix}${suffix}`);
 }
 
 /**
@@ -86,14 +104,18 @@ function assertDeclaredArguments<T extends Record<string, unknown>>(
 
 /**
  * Declare the reflex tool set bound to one runtime.
+ *
+ * The definitions are declared in vocabulary order and then filtered by the
+ * same resolved switches {@link reflexToolNames} reads, so a registry entry and
+ * a surface entry can never disagree about which tools exist.
  * @param runtime - the activation's System One runtime.
- * @param config - resolved plugin configuration (supplies the name prefix).
- * @returns registry-ready tool definitions, in {@link REFLEX_TOOL_SUFFIXES} order.
+ * @param config - resolved plugin configuration (supplies the name prefix and the switches).
+ * @returns registry-ready definitions of the enabled tools, in {@link REFLEX_TOOL_SUFFIXES} order.
  */
 export function defineReflexTools(runtime: ReflexRuntime, config: ResolvedReflexConfig): ToolDefinition[] {
   const name = (suffix: ReflexToolSuffix): string => `${config.toolPrefix}${suffix}`;
 
-  return [
+  const definitions = [
     defineTool({
       name: name('choice'),
       description:
@@ -284,4 +306,7 @@ export function defineReflexTools(runtime: ReflexRuntime, config: ResolvedReflex
       }
     })
   ] as ToolDefinition[];
+
+  const active = new Set(reflexToolNames(config));
+  return definitions.filter((definition) => active.has(definition.name));
 }

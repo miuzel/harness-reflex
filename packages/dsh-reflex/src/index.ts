@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 
-import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, routingActive, type ReflexConfig } from './config.js';
+import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, type ReflexConfig } from './config.js';
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
-import { defineReflexTools, reflexToolNames } from './tools.js';
+import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
 import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
 import { appendInterventionRecord, appendPrunedOriginal } from './session-audit.js';
@@ -34,7 +34,8 @@ export const name = 'dsh-reflex';
  */
 export const inject = ['tools', 'llm'];
 
-export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, routingActive, createReflexRuntime, defineReflexTools, reflexToolNames };
+export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
+export type { ReflexToolsConfig, ResolvedToolsConfig } from './config.js';
 export {
   INTERVENTION_CAPABILITIES,
   INTERVENTION_MODES,

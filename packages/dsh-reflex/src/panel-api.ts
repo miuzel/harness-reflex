@@ -29,6 +29,7 @@ import type { DecisionLedger, LedgerEntry } from './vendor/harness-reflex/index.
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 
 import type { ResolvedReflexConfig } from './config.js';
+import { INTERVENTION_CAPABILITIES } from './config.js';
 import type { ReflexEffortStatus } from './effort.js';
 
 /** Version reported by the panel; kept in step with `package.json` by a test. */
@@ -90,10 +91,32 @@ export interface PanelEffortView {
   setting: string | null;
   fallback: string;
   minConfidence: number;
+  /** Whether adaptive effort may decide anything; `false` turns the adaptive half off. */
+  enabled: boolean;
   /** Most recent adaptive decision of this activation, if any. */
   latest: PanelEffortDecision | null;
   /** How many adaptive decisions the ledger has recorded. */
   decisions: number;
+}
+
+/** Automatic-intervention block of the snapshot. */
+export interface PanelInterventionsView {
+  /** Authored master mode. */
+  mode: string;
+  /** Whether any capability is enabled at all. */
+  enabled: boolean;
+  /** Whether any capability resolves to `active` rather than merely observing. */
+  acting: boolean;
+  /** Capability → effective mode, with `inherit` already resolved. */
+  capabilities: Record<string, string>;
+}
+
+/** Per-tool switch block of the snapshot. */
+export interface PanelToolsView {
+  /** Suffix → switch, every suffix of the vocabulary answered. */
+  enabled: Record<string, boolean>;
+  /** Registered tool names as the runtime surface reports them, in registration order. */
+  active: string[];
 }
 
 /** One projected adaptive-effort decision (`effort-decision` ledger entries and the live feed agree on these). */
@@ -210,6 +233,8 @@ export interface PanelSnapshot {
   routing: PanelRoutingView;
   effort: PanelEffortView;
   systemOne: PanelSystemOneView;
+  interventions: PanelInterventionsView;
+  tools: PanelToolsView;
   ledger: PanelLedgerView;
   modelCatalog?: PanelModelGroup[];
 }
@@ -228,6 +253,15 @@ export interface PanelRuntimeFacts {
   pools: PanelPoolView[];
   /** Whether the virtual provider route is installed. */
   routingActive: boolean;
+  /**
+   * Registered tool names of this activation, as
+   * {@link ReflexRuntime.toolSurface} reports them.
+   *
+   * Required, not derived from the switches: the panel's promise is to show the
+   * *effective* surface, and a derived guess would keep agreeing with the config
+   * while the registry disagreed with both.
+   */
+  toolSurface: readonly string[];
   ledger: Pick<DecisionLedger, 'getSummary' | 'getEntries' | 'getLogPath'>;
   /** Latest adaptive decision of this activation. */
   effort: ReflexEffortStatus | undefined;
@@ -350,8 +384,19 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       setting: config.effort.setting ?? null,
       fallback: config.effort.fallback,
       minConfidence: config.effort.minConfidence,
+      enabled: config.effort.enabled,
       decisions,
       latest: facts.effort === undefined ? null : projectEffortDecision(facts.effort)
+    },
+    interventions: {
+      mode: config.interventions.mode,
+      enabled: config.interventions.enabled,
+      acting: INTERVENTION_CAPABILITIES.some((capability) => config.interventions.capabilities[capability] === 'active'),
+      capabilities: { ...config.interventions.capabilities }
+    },
+    tools: {
+      enabled: { ...config.tools.enabled },
+      active: [...facts.toolSurface]
     },
     systemOne: {
       backend: config.systemOne.backend,
