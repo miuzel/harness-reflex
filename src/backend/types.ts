@@ -90,10 +90,48 @@ export interface StagnationCheckResponse {
   latencyMs: number;
 }
 
+/**
+ * Session facts one routing decision reasons about.
+ *
+ * They exist for prompt-cache affinity: switching a session onto another
+ * physical model invalidates the upstream prompt prefix cache, so the decision
+ * needs to know which model holds the cached prefix and how much context is
+ * already in it. Every field is optional — a caller that knows nothing about
+ * the session (a hand-built one-shot call) simply omits the block.
+ */
+export interface RouteRequestState {
+  /** Physical `provider:model` the session is currently using, when known. */
+  currentModel?: string;
+  /** Estimated tokens of the session context accumulated so far. */
+  contextTokens?: number;
+  /** Character count the token estimate was derived from. */
+  contextChars?: number;
+}
+
+/** One candidate of a {@link RouteRequest}. */
+export interface RouteCandidateItem {
+  name: string;
+  description: string;
+  type?: 'tool' | 'skill' | 'action';
+  /**
+   * Whether this candidate is the physical model the session already uses.
+   * Returning it costs no cache miss; a backend that builds a prompt should
+   * say so next to the candidate.
+   */
+  current?: boolean;
+}
+
 export interface RouteRequest {
   goal: string;
-  candidates: Array<{ name: string; description: string; type?: 'tool' | 'skill' | 'action' }>;
+  candidates: RouteCandidateItem[];
   topK?: number;
+  /** Cache-affinity facts: the model in use and the accumulated context size. */
+  state?: RouteRequestState;
+  /**
+   * Decision instructions the backend must carry into its prompt — the
+   * cache-affinity policy ("keep the current model unless clearly outmatched").
+   */
+  instructions?: string;
 }
 
 export interface RouteResponse {

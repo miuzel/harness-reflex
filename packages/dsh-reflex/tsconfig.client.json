@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "lib": ["ES2022", "DOM"],
+    "rootDir": "./src/client",
+    "outDir": "./dist-client",
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "removeComments": false,
+    "declaration": false,
+    "sourceMap": false,
+    "importHelpers": false,
+    "esModuleInterop": false,
+    "isolatedModules": false,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["src/client/**/*"]
+}

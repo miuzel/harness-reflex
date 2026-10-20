@@ -25,8 +25,8 @@
        ┌───────────────────┼────────────────────────────────┼───────────────────┐
        ▼                   ▼                                ▼                   ▼
 [官方 Jev API]      [simple-jev / vLLM]             [本地 Mock / 启发式]    [自托管模型]
-(POST /v1/choice    (max_tokens: 1,                 (用于测试、开发与        (Qwen / DeepSeek)
- /v1/gate 等)       next-token logprobs)             离线基准跑分)
+(POST /v1/systemone (max_tokens: 1,                 (用于测试、开发与        (Qwen / DeepSeek)
+  single endpoint)   next-token logprobs)             离线基准跑分)
 ```
 
 1. **跨 Harness 零门槛适配**：
@@ -50,6 +50,20 @@
    - 内置 `calibrate` 引擎，可基于历史标注集拟合单调映射曲线，计算 ECE 误差并输出校准配置；
    - 线上运行时自动修正过度自信的模型原始概率，杜绝盲目放行。
 
+4. **DSH Host 插件（进程内集成，`dsh-reflex`）**：
+   - 除 stdio MCP 之外，同一套 System One 能力还以 **DSH Cordis Host 插件**形式在 `dsh` 进程内注册：
+     `packages/dsh-reflex/` 通过 `ctx.tools` 注入 8 个同名 `reflex_*` 工具，省掉子进程与 JSON-RPC 往返。
+   - 严格参数校验沿用 Host 的 `defineTool`（必填/类型/枚举/嵌套 `additionalProperties`），工具层再拦截
+     顶层未声明参数；卸载时通过单个 `ctx.effect` 摘除观察者、逆序注销工具、释放运行时，完全可逆。
+   - 同时提供**虚拟 Provider 与动态模型路由**：注册虚拟 provider（默认 `reflex`），把 `reflex-auto` /
+     `reflex-fast` 这类虚拟模型按配置的物理候选池用 System 1 在 `agent/request` 上毫秒级改写成真实
+     `provider/model`（主代理与 subagent 都覆盖，每条决策写 `type: 'model-route'` 台账）；
+     未配置候选池时**不注册**该 provider，池为空且无 `routing.fallback` 时 **Fail-Closed**。
+   - 路由**上下文感知且带会话粘性**：决策请求带上本会话累积的上下文规模与当前物理模型，提示词写明
+     「保留当前模型可省缓存、非必要不切」，名次相近（未超出 `stickyMargin`，默认 15%）时守住已在用的
+     模型，只有明显更合适才切换；`model-route` 台账记 `currentModel` / `switched` / `contextTokens`。
+   - 详见 [`docs/dsh-plugin.md`](docs/dsh-plugin.md) 与 [`packages/dsh-reflex/README.md`](packages/dsh-reflex/README.md)。
+
 ---
 
 ## 快速安装与配置
@@ -60,7 +74,13 @@ npm install
 npm run build
 ```
 
-### 2. 一键配置 Harness
+### 2. 构建（含 DSH Host 插件）
+```bash
+# 根包 tsc → 链接本机 DSH 依赖（离线可用的软链，无需 registry）→ 插件 tsc
+npm run build:all
+```
+
+### 3. 一键配置 Harness
 ```bash
 # 自动为 Claude Code, Codex, Antigravity 全部生成配置文件与规则
 node dist/cli/index.js setup all
@@ -71,7 +91,7 @@ node dist/cli/index.js setup codex
 node dist/cli/index.js setup agy
 ```
 
-### 3. 配置 System One 决策后端（可选）
+### 4. 配置 System One 决策后端（可选）
 默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
 
 ```bash
@@ -103,3 +123,44 @@ node --experimental-strip-types experiments/index.ts
 ```bash
 node dist/cli/index.js ledger
 ```
+
+---
+
+## 测试
+
+```bash
+npm test                 # 根包：ledger / score / route / route-prompt / MCP 表面 / 打包清单（26 个测试）
+npm run test:plugin      # DSH 插件：注册、严格校验、8 个工具行为、生命周期、虚拟 provider 路由（含上下文感知与会话粘性）、设置面板与使用说明（186 个测试）
+npm run test:all         # 构建根包 + 插件，然后跑两套测试
+npm run test:mutation    # 负向对照：注入 32 个故障，要求被测试（或编译器）抓住
+```
+
+---
+
+## 使用说明与发布产物
+
+- **[`USER_GUIDE.md`](USER_GUIDE.md)**（中文）与 **[`docs/USER_GUIDE.en.md`](docs/USER_GUIDE.en.md)**（English）：
+  插件架构、虚拟 Provider 模型池配置、自适应思考等级（`reflex` / `auto`）、System 1 后端接入、
+  MCP 与原生 DSH 工具对照、决策账本、测试与发布流程。这两份文档会被嵌入插件前端，
+  可在 DSH 设置页 **Reflex → 使用说明 / Guide** 标签页内直接切换中英文阅读。
+
+```bash
+npm run release:pack     # 打包两个包到 release/：结构审计 + 离线安装冒烟 + SHA256SUMS
+npm run release          # 全量构建与测试通过后再打包（发布闸门）
+```
+
+产物路径：
+
+| 产物 | 说明 |
+| --- | --- |
+| `release/harness-reflex-<version>.tgz` | 根包：核心运行时、CLI、stdio MCP、适配器、`dist/`（含类型与自包含 source map）、`USER_GUIDE.md`、`docs/` |
+| `release/dsh-reflex-<version>.tgz` | DSH Host 插件：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
+| `release/SHA256SUMS` | 两份 tarball 的 SHA-256 校验和 |
+| `release/release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
+| `release/RELEASE-<version>.md` | 发布说明：安装方式、核验清单、内容构成 |
+
+`npm run release:pack` 不止于「打包成功」：它解压两份 tarball，核对必需文件、
+拒绝测试构建产物、临时目录与本地绝对路径，解析全部相对引用与 source map 目标（零死链，
+且不允许未声明的运行时依赖），再对根包做一次真实 `npm install`（`bin`、具名 import 与
+stdio MCP `tools/list` 冒烟）。
+

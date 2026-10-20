@@ -11,6 +11,7 @@ import {
   RouteRequest,
   RouteResponse
 } from './types.js';
+import { buildRouteContext } from './route-prompt.js';
 
 export interface SimpleJevConfig {
   vllmBaseUrl?: string;
@@ -304,7 +305,7 @@ Answer (A or B):`;
     const choiceRes = await this.choice({
       question: `Which tool or skill is best suited to achieve the goal: "${req.goal}"?`,
       options,
-      context: req.candidates.map((c) => `${c.name}: ${c.description}`).join('\n')
+      context: buildRouteContext(req)
     });
 
     return {

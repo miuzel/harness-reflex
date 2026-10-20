@@ -5,6 +5,7 @@ export * from './backend/simple-jev.js';
 export * from './backend/factory.js';
 
 export * from './core/gate.js';
+export * from './core/score.js';
 export * from './core/prune.js';
 export * from './core/stagnation.js';
 export * from './core/route.js';

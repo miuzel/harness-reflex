@@ -1,0 +1,253 @@
+import type { Context } from '@deepseek-ai/cordis';
+import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
+
+import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, routingActive, type ReflexConfig } from './config.js';
+import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
+import { installModelRouting } from './routing.js';
+import { defineReflexTools, reflexToolNames } from './tools.js';
+import { mountReflexPanel } from './panel-mount.js';
+import { installActualProjection } from './actual-projection.js';
+
+/**
+ * DSH Host plugin that exposes the `harness-reflex` System One decision runtime
+ * as in-process tools and as a System 1 model router.
+ *
+ * One activation owns one {@link ReflexRuntime} — its backend, ledger, the five
+ * decision services, and the virtual→physical model router — and registers the
+ * eight `reflex_*` tools on `ctx.tools`. Everything is created inside a single
+ * `ctx.effect`, so unloading the plugin (or disposing the context) unregisters
+ * every tool, detaches the `tools/change` observer, releases the virtual
+ * provider route, and drops the runtime whole.
+ *
+ * @module dsh-reflex
+ */
+
+/** Cordis plugin name. */
+export const name = 'dsh-reflex';
+
+/**
+ * The runtime needs the tool registry and, for model routing, the LLM service:
+ * the virtual provider is a real provider route on `ctx.llm`, and the
+ * dispatch-level layer delegates through `ctx.llm.stream`.
+ */
+export const inject = ['tools', 'llm'];
+
+export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, routingActive, createReflexRuntime, defineReflexTools, reflexToolNames };
+export { createBackend } from './bridge.js';
+export {
+  PANEL_BASE,
+  PANEL_LEDGER_WINDOW,
+  PANEL_LEDGER_WINDOW_MAX,
+  PANEL_PATHS,
+  PANEL_ROUTES,
+  REFLEX_PLUGIN_VERSION,
+  answerPanelRequest,
+  buildPanelSnapshot,
+  clampLimit,
+  isLoopbackAddress,
+  isLoopbackIPv4,
+  isPanelRequestAllowed,
+  makePanelRoutes,
+  projectEffortDecision,
+  readLimit,
+  readQuery,
+  sendPanelAnswer
+} from './panel-api.js';
+export type {
+  PanelAnswer,
+  PanelEffortDecision,
+  PanelEffortView,
+  PanelLedgerRow,
+  PanelLedgerSummary,
+  PanelLedgerView,
+  PanelPluginView,
+  PanelPoolEntry,
+  PanelPoolView,
+  PanelResponse,
+  PanelRoutingView,
+  PanelRuntimeFacts,
+  PanelSnapshot,
+  PanelSource,
+  PanelSystemOneView
+} from './panel-api.js';
+export { mountReflexPanel } from './panel-mount.js';
+export { createPanelSource, panelFacts, panelPools } from './panel-mount.js';
+export { ReflexRuntime } from './bridge.js';
+export { REFLEX_TOOL_SUFFIXES } from './tools.js';
+export { installModelRouting } from './routing.js';
+export {
+  ADAPTIVE_EFFORT_LEVELS,
+  EFFORT_CHOICE_OPTIONS,
+  EFFORT_LEVELS,
+  EFFORT_TRIGGERS,
+  EffortInterceptor,
+  EffortStatusFeed,
+  buildEffortChoice,
+  classifyByCues,
+  effortRank,
+  formatEffortStatusLine,
+  isAdaptiveEffortLevel,
+  isEffortLevel,
+  isEffortTrigger,
+  levelOfChoiceOption,
+  projectEffort,
+  readEffortCues,
+  snapEffort
+} from './effort.js';
+export { EFFORT_RECORD_TYPE, appendEffortRecord, effortRecordsOf, toEffortAuditRecord } from './session-audit.js';
+export { ReflexVirtualAdapter } from './virtual-adapter.js';
+export {
+  ReflexRoutingError,
+  VirtualModelRouter,
+  alignReasoningEffort,
+  formatTargetName,
+  parseFallback,
+  parseTargetName
+} from './router.js';
+export type {
+  ReflexConfig,
+  ReflexEffortConfig,
+  ReflexRoutingConfig,
+  ReflexSystemOneConfig,
+  ResolvedEffortConfig,
+  ResolvedReflexConfig,
+  ResolvedRoutingConfig,
+  ResolvedSystemOneConfig
+} from './config.js';
+export type { ReflexChoiceResult, ReflexLedgerResult, ReflexPruneResult } from './bridge.js';
+export type { ReflexToolSuffix } from './tools.js';
+export type { ModelRoutingInstallation, ModelRoutingOptions } from './routing.js';
+export type {
+  AdaptiveEffortLevel,
+  EffortAgentFacts,
+  EffortCues,
+  EffortDecider,
+  EffortDecision,
+  EffortInterceptorOptions,
+  EffortLevel,
+  EffortOutcome,
+  EffortRequestContext,
+  EffortResolution,
+  EffortSource,
+  EffortTrigger,
+  EffortTriggerKind,
+  ReasoningEffortSetting,
+  ReflexEffortStatus
+} from './effort.js';
+export type { EffortAuditRecord } from './session-audit.js';
+export type { ReflexVirtualAdapterOptions } from './virtual-adapter.js';
+export type {
+  ModelPoolEntry,
+  ModelPools,
+  PhysicalTarget,
+  ReasoningProbe,
+  ReasoningSupport,
+  RouteContext,
+  RouteDecision,
+  RoutingFailureCode,
+  RoutingReason,
+  VirtualModelRouterOptions
+} from './router.js';
+
+/**
+ * Cordis plugin entry point: register the reflex tool set for one activation.
+ *
+ * Returns nothing on purpose — Cordis interprets a plugin callback's return
+ * value as an effect (a disposer, or an iterable/promise of disposers), so the
+ * runtime is published through {@link applyReflex} instead.
+ * @param ctx - registrant context carrying the tool and LLM services.
+ * @param config - deployment configuration.
+ */
+export function apply(ctx: Context, config?: ReflexConfig): void {
+  applyReflex(ctx, config);
+}
+
+/**
+ * Same activation as {@link apply}, but hands the caller the runtime it built.
+ *
+ * Useful for tests, diagnostics, and Hosts that want to audit the ledger
+ * directly. The runtime is deliberately *not* registered as a context service:
+ * one deployment may activate the plugin more than once (say, with different
+ * tool prefixes), which a single fixed service name could not represent.
+ * @param ctx - registrant context carrying the tool and LLM services.
+ * @param config - deployment configuration; defaults are resolved here, so a
+ *   raw or already-resolved config both work.
+ * @returns the activation's runtime, disposed when the plugin unloads.
+ */
+export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime {
+  const resolved = resolveConfig(config);
+  const runtime = createReflexRuntime(resolved);
+  installActualProjection(ctx);
+  const toolNames = reflexToolNames(resolved);
+  runtime.noteToolSurface(toolNames);
+
+  ctx.effect(() => {
+    const disposers = defineReflexTools(runtime, resolved).map((definition) => ctx.tools.register(definition));
+
+    // The registry is process-wide, so the published surface is re-derived on
+    // every change instead of assumed static.
+    const stopObserving = ctx.on('tools/change', () => {
+      if (runtime.disposed) return;
+      runtime.noteToolSurface(toolNames.filter((toolName) => ctx.tools.get(toolName) !== undefined));
+    });
+
+    const stopRouting = installRouting(ctx, runtime, resolved.routing.maxTaskChars);
+    const unmountPanel = mountReflexPanel(ctx, runtime);
+
+    const injectSettings = (ctx as { inject?: (deps: string[], cb: (scope: any) => void) => void }).inject;
+    if (typeof injectSettings === 'function') {
+      injectSettings(['settings'], (sctx) => {
+        const svc = sctx?.settings;
+        if (typeof svc?.configure === 'function') {
+          sctx.effect(() => svc.configure({ auto: false }, (ctx as any).fiber));
+        }
+      });
+    }
+
+    return () => {
+      stopObserving();
+      stopRouting();
+      unmountPanel();
+      for (const dispose of disposers.reverse()) dispose();
+      runtime.dispose();
+    };
+  }, 'reflex tools');
+
+  return runtime;
+}
+
+/**
+ * Install the request interception layers of this activation.
+ *
+ * The listeners are installed whenever the LLM service is present, because the
+ * adaptive-effort layer is not tied to a virtual route: a deployment may enable
+ * per-turn effort while routing is off, and a request may carry the `reflex`
+ * marker on its own. Registering the virtual *route* stays opt-in — without a
+ * single non-empty candidate pool (or with `routing.enabled: false`) nothing is
+ * registered, so a `reflex` selection can never silently resolve to an
+ * unconfigured provider. The absence of the LLM service is tolerated as well:
+ * `inject` makes the Host wait for it, and this guard keeps direct embedders
+ * (tests, `applyReflex` callers) working without one.
+ * @param ctx - registrant context.
+ * @param runtime - the activation's runtime.
+ * @param maxTaskChars - task-text budget captured from `agent/pre-step`.
+ * @returns a disposer that releases the route and its listeners.
+ */
+function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: number): () => void {
+  const llm = (ctx as { llm?: LlmRuntime }).llm;
+  if (!llm) {
+    ctx.logger?.('dsh-reflex')?.warn('LLM service is unavailable; request interception stays off for this activation');
+    return () => {};
+  }
+
+  const installation = installModelRouting(ctx, {
+    llm,
+    router: runtime.modelRouter,
+    effort: runtime.effort,
+    route: routingActive(runtime.config),
+    maxTaskChars,
+    warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
+  });
+
+  return () => installation.dispose();
+}

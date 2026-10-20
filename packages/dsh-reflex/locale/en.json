@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reflex (System One)",
+    "description": "Fast System One decisions inside the agent process: multi-class choice, 0-1 scoring, routing, injection screening, fail-closed verification gates, output pruning, stagnation detection, a decision ledger, and a virtual provider that routes reflex-auto style model names onto physical provider/model targets with System 1."
+  }
+}

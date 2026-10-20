@@ -3,3 +3,15 @@ dist/
 .reflex/
 .DS_Store
 *.log
+tmp/
+dist-client/
+
+# Generated at build time by scripts/embed-user-guide.mjs from USER_GUIDE.md
+# and docs/USER_GUIDE.en.md, which stay the single source of truth.
+packages/dsh-reflex/src/client/guide.generated.ts
+
+# release/: the tarballs, their checksums and the machine report are build
+# outputs of `npm run release`; the human-readable notes stay trackable.
+release/*.tgz
+release/SHA256SUMS
+release/release-report.json

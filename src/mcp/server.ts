@@ -5,6 +5,7 @@ import { ToolResultPruner } from '../core/prune.js';
 import { StagnationDetector } from '../core/stagnation.js';
 import { ReflexRouter } from '../core/route.js';
 import { DecisionLedger } from '../core/ledger.js';
+import { scoreStatement } from '../core/score.js';
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -165,7 +166,22 @@ export class ReflexMcpServer {
                     },
                     required: ['tool', 'input']
                   },
-                  goal: { type: 'string', description: 'Current overall goal' }
+                  goal: { type: 'string', description: 'Current overall goal' },
+                  history: {
+                    type: 'array',
+                    description:
+                      'Earlier steps of the run, oldest first, when this process did not record them itself (a resumed or delegated run).',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        tool: { type: 'string', description: 'Tool that was executed' },
+                        input: { type: 'string', description: 'Input provided to the tool' },
+                        output: { type: 'string', description: 'Tool output or error summary' },
+                        error: { type: 'string', description: 'Error message if failed' }
+                      },
+                      required: ['tool', 'input']
+                    }
+                  }
                 }
               }
             },
@@ -286,7 +302,7 @@ export class ReflexMcpServer {
           if (args.recentAction) {
             this.stagnation.recordAction(args.recentAction);
           }
-          const res = await this.stagnation.check(args.goal);
+          const res = await this.stagnation.check(args.goal, args.history);
           contentText = JSON.stringify(res, null, 2);
         } else if (toolName === 'reflex_route') {
           const res = await this.router.selectBest(args.goal || '', args.candidates || [], args.topK || 3);
@@ -314,30 +330,14 @@ export class ReflexMcpServer {
 
           contentText = JSON.stringify({ ...choiceRes, calibratedConfidence }, null, 2);
         } else if (toolName === 'reflex_score') {
-          // Standard System One scoring
-          const statement = args.statement || '';
-          const criteria = args.criteria || 'Rate alignment from 0.0 to 1.0';
-          const evalRes = await this.backend.choice({
-            question: `Evaluate the following statement against the criteria: "${criteria}". Is the quality/truth high, medium, or low?`,
-            options: ['High alignment (score ~0.9)', 'Moderate alignment (score ~0.5)', 'Poor alignment (score ~0.1)'],
-            context: `Statement: ${statement}\nContext: ${args.context || 'None'}`
+          // Standard System One scoring (shared with the DSH Host tool surface)
+          const scoreRes = await scoreStatement(this.backend, {
+            statement: args.statement,
+            criteria: args.criteria,
+            context: args.context
           });
 
-          const pHigh = evalRes.options.find((o) => o.label.includes('High'))?.probability || 0;
-          const pMed = evalRes.options.find((o) => o.label.includes('Moderate'))?.probability || 0;
-          const pLow = evalRes.options.find((o) => o.label.includes('Poor'))?.probability || 0;
-          const score = Number((pHigh * 0.9 + pMed * 0.5 + pLow * 0.1).toFixed(3));
-
-          contentText = JSON.stringify(
-            {
-              statement,
-              score,
-              distribution: { high: pHigh, medium: pMed, low: pLow },
-              latencyMs: evalRes.latencyMs
-            },
-            null,
-            2
-          );
+          contentText = JSON.stringify(scoreRes, null, 2);
         } else if (toolName === 'reflex_screen') {
           const screenRes = await this.screen.screen({
             content: args.content || '',

@@ -1,19 +1,55 @@
 {
   "name": "harness-reflex",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "type": "module",
   "description": "System 1 decision runtime and Jev-compatible reflex layer for Codex, Claude Code, and Antigravity (AGY)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/server.d.ts",
+      "default": "./dist/mcp/server.js"
+    },
+    "./core/*": {
+      "types": "./dist/core/*.d.ts",
+      "default": "./dist/core/*.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "harness-reflex": "dist/cli/index.js"
   },
+  "files": [
+    "USER_GUIDE.md",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.js.map",
+    "!dist/**/*.test.d.ts",
+    "README.md",
+    "docs/**/*.md",
+    "experiments/**/*.ts",
+    "!experiments/**/*.d.ts",
+    "experiments/data/**/*.json"
+  ],
   "scripts": {
     "build": "tsc",
+    "build:all": "npm run build && node scripts/embed-user-guide.mjs && node scripts/link-dsh-deps.mjs && tsc -p packages/dsh-reflex/tsconfig.json && npm run build:plugin-client",
+    "build:plugin-client": "node scripts/embed-user-guide.mjs && tsc -p packages/dsh-reflex/tsconfig.client.json && node packages/dsh-reflex/dist/client-bundle.js packages/dsh-reflex",
     "watch": "tsc --watch",
     "start": "node dist/cli/index.js",
     "mcp": "node dist/cli/index.js mcp",
-    "test": "node --test dist/**/*.test.js"
+    "test": "node --test \"dist/**/*.test.js\"",
+    "test:plugin": "node --test \"packages/dsh-reflex/dist/**/*.test.js\"",
+    "test:all": "npm run build:all && npm run test && npm run test:plugin",
+    "test:mutation": "node packages/dsh-reflex/scripts/mutation-check.mjs",
+    "release:pack": "node scripts/release-pack.mjs",
+    "release": "npm run test:all && npm run test:mutation && npm run release:pack"
   },
   "keywords": [
     "jev",

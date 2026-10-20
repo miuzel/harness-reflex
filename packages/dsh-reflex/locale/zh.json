@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Reflex（System One 决策）",
+    "description": "在 Agent 进程内直接完成 System One 快速决策：多选一概率预测、0~1 连续评分、候选排序、提示注入筛查、Fail-Closed 验证门禁、超长输出剪枝、停滞死循环检测、决策台账，以及把 reflex-auto 这类虚拟模型用 System 1 动态路由到真实 provider/model 的虚拟 Provider 路由。"
+  }
+}

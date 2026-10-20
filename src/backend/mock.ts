@@ -15,6 +15,34 @@ import {
 } from './types.js';
 
 /**
+ * Vocabulary one option contributes to the overlap score.
+ *
+ * ASCII words keep the historical `length > 2` filter. Chinese is written
+ * without spaces and nearly every technical term is two characters (并发, 证明,
+ * 迁移), so a whitespace split drops the entire vocabulary of a Chinese turn and
+ * collapses every option into an indistinguishable tie — which then reads as a
+ * confident decision. A Han run therefore contributes its two-character grams as
+ * well as the run itself, so an option's cue word matches inside an unspaced
+ * sentence.
+ *
+ * @param text - one candidate option.
+ * @returns distinct matchable terms, in option order.
+ */
+function matchTerms(text: string): string[] {
+  const terms: string[] = [];
+  for (const chunk of text.toLowerCase().split(/[^\p{Script=Han}a-z0-9_]+/u)) {
+    if (chunk.length === 0) continue;
+    if (!/\p{Script=Han}/u.test(chunk)) {
+      if (chunk.length > 2) terms.push(chunk);
+      continue;
+    }
+    for (let i = 0; i + 2 <= chunk.length; i++) terms.push(chunk.slice(i, i + 2));
+    if (chunk.length > 2) terms.push(chunk);
+  }
+  return terms;
+}
+
+/**
  * Mock & Heuristic Decision Backend
  * Provides instant (<5ms) deterministic decision evaluation for testing,
  * local development, and offline baseline comparisons.
@@ -30,17 +58,15 @@ export class MockDecisionBackend implements DecisionBackend {
     }
 
     // Heuristic: rank options based on semantic relevance to question & context
-    const scores = req.options.map((opt) => {
-      const optLower = opt.toLowerCase();
-      const qLower = req.question.toLowerCase();
-      const ctxLower = (req.context || '').toLowerCase();
+    const qLower = req.question.toLowerCase();
+    const ctxLower = (req.context || '').toLowerCase();
 
+    const scores = req.options.map((opt) => {
       let score = 1.0;
-      // Match keywords
-      const words = optLower.split(/\s+/).filter((w) => w.length > 2);
-      for (const w of words) {
-        if (qLower.includes(w)) score += 2.0;
-        if (ctxLower.includes(w)) score += 1.5;
+      // Match the option's own vocabulary against the question and the context.
+      for (const term of matchTerms(opt)) {
+        if (qLower.includes(term)) score += 2.0;
+        if (ctxLower.includes(term)) score += 1.5;
       }
       return score;
     });

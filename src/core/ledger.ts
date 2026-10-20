@@ -4,7 +4,14 @@ import * as path from 'path';
 export interface LedgerEntry {
   id: string;
   timestamp: string;
-  type: 'gate' | 'prune' | 'stagnation' | 'route' | 'choice';
+  /**
+   * `route` ranks generic candidates (tools, skills); `model-route` is the
+   * dedicated audit record of one virtual→physical model routing decision
+   * (candidate pool, chosen target, latency, reason); `effort-decision` is one
+   * per-turn adaptive reasoning-effort decision (decided level, effort actually
+   * dispatched, projection outcome, evidence).
+   */
+  type: 'gate' | 'prune' | 'stagnation' | 'route' | 'choice' | 'model-route' | 'effort-decision';
   backend: string;
   latencyMs: number;
   tokensSaved?: number;
@@ -31,12 +38,23 @@ export interface LedgerSummary {
 export class DecisionLedger {
   private static instance: DecisionLedger;
   private entries: LedgerEntry[] = [];
-  private logPath: string;
+  /** Append-only JSONL sink; `null` keeps the ledger purely in process memory. */
+  private logPath: string | null;
 
-  constructor(customPath?: string) {
+  /**
+   * @param customPath - JSONL file to append to and replay from startup.
+   *   Omit for the default `<cwd>/.reflex/ledger.jsonl`; pass `null` for an
+   *   in-memory-only ledger that never touches the filesystem (embedded Hosts).
+   */
+  constructor(customPath?: string | null) {
     const dir = path.join(process.cwd(), '.reflex');
-    this.logPath = customPath || path.join(dir, 'ledger.jsonl');
-    this.loadFromDisk();
+    this.logPath = customPath === null ? null : customPath || path.join(dir, 'ledger.jsonl');
+    if (this.logPath) this.loadFromDisk();
+  }
+
+  /** The JSONL sink this ledger appends to, or `null` when memory-only. */
+  getLogPath(): string | null {
+    return this.logPath;
   }
 
   static getInstance(): DecisionLedger {
@@ -47,6 +65,7 @@ export class DecisionLedger {
   }
 
   private loadFromDisk(): void {
+    if (!this.logPath) return;
     try {
       if (fs.existsSync(this.logPath)) {
         const lines = fs.readFileSync(this.logPath, 'utf8').split('\n');
@@ -70,14 +89,16 @@ export class DecisionLedger {
 
     this.entries.push(fullEntry);
 
-    try {
-      const dir = path.dirname(this.logPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+    if (this.logPath) {
+      try {
+        const dir = path.dirname(this.logPath);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.appendFileSync(this.logPath, JSON.stringify(fullEntry) + '\n', 'utf8');
+      } catch {
+        // non-fatal in restricted or readonly filesystems
       }
-      fs.appendFileSync(this.logPath, JSON.stringify(fullEntry) + '\n', 'utf8');
-    } catch {
-      // non-fatal in restricted or readonly filesystems
     }
 
     return fullEntry;
@@ -127,6 +148,7 @@ export class DecisionLedger {
 
   clear(): void {
     this.entries = [];
+    if (!this.logPath) return;
     try {
       if (fs.existsSync(this.logPath)) {
         fs.unlinkSync(this.logPath);
