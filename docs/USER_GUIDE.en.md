@@ -238,6 +238,7 @@ intent and context before each real API request, asks System 1 for the
 | `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; `off`/`minimal`/`low`/`medium`/`high`/`max` = pinned level; unset = never intervene |
 | `effort.fallback` | `medium` | Deterministic cue vote used when System 1 is unavailable or below the confidence floor |
 | `effort.minConfidence` | `0.55` | Decisions below this confidence go to the fallback instead |
+| `effort.enabled` | `true` | `false` turns the whole layer off: no judgment, no audit, no injected `reflex` level |
 
 **Behaviour contract.**
 
@@ -250,6 +251,31 @@ intent and context before each real API request, asks System 1 for the
   the model-visible context.
 - The decision is projected to the status line as well; the Overview page shows
   the latest one (for example `reflex: high (confidence 0.82, system-one, 12.4 ms)`).
+
+**Turning the whole layer off (`effort.enabled: false`).**
+
+`effort.enabled` is a **capability switch**, independent of what the policy is:
+`reasoningEffort: reflex` together with `enabled: false` is a legitimate
+combination whose meaning is "install none of this interception" (the only
+difference being that the policy is still written down). With it off:
+
+- **no judgment**: no System 1 call, no cue vote, no judgment cache, and no
+  `reflex/effort` status published — the Overview page shows no decision of this
+  plugin;
+- **no audit**: no `effort-decision` entry in the ledger and no
+  `plugin:dsh-reflex/effort` record in the session log;
+- **no injected level**: the level this plugin injected (`reflex` / `auto`) is
+  revoked from the model selector, which keeps only the adapter's own levels and
+  its declared default;
+- **concrete levels pass through verbatim**: a caller-pinned `high`, `medium` and
+  so on is not even aligned onto the routed model's vocabulary;
+- **the marker still cannot leak**: if an old session or a hand-built call still
+  carries this plugin's marker, it is **deleted at the physical adapter
+  boundary** rather than translated into a level, so the provider's own default
+  applies and no plugin marker ever reaches a real provider.
+
+It defaults to `true` (omitted means `true`), so not writing this option behaves
+byte-identically to before.
 
 ---
 
@@ -271,6 +297,12 @@ interventions:
   maxJudgmentsPerTurn: 3
   maxJudgmentsPerSession: 20
 ```
+
+Each of the four capabilities is **four-state**: `off` / `observe` / `active`
+override `mode` explicitly, while `inherit` (or omitting it) follows `mode`. You
+can therefore keep the gate `active` overall and lower `prune` alone to
+`observe` (accounting only, no rewriting), or set everything to `off` and open
+up `gate` only.
 
 | Mode | Behaviour |
 | --- | --- |
@@ -393,7 +425,9 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | --- | --- |
 | Overview | Decision count, tokens saved, average latency, gate pass/fail, latest adaptive decision |
 | Virtual provider | Routing switch, provider name, pool editing and ordering, fallback target |
-| Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence |
+| Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence, **adaptive-effort switch** |
+| Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
+| Tools | A per-tool switch for each of the eight tools, plus the currently registered tool names (read-only, follows `toolPrefix`) |
 | System 1 backend | Implementation, base URL, model id, API-key variable name, timeout |
 | Decision ledger | Live metrics, recent-decision table, JSONL sink, clear (confirmed twice) |
 | **Guide** | **A read-only view of this manual, following the DSH interface language** |
@@ -404,6 +438,32 @@ The plugin declares its browser half through `dsh.client` and registers into the
   every write control is disabled.
 - Panel routes under `/api/dsh-reflex/*` accept loopback clients only, and
   clearing the ledger requires an explicit confirmation.
+
+### What each group writes back
+
+The panel always shows the **currently effective values**, and saving goes
+through the Host settings document's only write channel (a per-group `set` plus
+the revision check) — there is no second write path. The three switch groups
+differ in how much they write:
+
+- **Interventions: whole-group write-back.** Saving that group writes the
+  group's **current mode and every budget value in full**, exactly like the
+  virtual-provider and reasoning-effort groups, so what the configuration keeps
+  is the complete set of values you see, not only the field you edited.
+  Capability overrides write only the entries that are **not** `inherit`; the
+  rest stay omitted (omitted = follow the mode).
+- **Tools: only explicit closes are written.** Only a tool switched off (`false`)
+  is written into `tools.enabled`; switching it back on **deletes** the key
+  rather than writing `true`. "All on" and "the whole group omitted" are
+  therefore byte-identical, and the default configuration does not change at all.
+- **The reasoning-effort switch is always written explicitly.** `effort.enabled`
+  is saved with the group's current value, so there is no "the panel shows it
+  enabled but the configuration actually omits it" ambiguity.
+
+An illegal value (an unknown tool suffix, a non-boolean, an out-of-range budget,
+an invalid three-state value) is rejected by the same Host-side `resolveConfig`
+validator with a field-level message, and the panel applies nothing partially:
+the whole group passes, or not a byte of it is written.
 
 ---
 
@@ -438,6 +498,27 @@ Differences:
 - `reflex_status_ledger` on the DSH side summarises **the current activation**;
   whether the ledger persists depends on `ledgerPath` (unset keeps it in memory
   and never writes into the user's project).
+- Each of the eight tools can be **switched off individually** with
+  `tools.enabled`:
+
+  ```yaml
+  tools:
+    enabled:
+      prune: false       # closes reflex_prune only; the rest stay available
+  ```
+
+  The key is the **suffix** (`choice`/`score`/`route`/`screen`/`gate`/`prune`/
+  `detect_stagnation`/`status_ledger`), independent of `toolPrefix`: after
+  renaming the prefix to `rv_`, `{ prune: false }` still closes `rv_prune`. A
+  closed tool is **not registered** into `ctx.tools`, so it is absent from the
+  model-visible tool list and from `reflexToolNames()` and its prefix
+  derivation — there is no "placeholder tool" and the model never sees a shell
+  that fails on every call. Omitted means open, and any suffix you do not list
+  stays open; an unknown suffix (say `teleport`) or a non-boolean is rejected by
+  the validator at install time instead of being ignored. **No tool is forced
+  always-on** — `reflex_status_ledger` can be closed too — and closing all eight
+  registers no tool at all (routing, reasoning effort and the intervention hooks
+  are unaffected).
 
 ---
 
@@ -501,6 +582,9 @@ stdio MCP `tools/list` for real.
 | Reasoning effort never changes | The policy is unset (no intervention), or the caller pinned `reasoningEffort` explicitly |
 | System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page |
 | The in-panel guide is stale | `USER_GUIDE.md` changed without a rebuild; run `npm run build:all` |
+| A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`) |
+| The model selector still offers `reflex` after adaptive effort was switched off | That level was injected by the previous load; make sure the configuration is in effect and reload the plugin to revoke the injection |
+| Saving Interventions grew the configuration with defaults | Expected: that group is written back whole, so the mode and every budget are saved as shown |
 
 ---
 
