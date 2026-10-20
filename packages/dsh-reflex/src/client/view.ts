@@ -23,12 +23,15 @@ import {
   INTERVENTION_MODES,
   INTERVENTION_SETTINGS,
   REFLEX_TOOL_SUFFIXES,
+  TOOL_ADVICE,
   interpolate,
   ledgerRows,
   levelTone,
   overviewMetrics,
   panelChips,
-  type PanelDraft
+  recommendedToolSwitches,
+  type PanelDraft,
+  type ToolAdvice
 } from './panel';
 import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab } from './store';
 import { renderMarkdown } from './markdown';
@@ -115,6 +118,25 @@ const S = {
   },
   cardTitle: { fontSize: '12px', fontWeight: 600, margin: '0 0 10px 0', color: token('--dsw-alias-label-secondary', '#b4b4b4') },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(148px, 1fr))', gap: '8px' },
+  /**
+   * One switch per row, wide enough for real prose.
+   *
+   * A grid of narrow cards would wrap each explanation into a column of three
+   * words, which is how the old page ended up unreadable.
+   */
+  toolList: { display: 'flex', flexDirection: 'column', gap: '10px' },
+  toolRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3px',
+    padding: '8px 10px',
+    border: `1px solid ${token('--dsw-alias-border-l3', 'rgba(255,255,255,.08)')}`,
+    borderRadius: '6px',
+    background: token('--dsw-alias-bg-layer-2', 'rgba(255,255,255,.02)')
+  },
+  toolHead: { display: 'flex', alignItems: 'center', gap: '8px' },
+  toolWhat: { fontSize: '12px', color: token('--dsw-alias-label-secondary', '#b4b4b4') },
+  toolActions: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   metric: {
     border: `1px solid ${token('--dsw-alias-border-l3', 'rgba(255,255,255,.08)')}`,
     borderRadius: '6px',
@@ -938,6 +960,24 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
   );
 }
 
+/** Dictionary key of one advice label. */
+function toolAdviceKey(advice: ToolAdvice): string {
+  return advice === 'expose' ? 'toolAdviceExpose' : advice === 'covered' ? 'toolAdviceCovered' : 'toolAdviceDiagnostic';
+}
+
+/**
+ * Tone of one advice label: a colour on the existing chip, not a new component.
+ * @param advice - the advice being shown.
+ * @returns the CSS custom property, with a literal fallback.
+ */
+function toolAdviceTone(advice: ToolAdvice): string {
+  return advice === 'expose'
+    ? token('--dsw-alias-state-success-primary', '#4ade80')
+    : advice === 'covered'
+      ? token('--dsw-alias-label-tertiary', '#8a8a8a')
+      : token('--dsw-alias-state-warn-primary', '#d9a441');
+}
+
 /** Tool-switch page: one toggle per reflex tool, plus the effective registration. */
 function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
   const { t, state, store } = props;
@@ -945,6 +985,13 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
   const disabled = !state.writable;
   const setTool = (suffix: string, enabled: boolean): void => {
     store.edit((current) => ({ ...current, tools: { enabled: { ...current.tools.enabled, [suffix]: enabled } } }));
+  };
+  // Advice drives both the labels and this button, so "recommended" is stated
+  // once. Applying it only pre-fills the draft: the group is written when the
+  // user saves, through the same single write channel as every other field.
+  const applyRecommended = (): void => {
+    const recommended = recommendedToolSwitches();
+    store.edit((current) => ({ ...current, tools: { enabled: { ...current.tools.enabled, ...recommended } } }));
   };
   const active = state.snapshot?.tools?.active;
   return h(
@@ -958,23 +1005,40 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
         h('div', { style: S.hint }, t('toolsHint')),
         h(
           'div',
-          { style: S.grid },
+          { style: S.toolActions },
+          Button({ label: t('toolsApplyRecommended'), onClick: applyRecommended, disabled }),
+          h('span', { style: S.hint }, t('toolsRecommendedHint'))
+        ),
+        h(
+          'div',
+          { style: S.toolList },
           // The label is the *registered* name under the current draft prefix, so
           // renaming the prefix shows up here immediately; the switch itself is
           // keyed by suffix and therefore survives the rename.
-          ...REFLEX_TOOL_SUFFIXES.map((suffix) =>
-            h(
+          ...REFLEX_TOOL_SUFFIXES.map((suffix) => {
+            const advice = TOOL_ADVICE[suffix];
+            return h(
               'div',
-              { key: suffix, style: S.field },
-              Toggle({
-                checked: draft.tools.enabled[suffix] !== false,
-                label: `${draft.runtime.toolPrefix}${suffix}`,
-                disabled,
-                onChange: (checked) => setTool(suffix, checked)
-              }),
-              h('span', { style: S.hint }, t('toolsSwitchHint'))
-            )
-          )
+              { key: suffix, style: S.toolRow },
+              h(
+                'div',
+                { style: S.toolHead },
+                Toggle({
+                  checked: draft.tools.enabled[suffix] !== false,
+                  label: `${draft.runtime.toolPrefix}${suffix}`,
+                  disabled,
+                  onChange: (checked) => setTool(suffix, checked)
+                }),
+                h(
+                  'span',
+                  { style: { ...S.chip, marginLeft: 'auto', color: toolAdviceTone(advice) } },
+                  t(toolAdviceKey(advice))
+                )
+              ),
+              h('span', { style: S.toolWhat }, t(`toolWhat_${suffix}`)),
+              h('span', { style: S.hint }, t(`toolWhen_${suffix}`))
+            );
+          })
         )
       )
     }),

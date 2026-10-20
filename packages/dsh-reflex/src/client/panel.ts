@@ -113,6 +113,43 @@ export const REFLEX_TOOL_SUFFIXES = [
 /** One tool suffix in the panel vocabulary. */
 export type PanelToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
 
+/**
+ * What the panel advises doing with one tool.
+ *
+ * - `expose`: the agent reaches for it in normal work;
+ * - `covered`: the automatic intervention layer already does this, so a manual
+ *   call is usually redundant;
+ * - `diagnostic`: it exists for a human reading the page or the ledger.
+ */
+export type ToolAdvice = 'expose' | 'covered' | 'diagnostic';
+
+/**
+ * The advice shown next to each suffix, and the basis of "apply the recommended
+ * set". Advice is not configuration: it never writes anything, and the default
+ * deployment stays "all eight on".
+ */
+export const TOOL_ADVICE: Record<PanelToolSuffix, ToolAdvice> = {
+  choice: 'expose',
+  score: 'expose',
+  route: 'expose',
+  screen: 'expose',
+  gate: 'expose',
+  prune: 'covered',
+  detect_stagnation: 'covered',
+  status_ledger: 'diagnostic'
+};
+
+/**
+ * The switch each suffix takes when the recommended set is applied.
+ *
+ * Derived from {@link TOOL_ADVICE} rather than written out a second time, so the
+ * button and the labels can never disagree about what is recommended.
+ * @returns suffix → enabled.
+ */
+export function recommendedToolSwitches(): Record<string, boolean> {
+  return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, TOOL_ADVICE[suffix] === 'expose']));
+}
+
 /** Editable draft of the automatic-intervention block. */
 export interface InterventionsDraft {
   /** Master mode; `inherit` is not legal here. */

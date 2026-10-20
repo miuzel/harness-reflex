@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 328;
+const EXPECTED_TESTS = 329;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [

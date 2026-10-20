@@ -982,6 +982,72 @@ test('the tools page closes one tool and writes exactly that switch', async () =
   mounted.unmount();
 });
 
+test('every tool explains itself and the recommended set can be pre-filled', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '工具开关');
+  let tree = await mounted.runtime.flush();
+
+  // A distinctive fragment of the "what it does" and "when to call it" sentence,
+  // per tool: the page has to explain the tool, not repeat one generic line.
+  const explains: Record<string, [string, string]> = {
+    choice: ['概率分布', '二选一'],
+    score: ['0–1 的连续分', '连续评分'],
+    route: ['概率排序', '缩小范围'],
+    screen: ['提示注入', '不可信输入'],
+    gate: ['逐条核对', '验收判据'],
+    prune: ['压缩过长', '大段日志'],
+    detect_stagnation: ['零进展', '连续失败'],
+    status_ledger: ['决策账本', '审计或排障']
+  };
+  const copy = textOf(tree);
+  for (const suffix of REFLEX_TOOL_SUFFIXES) {
+    const [what, when] = explains[suffix] ?? ['', ''];
+    assert.ok(copy.includes(what), `${suffix} does not say what it does`);
+    assert.ok(copy.includes(when), `${suffix} does not say when to call it`);
+  }
+
+  // The advice is stated per tool: five suggested, two already covered, one for
+  // people. Counts, so a misplaced label is caught too.
+  const occurrences = (needle: string): number => copy.split(needle).length - 1;
+  assert.equal(occurrences('建议暴露'), 5, 'the tools the agent should keep are not marked as such');
+  assert.equal(occurrences('已由自动干预覆盖'), 2, 'the intervention-covered tools are not marked as such');
+  assert.equal(occurrences('仅诊断'), 1, 'the diagnostic-only tool is not marked as such');
+  assert.equal(occurrences('按后缀开关，与工具名前缀无关'), 0, 'the generic per-tool hint is still repeated');
+
+  // The recommendation is the review table, written out here on purpose: the test
+  // is the spec, not a copy of the panel's own constant.
+  const recommended: Record<string, boolean> = {
+    choice: true,
+    score: true,
+    route: true,
+    screen: true,
+    gate: true,
+    prune: false,
+    detect_stagnation: false,
+    status_ledger: false
+  };
+  fire(find(tree, 'button', '应用推荐组合'), 'onClick');
+  tree = await mounted.runtime.flush();
+  for (const [suffix, on] of Object.entries(recommended)) {
+    assert.equal(checkboxOf(tree, `reflex_${suffix}`).props.checked, on, `applying the recommendation left ${suffix} at ${String(!on)}`);
+  }
+  assert.equal(mutations.length, 0, 'pre-filling the recommendation wrote to the settings document');
+
+  // Only a real save writes, and it writes only the closed tools.
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'saving the recommendation did not reach the settings form');
+  const ops = plain(mutations[0]?.ops) as { path: string[]; value: { enabled: Record<string, boolean> } }[];
+  assert.deepEqual(ops.map((op) => op.path), [['tools']]);
+  assert.deepEqual(
+    ops[0]?.value,
+    { enabled: { prune: false, detect_stagnation: false, status_ledger: false } },
+    'the five tools the recommendation keeps on must be omitted, not written as true'
+  );
+  mounted.unmount();
+});
+
 test('the effort page can turn adaptive effort off, and writes it with its group', async () => {
   const { form, mutations } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(true), form });
