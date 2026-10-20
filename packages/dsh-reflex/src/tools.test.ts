@@ -174,6 +174,24 @@ test('reflex_prune measures the reduction and shadow mode keeps the raw text', a
     assert.equal(shadow.shadow, true);
     assert.equal(shadow.processedOutput, BULKY_OUTPUT);
     assert.equal(shadow.tokensSaved, pruned.tokensSaved);
+
+    // The tool hands the reduced text back, so it books the reduction it returns; only the
+    // hook path, which cannot know whether the floor installs, is measure-only. A withheld
+    // shadow measurement books nothing, and the size it measured stays readable.
+    const ledger = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', { includeEntries: true }));
+    const prunes = (ledger.recentEntries ?? []).filter((entry) => entry.type === 'prune');
+    assert.equal(prunes.length, 3, 'every tool call is audited');
+    assert.deepEqual(
+      prunes.map((entry) => entry.shadow),
+      [false, false, true],
+      'only the shadow call withholds its candidate'
+    );
+    assert.ok(prunes[0]!.tokensSaved! > 0, `an ordinary call books the reduction it returns, got ${prunes[0]!.tokensSaved}`);
+    assert.equal(prunes[2]!.tokensSaved, 0, 'a shadow call books no saving');
+    assert.ok(
+      ((prunes[2]!.details as { potentialTokensSaved?: number }).potentialTokensSaved ?? 0) > 0,
+      'and the size it measured stays readable'
+    );
   });
 });
 

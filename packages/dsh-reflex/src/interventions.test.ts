@@ -1760,14 +1760,14 @@ test('the real pruning service keeps observe and active on one form, one cost, o
       // The audit of the session: the per-decision record is where the provenance of
       // each plan is written, memo hits included.
       const records = interventionRecordsOf(session.ownEvents()).filter((record) => record.capability === 'prune');
-      // The real ledger of the real service, which is the only place that can say
-      // whether observe asked for a withheld measurement or for the real reduction.
+      // The real ledger of the real service: this path must never let the service
+      // declare a saving, only the measurement the floor decides on.
       const ledger = runtime.ledger.getEntries().map((entry) => ({
         type: entry.type,
         shadow: entry.shadow,
-        // What the service says the harness stopped carrying…
+        // What the service says the harness stopped carrying — always 0 on this path…
         saved: entry.tokensSaved,
-        // …and, when a caller asked for a withheld measurement, the size it did not install.
+        // …and the size it measured instead, which is what it did not install.
         candidate: (entry.details as { potentialTokensSaved?: number } | undefined)?.potentialTokensSaved,
         original: entry.originalTokens,
         pruned: entry.prunedTokens
@@ -1831,27 +1831,27 @@ test('the real pruning service keeps observe and active on one form, one cost, o
   const actedPrunes = acted.ledger.filter((entry) => entry.type === 'prune');
   assert.equal(observedPrunes.length, actedPrunes.length, 'the service is called the same number of times');
   assert.equal(observedPrunes.length, 1, 'the second identical payload was answered from the memo, not from the service');
-  assert.equal(observedPrunes.every((entry) => entry.shadow === true), true, 'observe asks for a measure-only reduction');
-  assert.equal(actedPrunes.every((entry) => entry.shadow === false), true, 'active asks for the real one it may install');
+  assert.equal(observedPrunes.every((entry) => entry.shadow === true), true, 'both modes ask for a measure-only reduction');
   assert.deepEqual(
     observedPrunes.map((entry) => [entry.original, entry.pruned]),
     actedPrunes.map((entry) => [entry.original, entry.pruned]),
     'both modes read the same payload and the same candidate'
   );
-  assert.ok(actedPrunes.every((entry) => entry.saved! > 0), 'the service really did reduce the payload');
-  // `measureOnly` hands observe the candidate and still books no saving: the text is
-  // there to plan with, the number says nothing has left the context yet, and the
-  // candidate's size stays readable next to the zero. Active books the reduction the
-  // service produced, which for this payload is exactly the form it installs — so the
-  // number observe did not install is the number active really saved.
-  assert.deepEqual(observedPrunes.map((entry) => entry.saved), [0], 'a measured reduction saves nothing');
+  // Neither mode lets the service declare a saving. Whether a payload is installed is
+  // decided by the floor *after* the service has written its entry, so the service only
+  // measures: the candidate's text comes back to plan and install with, the number says
+  // nothing has left the context, and the candidate's size stays readable next to the
+  // zero. What was really installed is booked in the intervention columns below.
+  assert.deepEqual(observedPrunes.map((entry) => entry.saved), [0], 'the measured reduction saves nothing');
+  assert.deepEqual(actedPrunes.map((entry) => entry.saved), [0], 'and neither does the one active may install');
+  assert.ok(observedPrunes.every((entry) => entry.candidate! > 0), 'the candidate stays readable as potential');
   assert.deepEqual(
     observedPrunes.map((entry) => entry.candidate),
-    actedPrunes.map((entry) => entry.saved),
-    'the candidate observe measured is the saving active booked'
+    actedPrunes.map((entry) => entry.candidate),
+    'both modes measured the same candidate'
   );
-  assert.ok(observedPrunes.every((entry) => entry.candidate! > 0), 'and that candidate is still readable');
   assert.equal(observed.report.observe.actualSavedTokens, 0, 'the observe column stays honest');
+  assert.ok(acted.report.active.actualSavedTokens > 0, 'the active column books what it installed');
   assert.equal(
     acted.report.active.actualSavedTokens,
     observed.report.observe.potentialSavedTokens,
@@ -1870,7 +1870,7 @@ test('the real pruning service keeps observe and active on one form, one cost, o
   assert.deepEqual(observed.records.map((record) => record.floorApplied), [true, true], 'the plan and its memo hit both carry the floor');
 });
 
-test('observe asks the service to measure only, and active to reduce for real', async () => {
+test('the engine never lets the service book the reduction it only measured', async () => {
   const delegate = pruneStub((raw) => raw.slice(0, 40));
   const seen: Array<{ intent?: string; measureOnly?: boolean; shadowMode?: boolean }> = [];
   const run = async (mode: 'observe' | 'active') => {
@@ -1902,13 +1902,13 @@ test('observe asks the service to measure only, and active to reduce for real', 
   assert.deepEqual(
     seen,
     [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true }],
-    'observe installs nothing, so it asks for a measurement that still hands the candidate back'
+    'observe installs nothing, so the service may only measure'
   );
   await run('active');
   assert.deepEqual(
     seen,
-    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: false }],
-    'active may install, so it asks for the reduction itself'
+    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true }],
+    'active installs on the floor’s decision, not the service’s, so it measures too'
   );
 });
 
@@ -1948,13 +1948,18 @@ test('an active reduction the engine refuses to install books nothing, whatever 
     assert.equal(report.active.actualSavedTokens, 0, 'so nothing was saved');
     assert.equal(report.active.potentialSavedTokens, 0, 'and nothing was planned as a saving either');
     assert.ok((report.skips['no-reduction'] ?? 0) >= 1, 'the refusal is a skip, not a saving');
-    // The service ledger is written inside the call, before the engine decides, and
-    // cannot be retracted: it still books the reduction the service produced. That
-    // number measures the service; the installation truth is the zero above.
+    // The service was only asked to measure — it is told so before the floor decides —
+    // so a reduction the floor refuses to install never appears as a saving anywhere:
+    // the ledger keeps the measurement in `potentialTokensSaved`, and the columns above
+    // carry the zero this really was.
     const measured = runtime.ledger.getEntries().filter((entry) => entry.type === 'prune');
     assert.equal(measured.length, 1, 'the service was asked once');
-    assert.equal(measured[0]!.shadow, false, 'active does not ask for a measurement');
-    assert.ok(measured[0]!.tokensSaved! > 0, 'the service did reduce the payload it was shown');
+    assert.equal(measured[0]!.shadow, true, 'the hook path asks for a measurement');
+    assert.equal(measured[0]!.tokensSaved, 0, 'and the measurement is never booked as a saving');
+    assert.ok(
+      ((measured[0]!.details as { potentialTokensSaved?: number }).potentialTokensSaved ?? 0) > 0,
+      'the size it measured stays readable'
+    );
   } finally {
     await ctx.fiber.dispose();
   }

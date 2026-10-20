@@ -1602,15 +1602,17 @@ export class InterventionEngine {
             shadow: memo.text === undefined,
             latencyMs: 0
           }
-        // Both modes take the *real* candidate: `shadow` only decides whether the
-        // backend hands its text back, while `prunedChars` is that candidate's size
-        // either way. Observe needs the same text active installs to compose the same
-        // form, so it asks for the same reduction — but it installs nothing, so it
-        // asks for it *measure-only*: the ledger keeps saying that no token has left
-        // the context yet, and only active, which really replaces the result, books
-        // the saving. (A withheld `shadowMode` measurement would hand back the raw
-        // text, which is not the input the floor composes from.)
-        : await this.#prune.prune(text, { intent: this.config.intent, measureOnly: capability !== 'active' });
+        // Both modes take the *real* candidate, and both ask for it measure-only.
+        // `shadow` only decides whether the backend hands its text back, while
+        // `prunedChars` is that candidate's size either way; the text is what the floor
+        // composes from, so a withheld measurement would not be the same input at all.
+        // Whether the payload is installed is decided here, by the floor, *after* the
+        // service has written its ledger entry — so this path never lets the service
+        // declare a saving: it measures (`tokensSaved` 0, the candidate's size in
+        // `details.potentialTokensSaved`) and the intervention record carries what was
+        // really installed. The explicit `reflex_prune` tool, which does hand the
+        // reduced text back to its caller, keeps booking the reduction it returns.
+        : await this.#prune.prune(text, { intent: this.config.intent, measureOnly: true });
 
     const originalTokens = estimateTokens(text);
     // One composition, both modes: the floored text the plan describes is the text
