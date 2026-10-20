@@ -43,6 +43,24 @@ function matchTerms(text: string): string[] {
 }
 
 /**
+ * Ignore explicit zero counters, not failure words in general. Both count-first
+ * (pytest/Jest) and label-first (node:test) summaries occur in captured output.
+ * Replace nonzero counters with a cue so another zero counter cannot hide them.
+ * This is only a mock heuristic, not semantic verification of arbitrary logs.
+ */
+function hasFailureEvidence(evidence: string): boolean {
+  const withoutCounters = evidence.replace(
+    /\b(\d+(?:[.,]\d+)*|zero)\s+(fail(?:ed|ures?)?|errors?)\b|\b(fail(?:ed|ures?)?|errors?)\s*[:=]?\s*(\d+(?:[.,]\d+)*|zero)\b/g,
+    (_match, before: string | undefined, _beforeLabel: string | undefined, _afterLabel: string | undefined, after: string | undefined) => {
+      const count = before ?? after!;
+      return count === 'zero' || Number(count.replaceAll(',', '')) === 0 ? '' : ' failure ';
+    }
+  );
+  // An explicit error diagnostic is not a summary, even if its message starts with 0.
+  return evidence.includes('error:') || /fail|\berrors?\b/.test(withoutCounters);
+}
+
+/**
  * Mock & Heuristic Decision Backend
  * Provides instant (<5ms) deterministic decision evaluation for testing,
  * local development, and offline baseline comparisons.
@@ -92,6 +110,7 @@ export class MockDecisionBackend implements DecisionBackend {
   async gate(req: GateRequest): Promise<GateResponse> {
     const start = performance.now();
     const evidenceLower = req.evidence.toLowerCase();
+    const hasErrorOrFail = hasFailureEvidence(evidenceLower);
     const results: GateResultItem[] = [];
     let allPassed = true;
     let needsEscalation = false;
@@ -101,7 +120,6 @@ export class MockDecisionBackend implements DecisionBackend {
       const stmtLower = stmt.toLowerCase();
 
       // Check for contradiction cues
-      const hasErrorOrFail = evidenceLower.includes('error:') || evidenceLower.includes('fail') || evidenceLower.includes('failed');
       const claimsSuccess = stmtLower.includes('success') || stmtLower.includes('pass') || stmtLower.includes('finished') || stmtLower.includes('complete');
 
       let outcome: GateOutcome = 'not_addressed';

@@ -270,3 +270,41 @@ test('unknown tool names fail loudly rather than silently no-op', async () => {
     assert.match(resultText(result), /reflex_nonexistent/);
   });
 });
+
+
+for (const [passed, cases] of [
+  [true, [
+    'All tests passed: 10 passed, 0 failed',
+    'Tests: 0 failed, 10 passed, 10 total',
+    '=== 10 passed, 0 failed in 0.12s ===',
+    'All tests passed with zero failures',
+    'All tests passed; failures: 0',
+    'All tests passed\n# fail 0'
+  ]],
+  [false, [
+    'Tests: 1 failed, 9 passed, 10 total',
+    '=== 2 failed, 8 passed in 0.12s ===',
+    'All tests passed; 0 failed; 2 failed',
+    'All tests passed; 2 failed; 0 failed',
+    'All tests passed; failures: 0; failures: 3',
+    'All tests passed; 0 failed\nerror: compiler crashed',
+    'All tests passed; 0 failed; error: 0 is invalid',
+    'All tests passed; 0 failed\nFAIL src/example.test.ts',
+    'All tests passed; 0 failed\nFAILED test_example.py::test_example',
+    'All tests passed\n# fail 1'
+  ]]
+] as const) {
+  test(`registered mock gate ${passed ? 'accepts zero summaries' : 'rejects real and mixed failures'}`, async () => {
+    // A fresh runtime for each case also avoids the gate service's length-based latch.
+    for (const evidence of cases) {
+      await withHost(async (host) => {
+        assert.equal(host.runtime.backendName, 'mock-heuristic-v1');
+        const result = resultValue<GateResponse>(await host.callTool('reflex_gate', {
+          assertions: [{ statement: 'All tests passed' }], evidence
+        }));
+        assert.equal(result.passed, passed, evidence);
+        assert.equal(result.results[0].outcome, passed ? 'verified' : 'contradicted', evidence);
+      });
+    }
+  });
+}

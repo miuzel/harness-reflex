@@ -26,8 +26,9 @@ It ships in two forms with identical capabilities:
 | stdio MCP server | `harness-reflex` | Claude Code, Codex CLI, AGY | MCP JSON-RPC child process |
 | DSH Host plugin | `dsh-reflex` | DeepSeek Harness (`dsh`) | In-process `ctx.tools` / Cordis hooks |
 
-Both expose the same tool names, arguments and payloads, so one agent prompt can
-be reused across harnesses.
+Both share tool names, main arguments and payloads, so one agent prompt can be
+reused across harnesses. See section 9 and each surface's actual tool definitions
+for argument and validation boundaries.
 
 ---
 
@@ -386,19 +387,19 @@ The plugin declares its browser half through `dsh.client` and registers into the
 
 ## 9. MCP tools ↔ DSH native tools
 
-Both forms expose the **same eight tools** with identical arguments and payloads;
-only registration and call overhead differ.
+Both forms expose the **same eight tools**, sharing the arguments below and their
+payloads; argument-validation boundaries differ as described below.
 
 | Capability | MCP tool name (`harness-reflex mcp`) | DSH in-process tool (`dsh-reflex`) | Main arguments |
 | --- | --- | --- | --- |
-| Multi-option classification | `reflex_choice` | `reflex_choice` registered via `ctx.tools` | `question`, `options[]` |
-| Continuous rating | `reflex_score` | `reflex_score` | `statement`, optional `rubric` |
-| Prompt-injection screen | `reflex_screen` | `reflex_screen` | `payload`, optional `source` |
-| Claim/evidence gate | `reflex_gate` | `reflex_gate` | `claims[]` or `statement`+`evidence` |
-| Long-output pruning | `reflex_prune` | `reflex_prune` | `text`, optional `query` |
-| Stagnation detection | `reflex_detect_stagnation` | `reflex_detect_stagnation` | `recentAction`, optional `history[]` |
+| Multi-option classification | `reflex_choice` | `reflex_choice` registered via `ctx.tools` | `question`, `options[]`, optional `context` |
+| Continuous rating | `reflex_score` | `reflex_score` | `statement`, optional `criteria`, `context` |
+| Prompt-injection screen | `reflex_screen` | `reflex_screen` | `content`, optional `source`, `strict` |
+| Claim/evidence gate | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` |
+| Long-output pruning | `reflex_prune` | `reflex_prune` | `rawOutput`, optional `intent`, `shadowMode` |
+| Stagnation detection | `reflex_detect_stagnation` | `reflex_detect_stagnation` | optional `recentAction`, `goal`, `history[]` |
 | Candidate ranking | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, optional `topK` |
-| Ledger audit | `reflex_status_ledger` | `reflex_status_ledger` | none (returns a `LedgerSummary`) |
+| Ledger audit | `reflex_status_ledger` | `reflex_status_ledger` | optional `includeEntries` (returns `summary`, optionally `recentEntries`) |
 
 Differences:
 
@@ -406,7 +407,12 @@ Differences:
   `rv_` yields `rv_gate` and friends.
 - On the DSH side argument validation comes from the Host's `defineTool`
   (required/type/enum/nested) plus an undeclared top-level argument fence; on the
-  MCP side `harness-reflex` validates itself and returns structured errors.
+  MCP side advertises `inputSchema` for clients but its dispatcher does not run
+  generic JSON Schema validation. Passing `claims` instead of `assertions` reaches
+  the empty-assertion gate and returns `passed: false`, `needsEscalation: true`,
+  `results: []`, not a JSON Schema error. Execution exceptions return a tool result
+  with `isError: true`. DSH additionally accepts optional per-assertion `criteria`;
+  MCP does not declare that nested field.
 - `reflex_status_ledger` on the DSH side summarises **the current activation**;
   whether the ledger persists depends on `ledgerPath` (unset keeps it in memory
   and never writes into the user's project).

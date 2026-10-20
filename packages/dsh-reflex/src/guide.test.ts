@@ -20,6 +20,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { createReflexHost } from './testing.js';
+
 /**
  * The checkout that owns the guide documents.
  *
@@ -281,3 +283,25 @@ test('the guide renders as elements, never as injected markup', () => {
 });
 
 //#endregion
+
+
+test('authored guides and plugin README match registered DSH argument schemas', async () => {
+  const host = await createReflexHost({ backend: 'mock' });
+  try {
+    for (const [file, column] of [[PATHS.zh, 4], [PATHS.en, 4], [join(repoRoot, 'packages/dsh-reflex/README.md'), 2]] as const) {
+      const document = readFileSync(file, 'utf8');
+      for (const name of host.runtime.toolSurface) {
+        const definition = host.ctx.tools.get(name)!;
+        const rows = document.split('\n').filter((line) => line.split('|')[column === 4 ? 2 : 1]?.trim() === '`' + name + '`');
+        assert.equal(rows.length, 1, `${file}: expected one argument row for ${name}`);
+        const cell = rows[0].split('|')[column];
+        const keys = [...cell.matchAll(/`([A-Za-z]\w*)[^`]*`/g)]
+          .map((match) => match[1]).filter((key) => !['summary', 'recentEntries'].includes(key));
+        assert.deepEqual(keys.sort(), Object.keys(definition.parameters.properties ?? {}).sort(), `${file}: ${name} parameter drift`);
+        if (name === 'reflex_gate') assert.ok(cell.includes('statement'), `${file}: missing nested assertion statement`);
+      }
+    }
+  } finally {
+    await host.dispose();
+  }
+});

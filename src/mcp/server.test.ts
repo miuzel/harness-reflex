@@ -155,3 +155,40 @@ test('gate fails closed on contradictory evidence and prune saves tokens end to 
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+
+test('authored guide argument tables match the live MCP tool definitions', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const [list] = callMcp([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }], repoRoot);
+  for (const relative of ['USER_GUIDE.md', 'docs/USER_GUIDE.en.md']) {
+    const document = fs.readFileSync(path.join(repoRoot, relative), 'utf8');
+    for (const tool of list.result.tools) {
+      const rows = document.split('\n').filter((line) => line.split('|')[2]?.trim() === '`' + tool.name + '`');
+      assert.equal(rows.length, 1, `${relative}: expected one argument row for ${tool.name}`);
+      const cell = rows[0].split('|')[4];
+      // Compare identifiers, not prose, whitespace, translations or row order.
+      const keys = [...cell.matchAll(/`([A-Za-z]\w*)[^`]*`/g)].map((match) => match[1]);
+      // The ledger row also describes its return envelope after the arguments.
+      const argumentsOnly = keys.filter((key) => !['summary', 'recentEntries'].includes(key));
+      assert.deepEqual(argumentsOnly.sort(), Object.keys(tool.inputSchema.properties).sort(), `${relative}: ${tool.name} parameter drift`);
+      if (tool.name === 'reflex_gate') {
+        for (const key of tool.inputSchema.properties.assertions.items.required) {
+          assert.ok(cell.includes(key), `${relative}: missing nested assertion field ${key}`);
+        }
+      }
+    }
+  }
+});
+
+test('MCP wrong gate aliases reach empty-assertion escalation, not schema validation', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const [response] = callMcp([{
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'reflex_gate', arguments: { claims: ['All tests passed'], evidence: 'All tests passed: 10 passed, 0 failed' } }
+  }], repoRoot);
+  assert.equal(response.result.isError, undefined);
+  const result = toolPayload(response);
+  assert.equal(result.passed, false);
+  assert.equal(result.needsEscalation, true);
+  assert.deepEqual(result.results, []);
+});

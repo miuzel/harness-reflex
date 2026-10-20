@@ -21,7 +21,8 @@ System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁
 | stdio MCP 服务器 | `harness-reflex` | Claude Code、Codex CLI、AGY | MCP JSON-RPC 子进程 |
 | DSH Host 插件 | `dsh-reflex` | DeepSeek Harness (`dsh`) | 进程内 `ctx.tools` / Cordis 钩子 |
 
-两者的工具名、参数与返回载荷逐字一致，因此同一个 Agent 提示词可以跨 Harness 复用。
+两者共享工具名、主要参数与返回载荷，同一个 Agent 提示词可以跨 Harness 复用；
+参数及校验边界以第 9 节和各表面实际工具定义为准。
 
 ---
 
@@ -330,24 +331,27 @@ record?.digest;  // 与决策记录里的 digest 一致
 
 ## 9. MCP 工具 ↔ DSH 原生工具对照
 
-两种形态暴露**同一套 8 个工具**，参数与返回载荷一致；区别仅在注册方式与调用开销。
+两种形态暴露**同一套 8 个工具**，共享下表参数与返回载荷；参数校验边界见下文。
 
 | 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 进程内工具名（`dsh-reflex`） | 主要参数 |
 | --- | --- | --- | --- |
-| 多选一分类 | `reflex_choice` | `ctx.tools` 注册的 `reflex_choice` | `question`, `options[]` |
-| 连续评分 | `reflex_score` | `reflex_score` | `statement`, 可选 `rubric` |
-| 提示注入筛查 | `reflex_screen` | `reflex_screen` | `payload`, 可选 `source` |
-| 声明-证据门禁 | `reflex_gate` | `reflex_gate` | `claims[]` 或 `statement`+`evidence` |
-| 长输出剪枝 | `reflex_prune` | `reflex_prune` | `text`, 可选 `query` |
-| 停滞检测 | `reflex_detect_stagnation` | `reflex_detect_stagnation` | `recentAction`, 可选 `history[]` |
+| 多选一分类 | `reflex_choice` | `ctx.tools` 注册的 `reflex_choice` | `question`, `options[]`, 可选 `context` |
+| 连续评分 | `reflex_score` | `reflex_score` | `statement`, 可选 `criteria`, `context` |
+| 提示注入筛查 | `reflex_screen` | `reflex_screen` | `content`, 可选 `source`, `strict` |
+| 声明-证据门禁 | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` |
+| 长输出剪枝 | `reflex_prune` | `reflex_prune` | `rawOutput`, 可选 `intent`, `shadowMode` |
+| 停滞检测 | `reflex_detect_stagnation` | `reflex_detect_stagnation` | 可选 `recentAction`, `goal`, `history[]` |
 | 候选排序 | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, 可选 `topK` |
-| 账本审计 | `reflex_status_ledger` | `reflex_status_ledger` | 无（返回 `LedgerSummary`） |
+| 账本审计 | `reflex_status_ledger` | `reflex_status_ledger` | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） |
 
 差异点：
 
 - 工具名前缀可配置（`toolPrefix`，默认 `reflex_`），例如改成 `rv_` 后是 `rv_gate`；
 - DSH 侧参数校验由 Host 的 `defineTool` 完成（必填/类型/枚举/嵌套），工具层再拦
-  截顶层未声明参数；MCP 侧由 `harness-reflex` 自己校验并返回结构化错误；
+  截顶层未声明参数。MCP 侧发布 `inputSchema` 供客户端使用，但分派器不执行通用
+  JSON Schema 校验；错传 `claims` 而非 `assertions` 会进入空断言门禁，返回
+  `passed: false`、`needsEscalation: true`、`results: []`，不是 JSON Schema 错误。
+  执行异常返回工具结果 `isError: true`。DSH 另支持断言内可选 `criteria`，MCP 未声明此嵌套字段；
 - `reflex_status_ledger` 在 DSH 侧返回的是**本次激活**的账本汇总；账本是否落盘
   取决于 `ledgerPath`（省略时只留内存，不写用户项目）。
 
