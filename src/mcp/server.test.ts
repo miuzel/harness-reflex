@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -192,3 +194,58 @@ test('MCP wrong gate aliases reach empty-assertion escalation, not schema valida
   assert.equal(result.needsEscalation, true);
   assert.deepEqual(result.results, []);
 });
+
+
+/** Wait for each response before sending the next call to the same MCP server. */
+async function callMcpSequential(evidence: string[], cwd: string): Promise<JsonRpcResponse[]> {
+  const child = spawn(process.execPath, [cliPath, 'mcp'], {
+    cwd,
+    env: { ...process.env, SYSTEM_ONE_BACKEND: 'mock' },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const exited = once(child, 'exit');
+  const lines = createInterface({ input: child.stdout });
+  const iterator = lines[Symbol.asyncIterator]();
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  try {
+    const responses: JsonRpcResponse[] = [];
+    for (const [index, text] of evidence.entries()) {
+      child.stdin.write(JSON.stringify({
+        jsonrpc: '2.0', id: index, method: 'tools/call',
+        params: { name: 'reflex_gate', arguments: { assertions: [{ statement: 'All tests passed.' }], evidence: text } }
+      }) + '\n');
+      const line = await iterator.next();
+      assert.equal(line.done, false, `MCP ended before response: ${stderr}`);
+      const response = JSON.parse(line.value!) as JsonRpcResponse;
+      assert.equal(response.id, index);
+      responses.push(response);
+    }
+    child.stdin.end();
+    assert.equal((await exited)[0], 0, stderr);
+    return responses;
+  } finally {
+    lines.close();
+    if (child.exitCode === null) child.kill();
+  }
+}
+
+for (const firstPassed of [true, false]) {
+  test(`one MCP process isolates equal-length evidence in ${firstPassed ? 'positive-negative' : 'negative-positive'} order`, { timeout: 10_000 }, async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'reflex-mcp-cache-'));
+    try {
+      const good = 'All tests: 10 passed, 0 failed';
+      const bad = 'All tests: 10 passed, 1 failed';
+      assert.equal(good.length, bad.length);
+      const evidence = firstPassed ? [good, bad, good] : [bad, good, bad];
+      const responses = await callMcpSequential(evidence, workspace);
+      for (const [index, response] of responses.entries()) {
+        const result = toolPayload(response);
+        assert.equal(result.passed, evidence[index] === good);
+        assert.equal(result.results[0].outcome, evidence[index] === good ? 'verified' : 'contradicted');
+      }
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+}

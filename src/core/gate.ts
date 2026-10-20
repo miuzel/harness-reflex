@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
+
 import { DecisionBackend, GateRequest, GateResponse } from '../backend/types.js';
 import { DecisionLedger } from './ledger.js';
 import { Calibrator } from './calibrate.js';
 
 export interface GateOptions {
   strictness?: 'high' | 'normal' | 'lenient';
+  /** Optional namespace; never overrides verification-input identity. */
   latchCacheKey?: string;
   calibrator?: Calibrator;
 }
@@ -29,7 +32,16 @@ export class ReflexGateService {
     evidence: string,
     options?: GateOptions
   ): Promise<GateResponse> {
-    const latchKey = options?.latchCacheKey || (assertions.map((a) => a.statement).join(';') + '::' + evidence.length);
+    const strictness = options?.strictness || 'normal';
+    // Fixed-order tuples make property insertion order irrelevant. A caller's
+    // namespace cannot reuse a verdict for changed assertions, evidence or policy.
+    // Hash the full input so large/sensitive evidence is not retained in map keys.
+    const latchKey = createHash('sha256').update(JSON.stringify([
+      options?.latchCacheKey || null,
+      assertions.map(({ statement, criteria }) => [statement, criteria ?? null]),
+      evidence,
+      strictness
+    ])).digest('hex');
     if (this.latchedResults.has(latchKey)) {
       const cached = this.latchedResults.get(latchKey)!;
       this.ledger.record({
@@ -62,7 +74,7 @@ export class ReflexGateService {
     const req: GateRequest = {
       assertions,
       evidence,
-      strictness: options?.strictness || 'normal'
+      strictness
     };
 
     let result: GateResponse;
@@ -92,8 +104,8 @@ export class ReflexGateService {
         item.explanation += ` [Calibrated confidence: ${calPct}% (raw: ${rawPct}%)]`;
 
         // If raw was claimed 'verified' but empirical calibrated probability is below threshold, escalate!
-        const minThreshold = options?.strictness === 'high' ? 0.85 : 0.65;
-        if (item.outcome === 'verified' && calibrated < minThreshold && options?.strictness !== 'lenient') {
+        const minThreshold = strictness === 'high' ? 0.85 : 0.65;
+        if (item.outcome === 'verified' && calibrated < minThreshold && strictness !== 'lenient') {
           item.outcome = 'escalate';
           item.explanation += ` [Auto-Escalated: empirical accuracy (${calPct}%) below safety threshold (${(minThreshold * 100).toFixed(0)}%)]`;
           result.passed = false;
