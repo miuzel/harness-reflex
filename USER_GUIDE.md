@@ -362,7 +362,7 @@ record?.digest;  // 与决策记录里的 digest 一致
 | 虚拟 Provider | 路由开关、虚拟 Provider 名称、模型池增删与排序、兜底目标 |
 | 推理强度 | 策略（`reflex`/`auto`/具体档位）、兜底档、最小置信度、**自适应推理强度开关** |
 | 自动干预 | 三态模式（`off`/`observe`/`active`）、四大能力覆盖、每回合干预次数上限、每回合判定上限、每会话判定上限、重复阈值、失败阈值、最小置信度、判定窗口大小、剪枝下限比例；并列出当前生效的模式与能力（只读） |
-| 工具开关 | 8 个工具逐项启停，并列出当前已注册的工具名（只读，跟随 `toolPrefix`） |
+| 工具开关 | 8 个工具逐项启停；每项写明**做什么 / agent 何时该调用 / 是否建议暴露**，并有「应用推荐组合」按钮；页尾列出当前已注册的工具名（只读，跟随 `toolPrefix`） |
 | System 1 后端 | 后端实现、Base URL、模型 ID、API Key 环境变量名、超时 |
 | 决策账本 | 实时指标、最近决策表、落盘路径、清空（需二次确认） |
 | **使用说明** | **本手册的只读视图，跟随 DSH 界面语言中英切换** |
@@ -390,22 +390,41 @@ record?.digest;  // 与决策记录里的 digest 一致
 `resolveConfig` 校验器拒绝并给出字段级错误文案，面板不会部分生效——要么整组通过，
 要么一个字都不写。
 
+### 工具开关：三类建议与推荐组合
+
+工具开关页的每一项都写清三件事：**这个工具做什么**、**agent 在什么情况下应该调用
+它**、以及一条**是否建议暴露给 agent** 的标签：
+
+| 建议标签 | 含义 | 工具 |
+| --- | --- | --- |
+| 建议暴露 | agent 日常确实会用 | `choice`、`score`、`route`、`screen`、`gate` |
+| 已由自动干预覆盖 | 干预层在 `observe`/`active` 下已经自动做这件事，手动调用基本冗余 | `prune`、`detect_stagnation` |
+| 仅诊断 | 给人看面板与账本用，agent 不需要 | `status_ledger` |
+
+页首的「**应用推荐组合**」按钮按上表预填 8 个开关（`choice`、`score`、`route`、
+`screen`、`gate` 开，`prune`、`detect_stagnation`、`status_ledger` 关）。它**只预填
+草稿，不落盘**：仍需点「保存」才写回，写回内容也仍然只含显式关闭的那三项。
+
+**默认配置不受影响——依旧 8 项全开**。推荐组合是可选操作与本文建议，不是新的默认值；
+它不改 `Config` 结构，也不引入任何新的配置文件或写入通道。其中 `route` 属于可选
+增强：不开也不影响主流程，只是让 agent 在候选很多时先缩小范围。
+
 ---
 
 ## 9. MCP 工具 ↔ DSH 原生工具对照
 
 两种形态暴露**同一套 8 个工具**，共享下表参数与返回载荷；参数校验边界见下文。
 
-| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 进程内工具名（`dsh-reflex`） | 主要参数 |
-| --- | --- | --- | --- |
-| 多选一分类 | `reflex_choice` | `ctx.tools` 注册的 `reflex_choice` | `question`, `options[]`, 可选 `context` |
-| 连续评分 | `reflex_score` | `reflex_score` | `statement`, 可选 `criteria`, `context` |
-| 提示注入筛查 | `reflex_screen` | `reflex_screen` | `content`, 可选 `source`, `strict` |
-| 声明-证据门禁 | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` |
-| 长输出剪枝 | `reflex_prune` | `reflex_prune` | `rawOutput`, 可选 `intent`, `shadowMode` |
-| 停滞检测 | `reflex_detect_stagnation` | `reflex_detect_stagnation` | 可选 `recentAction`, `goal`, `history[]` |
-| 候选排序 | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, 可选 `topK` |
-| 账本审计 | `reflex_status_ledger` | `reflex_status_ledger` | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） |
+| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 进程内工具名（`dsh-reflex`） | 主要参数 | 建议 |
+| --- | --- | --- | --- | --- |
+| 多选一分类 | `reflex_choice` | `ctx.tools` 注册的 `reflex_choice` | `question`, `options[]`, 可选 `context` | 建议暴露 |
+| 连续评分 | `reflex_score` | `reflex_score` | `statement`, 可选 `criteria`, `context` | 建议暴露 |
+| 提示注入筛查 | `reflex_screen` | `reflex_screen` | `content`, 可选 `source`, `strict` | 建议暴露 |
+| 声明-证据门禁 | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` | 建议暴露 |
+| 长输出剪枝 | `reflex_prune` | `reflex_prune` | `rawOutput`, 可选 `intent`, `shadowMode` | 已由自动干预覆盖 |
+| 停滞检测 | `reflex_detect_stagnation` | `reflex_detect_stagnation` | 可选 `recentAction`, `goal`, `history[]` | 已由自动干预覆盖 |
+| 候选排序 | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, 可选 `topK` | 建议暴露（可选增强） |
+| 账本审计 | `reflex_status_ledger` | `reflex_status_ledger` | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） | 仅诊断 |
 
 差异点：
 

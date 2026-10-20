@@ -427,7 +427,7 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | Virtual provider | Routing switch, provider name, pool editing and ordering, fallback target |
 | Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence, **adaptive-effort switch** |
 | Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
-| Tools | A per-tool switch for each of the eight tools, plus the currently registered tool names (read-only, follows `toolPrefix`) |
+| Tools | A per-tool switch for each of the eight tools, each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`) |
 | System 1 backend | Implementation, base URL, model id, API-key variable name, timeout |
 | Decision ledger | Live metrics, recent-decision table, JSONL sink, clear (confirmed twice) |
 | **Guide** | **A read-only view of this manual, following the DSH interface language** |
@@ -465,6 +465,30 @@ an invalid three-state value) is rejected by the same Host-side `resolveConfig`
 validator with a field-level message, and the panel applies nothing partially:
 the whole group passes, or not a byte of it is written.
 
+### Tool switches: three kinds of advice, and the recommended set
+
+Every entry on the tools page states three things: **what the tool does**, **when
+the agent should call it**, and one label answering **whether it is advised to
+expose the tool to the agent**:
+
+| Advice | Meaning | Tools |
+| --- | --- | --- |
+| Suggested for the agent | The agent genuinely uses it in day-to-day work | `choice`, `score`, `route`, `screen`, `gate` |
+| Covered by the intervention layer | The layer already does this under `observe`/`active`, so a manual call is usually redundant | `prune`, `detect_stagnation` |
+| Diagnostics only | It exists for a human reading the page and the ledger | `status_ledger` |
+
+The "**Apply recommended set**" button at the top pre-fills the eight switches
+from that table (`choice`, `score`, `route`, `screen` and `gate` on; `prune`,
+`detect_stagnation` and `status_ledger` off). It **pre-fills the draft only and
+writes nothing**: the group is still saved when you press Save, and what gets
+written is still only the three explicit closes.
+
+**The default configuration is unchanged — all eight stay on.** The recommended
+set is an optional action and a recommendation in this manual, not a new default:
+it adds no `Config` field, no new configuration file, and no second write
+channel. `route` is an optional extra in particular — the main flow does not
+depend on it, it merely shrinks the candidate range when there are many options.
+
 ---
 
 ## 9. MCP tools ↔ DSH native tools
@@ -472,16 +496,16 @@ the whole group passes, or not a byte of it is written.
 Both forms expose the **same eight tools**, sharing the arguments below and their
 payloads; argument-validation boundaries differ as described below.
 
-| Capability | MCP tool name (`harness-reflex mcp`) | DSH in-process tool (`dsh-reflex`) | Main arguments |
-| --- | --- | --- | --- |
-| Multi-option classification | `reflex_choice` | `reflex_choice` registered via `ctx.tools` | `question`, `options[]`, optional `context` |
-| Continuous rating | `reflex_score` | `reflex_score` | `statement`, optional `criteria`, `context` |
-| Prompt-injection screen | `reflex_screen` | `reflex_screen` | `content`, optional `source`, `strict` |
-| Claim/evidence gate | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` |
-| Long-output pruning | `reflex_prune` | `reflex_prune` | `rawOutput`, optional `intent`, `shadowMode` |
-| Stagnation detection | `reflex_detect_stagnation` | `reflex_detect_stagnation` | optional `recentAction`, `goal`, `history[]` |
-| Candidate ranking | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, optional `topK` |
-| Ledger audit | `reflex_status_ledger` | `reflex_status_ledger` | optional `includeEntries` (returns `summary`, optionally `recentEntries`) |
+| Capability | MCP tool name (`harness-reflex mcp`) | DSH in-process tool (`dsh-reflex`) | Main arguments | Advice |
+| --- | --- | --- | --- | --- |
+| Multi-option classification | `reflex_choice` | `reflex_choice` registered via `ctx.tools` | `question`, `options[]`, optional `context` | Suggested for the agent |
+| Continuous rating | `reflex_score` | `reflex_score` | `statement`, optional `criteria`, `context` | Suggested for the agent |
+| Prompt-injection screen | `reflex_screen` | `reflex_screen` | `content`, optional `source`, `strict` | Suggested for the agent |
+| Claim/evidence gate | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` | Suggested for the agent |
+| Long-output pruning | `reflex_prune` | `reflex_prune` | `rawOutput`, optional `intent`, `shadowMode` | Covered by the intervention layer |
+| Stagnation detection | `reflex_detect_stagnation` | `reflex_detect_stagnation` | optional `recentAction`, `goal`, `history[]` | Covered by the intervention layer |
+| Candidate ranking | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, optional `topK` | Suggested (optional extra) |
+| Ledger audit | `reflex_status_ledger` | `reflex_status_ledger` | optional `includeEntries` (returns `summary`, optionally `recentEntries`) | Diagnostics only |
 
 Differences:
 
