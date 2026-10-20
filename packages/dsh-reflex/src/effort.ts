@@ -757,6 +757,12 @@ export function levelOfChoiceOption(option: string): AdaptiveEffortLevel | undef
 export interface EffortInterceptorOptions {
   /** Deployment `reasoningEffort`: a trigger marker or one pinned level. */
   setting?: ReasoningEffortSetting;
+  /**
+   * Deployment `effort.enabled` switch; `false` makes the whole interceptor
+   * inert. Defaults to `true`, which is why an activation that never asked for
+   * the switch behaves exactly as it did before it existed.
+   */
+  enabled?: boolean;
   /** Level used when no cue matches; defaults to `medium`. */
   fallback?: AdaptiveEffortLevel;
   /** Minimum System 1 confidence for its answer to be trusted; defaults to 0.3. */
@@ -783,6 +789,12 @@ export interface EffortInterceptorOptions {
  */
 export class EffortInterceptor {
   readonly setting: ReasoningEffortSetting | undefined;
+  /**
+   * The deployment switch. When `false` this interceptor decides nothing: no
+   * System 1 round trip, no cue vote, no ledger entry, no status, and no rewrite
+   * — only the marker is cleared, because it is an intent no adapter accepts.
+   */
+  readonly enabled: boolean;
   readonly fallback: AdaptiveEffortLevel;
   readonly minConfidence: number;
 
@@ -797,6 +809,7 @@ export class EffortInterceptor {
    */
   constructor(options: EffortInterceptorOptions) {
     this.setting = options.setting;
+    this.enabled = options.enabled ?? true;
     this.fallback = options.fallback ?? 'medium';
     this.minConfidence = options.minConfidence ?? 0.3;
     this.#decide = options.decide;
@@ -806,9 +819,9 @@ export class EffortInterceptor {
     this.#now = options.now ?? (() => performance.now());
   }
 
-  /** Whether this activation can ever decide an effort. */
-  get enabled(): boolean {
-    return this.setting !== undefined;
+  /** Whether this activation has an adaptive policy to apply at all. */
+  get adaptive(): boolean {
+    return this.enabled && this.setting !== undefined;
   }
 
   /**
@@ -818,6 +831,17 @@ export class EffortInterceptor {
    */
   async resolve(context: EffortRequestContext): Promise<EffortResolution> {
     const { requested } = context;
+
+    if (!this.enabled) {
+      // The switch is off, so this layer has no policy left: a concrete level or
+      // a silent request is passed through untouched (the deployment asked for
+      // the effort plumbing to stay out of the way), and a marker is *cleared*
+      // rather than translated. Clearing is the safe fallback the adapter
+      // boundary needs — the request lands on the provider's own default, and
+      // the plugin's marker can never reach a provider that never heard of it.
+      if (isEffortTrigger(requested)) return { changed: true, outcome: 'cleared' };
+      return { changed: false, outcome: 'passthrough' };
+    }
 
     if (isEffortTrigger(requested)) return this.#decideTurn('request', context);
     if (requested === undefined && isEffortTrigger(this.setting)) return this.#decideTurn('config', context);

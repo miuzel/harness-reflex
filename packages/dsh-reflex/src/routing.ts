@@ -264,15 +264,25 @@ export interface AdaptiveEffortSurface {
  *   something the physical adapter accepts, so no code path can hand
  *   `reasoningEffort: "reflex"` to a provider that never heard of it.
  *
+ * With `effort.enabled` off the surface installs nothing that can be *chosen*:
+ * the marker is not appended to any model's effort list, so a selector stops
+ * offering "Reflex (Auto)", and every path that still carries a marker — a
+ * persisted selection, a deployment setting, a hand-built call — has it cleared
+ * at the last gate instead of being translated to a level the adapter supports.
+ * The runtime is still wrapped rather than left alone, because a marker that
+ * survives to `prepareCall` must never reach a physical provider.
+ *
  * @param ctx - plugin context (kept for API compatibility).
  * @param llm - the LLM runtime to extend.
  * @param setting - deployment `reasoningEffort`, the initial mode of the surface.
+ * @param enabled - the deployment `effort.enabled` switch; defaults to `true`.
  * @returns the installed surface, whose `dispose()` restores the runtime.
  */
 export function installAdaptiveEffortSurface(
   _ctx: Context,
   llm: LlmRuntime,
-  setting: string | undefined
+  setting: string | undefined,
+  enabled = true
 ): AdaptiveEffortSurface {
   const runtime = llm as unknown as Record<string, unknown>;
   const originalResolveModelInfo = llm.resolveModelInfo.bind(llm);
@@ -292,6 +302,9 @@ export function installAdaptiveEffortSurface(
 
   runtime.resolveModelInfo = async (provider: string, model: string, signal?: AbortSignal) => {
     const info = await originalResolveModelInfo(provider, model, signal);
+    // The switch is off: the plugin's own effort option is revoked, so no
+    // selector can offer a mode this activation will not honour.
+    if (!enabled) return info;
     const reasoning = (info as unknown as LlmResolvedModelInfoLike)?.reasoning;
     if (!reasoning || reasoning.efforts.length === 0) return info;
     const efforts = reasoning.efforts as readonly { id: unknown }[];
@@ -307,6 +320,18 @@ export function installAdaptiveEffortSurface(
 
   runtime.resolveCallConfig = async (config: LlmCallConfig, signal?: AbortSignal) => {
     const requested = config.reasoningEffort as unknown as string | undefined;
+
+    if (!enabled) {
+      // Nothing is injected for an owned virtual route, and a marker is stripped
+      // instead of accepted: the call resolves with the provider's own default,
+      // which is the only "adaptive effort" a disabled deployment can have.
+      if (!isAdaptiveMarker(requested)) return originalResolveCallConfig(config, signal);
+      const cleared = await originalResolveCallConfig(
+        { ...config, reasoningEffort: undefined } as LlmCallConfig,
+        signal
+      );
+      return { ...cleared, reasoningEffort: undefined };
+    }
 
     if (isAdaptiveMarker(requested)) {
       const resolved = await originalResolveCallConfig(
@@ -344,7 +369,13 @@ export function installAdaptiveEffortSurface(
     // Last gate before dispatch: the marker is an intent, never an effort any
     // physical adapter can accept, so it is resolved here for the paths that
     // bypass the `agent/request` interception (hand-built one-shot calls,
-    // `prepareCall` consumers).
+    // `prepareCall` consumers). With the switch off there is no policy to
+    // resolve it *to*, so it is deleted and the provider default applies.
+    if (!enabled) {
+      const cleared = { ...config } as LlmCallConfig;
+      delete (cleared as { reasoningEffort?: unknown }).reasoningEffort;
+      return originalPrepareCall(cleared, signal, configure as never);
+    }
     const info = await supportsThinking(config.provider, config.model, signal);
     const aligned = info
       ? await alignReasoningEffort(ADAPTIVE_EFFORT_MARKER, { provider: config.provider, model: config.model }, createReasoningProbe(llm, (provider, model) => originalResolveModelInfo(provider, model, signal)))
@@ -365,7 +396,7 @@ export function installAdaptiveEffortSurface(
   let disposed = false;
   return {
     get adaptive() {
-      return isAdaptiveMarker(setting);
+      return enabled && isAdaptiveMarker(setting);
     },
     dispose: () => {
       if (disposed) return;
@@ -477,7 +508,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
   const rawProbe = (provider: string, model: string) =>
     rawResolveModelInfo(provider, model) as unknown as Promise<LlmResolvedModelInfoLike>;
 
-  const surface = installAdaptiveEffortSurface(ctx, llm, options.effort.setting);
+  const surface = installAdaptiveEffortSurface(ctx, llm, options.effort.setting, options.effort.enabled);
 
   const owned = OWNED_ROUTES.get(llm) ?? new Map<string, ReflexVirtualAdapter>();
   OWNED_ROUTES.set(llm, owned);
@@ -580,13 +611,21 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
       const requested = config.reasoningEffort as unknown as string | undefined;
       const task = remembered?.task;
 
+      // With `effort.enabled` off this layer manages no effort at all: it still
+      // routes, but the only edit it is allowed to make to `reasoningEffort` is
+      // removing its own marker. That keeps a concrete level byte-identical on
+      // its way to the adapter, and it means no decision, no audit entry and no
+      // status can be produced for a deployment that switched the layer off.
+      const effortOff = options.effort.enabled === false;
+
       // Reflex only automatically adapts reasoning effort when the effort was
       // explicitly chosen as reflex/auto, or when an unpinned request names the
       // virtual provider (which defaults to adaptive effort). If the user selected
       // High, Low, Medium, Off, or Provider Default, reflex does not touch effort.
       const isAdaptive =
-        isAdaptiveMarker(requested) ||
-        (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(options.effort.setting));
+        !effortOff &&
+        (isAdaptiveMarker(requested) ||
+          (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(options.effort.setting)));
 
       // Same-turn follow-up steps (step > 1 without new user text) reuse the turn's
       // decision: no second System 1 call, no second effort event, 0ms latency.
@@ -633,8 +672,21 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         rememberTarget(facts, payload.agent, decision.target);
       }
 
-      const isPinnedConfig = requested === undefined && isEffortLevel(options.effort.setting);
+      const isPinnedConfig = !effortOff && requested === undefined && isEffortLevel(options.effort.setting);
       if (!isAdaptive && !isPinnedConfig) {
+        if (effortOff) {
+          // Transparent pass-through: the request keeps the caller's own level
+          // (never aligned, never snapped onto the routed model's vocabulary),
+          // and the plugin's marker is deleted instead of being translated — the
+          // adapter then applies the provider default, which is the only safe
+          // reading of "reflex" once the adaptive layer is switched off.
+          const kept = isAdaptiveMarker(requested) ? undefined : requested;
+          if (routed === config && kept === requested) return config;
+          const rewritten: LlmCallConfig = { ...routed };
+          if (kept === undefined) delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
+          else rewritten.reasoningEffort = kept as LlmCallConfig['reasoningEffort'];
+          return rewritten;
+        }
         // Concrete effort (high, low, off...) or provider default: align if needed, never adapt!
         if (routed === config && requested !== undefined) {
           const aligned = await alignReasoningEffort(requested, { provider: routed.provider, model: routed.model }, probe);

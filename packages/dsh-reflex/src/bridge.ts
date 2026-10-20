@@ -114,6 +114,7 @@ export class ReflexRuntime {
     this.effortStatusFeed = new EffortStatusFeed();
     this.effort = new EffortInterceptor({
       ...(config.effort.setting === undefined ? {} : { setting: config.effort.setting }),
+      enabled: config.effort.enabled,
       fallback: config.effort.fallback,
       minConfidence: config.effort.minConfidence,
       decide: (request) => this.backend.choice(request),
