@@ -31,8 +31,15 @@ const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 const workDir = path.resolve(packageDir, '..', '..', 'tmp', 'reflex-mutation');
 const srcDir = path.join(packageDir, 'src');
 const testGlob = path.posix.join('dist', '**', '*.test.js');
-/** How many tests one run executed; 0 means the glob matched nothing. */
-const EXPECTED_TESTS = 186;
+/**
+ * How many tests one run executed; 0 means the glob matched nothing.
+ *
+ * A floor, not an equality: it is here so a broken glob or a suite that silently
+ * lost tests cannot make the baseline look green. It is kept at the suite's real
+ * size, so losing any test at all fails the negative control before it judges a
+ * single fault.
+ */
+const EXPECTED_TESTS = 284;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -54,10 +61,14 @@ const MUTATIONS = [
     name: 'no-teardown',
     area: 'reversible lifecycle',
     file: 'src/index.ts',
+    // The complete teardown, in its current order: stopping the observer is the
+    // one step that survives, so the fault leaves routing, the intervention hooks,
+    // the panel and the runtime mounted after unload.
     from: [
       '    return () => {',
       '      stopObserving();',
       '      stopRouting();',
+      '      for (const dispose of interventions.disposers.reverse()) dispose();',
       '      unmountPanel();',
       '      for (const dispose of disposers.reverse()) dispose();',
       '      runtime.dispose();',
@@ -283,6 +294,39 @@ const MUTATIONS = [
     file: 'src/panel-api.ts',
     from: '    ...(switched === undefined ? {} : { switched }),',
     to: ''
+  },
+  {
+    name: 'prune-ignores-action-ceiling',
+    area: 'a reduction draws on the turn’s shared action ceiling',
+    file: 'src/interventions.ts',
+    // The size gates are left intact: only the ceiling check disappears, so a turn
+    // with no allowance left still plans reductions.
+    from: [
+      "      this.#skip('retention-unavailable');",
+      '      return downstream;',
+      '    }',
+      '    if (!this.#actionWithinBudget(state)) {'
+    ].join('\n'),
+    to: [
+      "      this.#skip('retention-unavailable');",
+      '      return downstream;',
+      '    }',
+      '    if (false) {'
+    ].join('\n')
+  },
+  {
+    name: 'prune-observe-action-unbooked',
+    area: 'a planned action is booked in both modes',
+    file: 'src/interventions.ts',
+    from: ['      this.#bookAction(state);', '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'].join('\n'),
+    to: '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'
+  },
+  {
+    name: 'prune-applied-action-unbooked',
+    area: 'an installed reduction is booked',
+    file: 'src/interventions.ts',
+    from: ['    this.#bookAction(state);', '    this.#conclude(', '      plan,'].join('\n'),
+    to: ['    this.#conclude(', '      plan,'].join('\n')
   }
 ];
 

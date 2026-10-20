@@ -62,12 +62,16 @@ export class ToolResultPruner {
       type: 'prune',
       backend: this.backend.name,
       latencyMs: result.latencyMs,
-      tokensSaved: result.estimatedTokensSaved,
+      // A shadow measurement removed nothing from the context, so it must not
+      // claim a saving: `tokensSaved` means "what the harness stopped carrying".
+      // The candidate's size stays readable in `details.potentialTokensSaved`.
+      tokensSaved: result.shadow ? 0 : result.estimatedTokensSaved,
       originalTokens: Math.ceil(result.originalChars / 4),
       prunedTokens: Math.ceil(result.prunedChars / 4),
       shadow: result.shadow,
       details: {
-        reductionPercentage: result.reductionPercentage
+        reductionPercentage: result.reductionPercentage,
+        ...(result.shadow ? { potentialTokensSaved: result.estimatedTokensSaved } : {})
       }
     });
 

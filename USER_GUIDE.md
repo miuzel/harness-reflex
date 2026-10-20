@@ -224,7 +224,92 @@ routing:
 
 ---
 
-## 7. 设置面板（DSH Settings UI）
+## 7. 自动干预门禁（`off` / `observe` / `active`）
+
+插件可以在**模型没有调用任何 `reflex_*` 工具**的情况下，用宿主原生钩子自行干预。
+开关只有一处：`interventions.mode`，取值 `off` / `observe` / `active`，默认 `observe`：
+
+```yaml
+interventions:
+  mode: observe        # off | observe | active
+  capabilities:        # 可选：四大能力分别覆盖，inherit 表示跟随 mode
+    stagnation: inherit
+    prune: inherit
+    gate: inherit
+    closing: inherit
+  maxInterventionsPerTurn: 3
+  maxJudgmentsPerTurn: 3
+  maxJudgmentsPerSession: 20
+```
+
+| 模式 | 行为 |
+| --- | --- |
+| `off` | 不注册任何钩子监听器；工具执行与不装插件逐字节一致 |
+| `observe`（默认） | 完整检测与判定，只记账不执行：不改写 content、不注入消息、不拒绝工具、不 steer |
+| `active` | 完整链路：重复调用在执行前拒绝、超长结果在进入上下文前剪枝、重复失败改写为纠正反馈、回合收尾对有证据冲突的结论提出异议 |
+
+| 能力 | 钩子 | `active` 时的动作 |
+| --- | --- | --- |
+| `stagnation` | `tools/pre-execute`、`agent/pre-step` | 判定重复/振荡后拒绝该次调用，或在下一次 step 注入纠正上下文 |
+| `prune` | `tools/post-execute` | 结果超阈值时先保留原件再改写：原文写入会话日志并给出定位符，改写文本保留首尾并在中间标注定位符 |
+| `gate` | `tools/post-execute` | 同一调用连续失败达阈值时，把结果改写为纠正反馈；失败与否只看工具源保证的结构化退出码或宿主退出标记 |
+| `closing` | `agent/turn-stopping` | 用 `reflex_gate` 复核本回合的结论与证据，矛盾时 steer 一次 |
+
+### 被剪掉的原文如何取回
+
+`active` 剪枝的次序是「先保留、后替换」，这一步不能只有措辞：
+
+1. 判定通过、且**保留成功**之后，才生成改写文本；
+2. 原文以 `plugin:dsh-reflex/pruned-original` 记录写进会话日志（宿主 `appendPluginRecord`），
+   不进入模型可见面，`fork` / `resume` 会随日志一起带走；
+3. 改写文本中间带上定位符 `plugin:dsh-reflex/pruned-original#<digest>`，模型因此随时可以
+   要求取回被省略的部分；
+4. 保留失败（没有会话、日志缺失、写回校验不过）时**不替换**，也不计 `actualSavedTokens`，
+   结果逐字节保持原样（记为 `retention-failed`；这次判定已经付出，仍照实记账）。
+
+取回就是拿同一条定位符读会话事件：
+
+```ts
+import { readPrunedOriginal } from 'dsh-reflex';
+
+const record = readPrunedOriginal(session.ownEvents(), locator);
+record?.text;    // 逐字节原文
+record?.chars;   // 保留时的字符数
+record?.digest;  // 与决策记录里的 digest 一致
+```
+
+下限 `pruneFloorRatio`（默认 0.5）是**安装文本占原文的最小比例**：判定给出的候选若低于它，
+就用首尾上下文补足到该比例；判定选中的中间诊断整体保留，不会被下限挤掉。
+可保留的载荷有边界：换行少于 4 个（不足 5 行）或超过 100 000 字符时不做剪枝
+（分别记为 `unsupported-payload` / `retention-too-large`），单行输出与超大日志原样通过；
+同一载荷重复出现时复用第一次保留的原件，不重复写日志。
+
+### 成本与可追溯
+
+- 账本按 `mode` 与 `capability` 分列：`plans`（计划了几次）、`applied`（真正执行了几次）、
+  `judgments` / `memoHits`（判定与判定缓存命中）、`judgeTokens`（判定消耗的 token）、
+  `originalTokens` / `candidateTokens` / `potentialSavedTokens`（本可节省）/ `actualSavedTokens`（真正少带进上下文的量）；
+- `observe` 的 `actualSavedTokens` 恒为 0，`potentialSavedTokens` 与同输入的 `active` 逐项一致；
+- 判定成本单独计：`localLatencyMs`（本机仲裁）与 `remoteLatencyMs`（后端判定）分开统计；
+- 每条剪枝记录都带被替换原文的 `digest`、`turn`/`step` 与定位符 `originalLocator`；用定位符即可读回逐字节原文（见上「被剪掉的原文如何取回」）；
+- 保留是替换的前提：保留不成功就不替换、不计 `actualSavedTokens`，`plans` 也不谎报一次没发生的缩减；
+- `off` 严格零行为：不注册任何监听器、不采样、不判定，与不装插件逐字节一致；
+- 判定缓存以「回合 + 尾部窗口」为键：同一个问题一个回合只付一次；`maxJudgmentsPerTurn`、
+  `maxJudgmentsPerSession`、`maxInterventionsPerTurn` 分别是每回合判定、每会话判定、每回合干预的次数上限；
+- 同一 `(agent, 调用签名)` 的干预在一个回合内去重；被本插件拒绝的那次调用的返回值不再二次判定；
+- 本插件自己的 8 个工具永不进入判定（它们的结果已经是优化产物），冻结的 `reflex_*` 载荷不受影响。
+
+### 安全与回退
+
+- **fail-open**：任一判定环节抛错都直接放行下游结果（记为 `planning-error`），不会让工具调用失败；
+- **判失败不靠措辞**：以结果的结构化 `exitCode`/`signal` 为准，其次才是宿主追加在末行的退出标记；正文里出现 “failed” 不算失败，也不会因此拦下一次合法重试；
+- **权限单调**：`tools/pre-execute` 只在下游给 `allow` 时追加一条 `deny`；下游给 `ask`/`deny`/`cancel` 时按原对象原样返回（含 `info`），既不放宽也不覆盖；
+- **会话隔离**：检测窗口、判定缓存与次数上限都按 agent 记账，多 agent 互不共享；
+- **卸载无残留**：插件卸载时解除全部监听器并清空引擎状态；账本默认只在内存（未设 `ledgerPath` 时不落盘）。
+
+---
+
+## 8. 设置面板（DSH Settings UI）
 
 插件通过 `dsh.client` 声明浏览器半边，注册到设置面板的 `settings.section` 槽位：
 
@@ -243,7 +328,7 @@ routing:
 
 ---
 
-## 8. MCP 工具 ↔ DSH 原生工具对照
+## 9. MCP 工具 ↔ DSH 原生工具对照
 
 两种形态暴露**同一套 8 个工具**，参数与返回载荷一致；区别仅在注册方式与调用开销。
 
@@ -268,7 +353,7 @@ routing:
 
 ---
 
-## 9. 决策账本与审计
+## 10. 决策账本与审计
 
 每次判定都会追加一条 JSONL 记录（`type` 取值：`gate`、`prune`、`stagnation`、
 `route`、`model-route`、`effort`、`choice`），字段包含后端、耗时、置信度、
@@ -284,7 +369,7 @@ node dist/cli/index.js ledger      # 终端查看汇总
 
 ---
 
-## 10. 测试与发布
+## 11. 测试与发布
 
 ```bash
 npm test                 # 根包：ledger / score / MCP 表面 / 打包清单
@@ -312,7 +397,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 ---
 
-## 11. 常见问题排查
+## 12. 常见问题排查
 
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -326,7 +411,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 ---
 
-## 12. 版本与兼容性
+## 13. 版本与兼容性
 
 - 版本：`harness-reflex` 与 `dsh-reflex` 同步发布，v0.1.0-alpha.2；
 - Node：`>= 18`（根包 `engines`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；

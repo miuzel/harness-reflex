@@ -72,6 +72,122 @@ export interface ReflexSystemOneConfig {
   timeoutMs?: number;
 }
 
+/**
+ * The three-state vocabulary every automatic capability shares.
+ *
+ * `off` is the capability absent; `observe` runs the complete detection and
+ * action *planning* path while changing nothing the model can see; `active`
+ * executes the planned intervention. The shared vocabulary is what keeps one
+ * switch — not three subtly different "disabled" flags — behind every gate.
+ */
+export const INTERVENTION_MODES = ['off', 'observe', 'active'] as const;
+
+/** One resolved three-state mode. */
+export type InterventionMode = (typeof INTERVENTION_MODES)[number];
+
+/**
+ * A capability-level setting: one of the three modes, or `inherit` to follow
+ * {@link ReflexInterventionsConfig.mode}. Inheritance is deliberately not
+ * available at the top level, where there is nothing to inherit from.
+ */
+export const INTERVENTION_SETTINGS = [...INTERVENTION_MODES, 'inherit'] as const;
+
+/** One authored capability-level setting. */
+export type InterventionSetting = (typeof INTERVENTION_SETTINGS)[number];
+
+/**
+ * The automatic capabilities, each with its own three-state setting.
+ *
+ * - `stagnation`: the tool-call gate (`tools/pre-execute`) that denies a call
+ *   the run is repeating after System 1 confirmed stagnation, plus the
+ *   corrective context appended at `agent/pre-step`.
+ * - `prune`: the result projection (`tools/post-execute`) that shrinks an
+ *   oversized successful payload below its deterministic floors.
+ * - `gate`: corrective feedback (`tools/post-execute`) that turns a repeated
+ *   failing result into an error carrying the System 1 recommendation.
+ * - `closing`: the turn-stop check (`agent/turn-stopping`) that objects to a
+ *   turn closing on self-contradictory verification evidence.
+ */
+export const INTERVENTION_CAPABILITIES = ['stagnation', 'prune', 'gate', 'closing'] as const;
+
+/** One automatic capability name. */
+export type InterventionCapability = (typeof INTERVENTION_CAPABILITIES)[number];
+
+/**
+ * Authored automatic-intervention configuration.
+ *
+ * Key names are this plugin's contract with the settings surface: the block is
+ * edited through the very same schemastery schema the Settings panel writes, so
+ * there is no second write channel and no second source of truth.
+ */
+export interface ReflexInterventionsConfig {
+  /**
+   * Master mode of every automatic capability. `observe` (the default) runs the
+   * full detection path and records what it *would* do without touching the
+   * tool call, its result, the message list, or the turn boundary.
+   */
+  mode?: InterventionSetting;
+  /** Per-capability override; an omitted capability inherits {@link mode}. */
+  capabilities?: Partial<Record<InterventionCapability, InterventionSetting>>;
+  /**
+   * Ceiling on applied interventions per turn, so an intervention can never
+   * become the loop it was meant to break. Default `3`.
+   */
+  maxInterventionsPerTurn?: number;
+  /**
+   * Ceiling on *judgments* per turn — the expensive half of a detection. A
+   * pathological turn presenting many similar results is bounded by this rather
+   * than by the payload count. Default `3`.
+   */
+  maxJudgmentsPerTurn?: number;
+  /** Ceiling on judgments per agent session. Default `20`. */
+  maxJudgmentsPerSession?: number;
+  /**
+   * Identical consecutive tool calls required before the deterministic
+   * pre-trigger spends a System 1 judgment. Default `3`.
+   */
+  repeatThreshold?: number;
+  /** Consecutive failing results required before the same. Default `3`. */
+  failureThreshold?: number;
+  /** Minimum System 1 confidence for a stagnation verdict to act. Default `0.6`. */
+  minConfidence?: number;
+  /** Steps of one agent's history a deterministic pre-trigger looks at. Default `6`. */
+  windowSize?: number;
+  /**
+   * Lowest share of a payload's characters a prune may keep. The deterministic
+   * floor: a candidate that cuts deeper is replaced by the head/tail form.
+   * Default `0.5`.
+   */
+  pruneFloorRatio?: number;
+  /** Characters always kept from the head of a pruned payload. Default `400`. */
+  pruneHeadChars?: number;
+  /** Characters always kept from the tail of a pruned payload. Default `400`. */
+  pruneTailChars?: number;
+  /** Lookup intent handed to the pruning judgment. */
+  intent?: string;
+}
+
+/** Automatic-intervention configuration after defaults and resolution. */
+export interface ResolvedInterventionsConfig {
+  /** The master mode, always one of the three (never `inherit`). */
+  mode: InterventionMode;
+  /** Effective mode of every capability: the override, else the master mode. */
+  capabilities: Record<InterventionCapability, InterventionMode>;
+  /** Whether any capability is allowed to act. */
+  enabled: boolean;
+  maxInterventionsPerTurn: number;
+  maxJudgmentsPerTurn: number;
+  maxJudgmentsPerSession: number;
+  repeatThreshold: number;
+  failureThreshold: number;
+  minConfidence: number;
+  windowSize: number;
+  pruneFloorRatio: number;
+  pruneHeadChars: number;
+  pruneTailChars: number;
+  intent: string;
+}
+
 /** Authored adaptive reasoning-effort configuration. */
 export interface ReflexEffortConfig {
   /**
@@ -112,6 +228,8 @@ export interface ReflexConfig {
   routing?: ReflexRoutingConfig;
   /** Per-turn adaptive reasoning effort. */
   effort?: ReflexEffortConfig;
+  /** Automatic interventions on the Host's tool and agent lifecycle hooks. */
+  interventions?: ReflexInterventionsConfig;
 }
 
 /** Routing configuration after defaults and validation have been applied. */
@@ -160,7 +278,37 @@ export interface ResolvedReflexConfig {
   systemOne: ResolvedSystemOneConfig;
   routing: ResolvedRoutingConfig;
   effort: ResolvedEffortConfig;
+  interventions: ResolvedInterventionsConfig;
 }
+
+/** Schemastery schema for one automatic-intervention block. */
+const InterventionsSchema = z
+  .object({
+    mode: z
+      .union([...INTERVENTION_MODES])
+      .default('observe')
+      .description('off = absent, observe = detect and record only (default), active = execute the planned intervention.'),
+    capabilities: z
+      .object({
+        stagnation: z.union([...INTERVENTION_SETTINGS]).description('Tool-call gate and pre-step correction; omit to inherit mode.'),
+        prune: z.union([...INTERVENTION_SETTINGS]).description('Oversized result projection; omit to inherit mode.'),
+        gate: z.union([...INTERVENTION_SETTINGS]).description('Repeated-failure corrective feedback; omit to inherit mode.'),
+        closing: z.union([...INTERVENTION_SETTINGS]).description('Turn-stop objection; omit to inherit mode.')
+      })
+      .default({}),
+    maxInterventionsPerTurn: z.natural().default(3),
+    maxJudgmentsPerTurn: z.natural().default(3),
+    maxJudgmentsPerSession: z.natural().default(20),
+    repeatThreshold: z.natural().min(2).default(3),
+    failureThreshold: z.natural().min(2).default(3),
+    minConfidence: z.number().min(0).max(1).default(0.6),
+    windowSize: z.natural().min(3).default(6),
+    pruneFloorRatio: z.number().min(0).max(1).default(0.5),
+    pruneHeadChars: z.natural().default(400),
+    pruneTailChars: z.natural().default(400),
+    intent: z.string().description('Lookup intent handed to the pruning judgment.')
+  })
+  .volatile();
 
 /** Schemastery schema for one candidate pool entry. */
 const ModelPoolEntrySchema = z.object({
@@ -227,8 +375,117 @@ export const Config: Schemastery<any> = z.object({
   calibrationPath: z.string().description('Calibration curve JSON applied to choice confidences.').volatile(),
   systemOne: SystemOneSchema.default({}),
   routing: RoutingSchema.default({}),
-  effort: EffortSchema.default({})
+  effort: EffortSchema.default({}),
+  interventions: InterventionsSchema.default({})
 });
+
+/**
+ * Validate one authored three-state setting.
+ *
+ * The loader restricts the value to the schema's union; this repeats the check
+ * because {@link resolveConfig} is also the entry point for a programmatic
+ * caller, and a typo there must fail loudly instead of silently disabling (or
+ * silently enabling) an intervention.
+ *
+ * @param value - authored setting.
+ * @param allowInherit - whether `inherit` is a legal value at this position.
+ * @param label - dotted path used in the error.
+ * @returns the normalized setting, or `undefined` when nothing was authored.
+ * @throws Error when the value is not a legal setting.
+ */
+export function resolveInterventionSetting(
+  value: string | undefined,
+  allowInherit: boolean,
+  label: string
+): InterventionSetting | undefined {
+  if (value === undefined) return undefined;
+  const setting = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if ((INTERVENTION_SETTINGS as readonly string[]).includes(setting)) {
+    if (setting === 'inherit' && !allowInherit) {
+      throw new Error(`${label} must be one of ${INTERVENTION_MODES.join(', ')} (got "inherit": there is nothing to inherit from)`);
+    }
+    return setting as InterventionSetting;
+  }
+  const legal = allowInherit ? INTERVENTION_SETTINGS : INTERVENTION_MODES;
+  throw new Error(`${label} must be one of ${legal.join(', ')} (got "${String(value)}")`);
+}
+
+/**
+ * Validate the automatic-intervention block and fill in every default.
+ *
+ * Capability entries resolve to an effective three-state mode here, once, so
+ * every consumer — listeners, the panel projection, the audit — reads the same
+ * answer instead of re-deriving inheritance.
+ *
+ * @param authored - the authored `interventions` block.
+ * @returns the resolved master mode, effective capability modes, and limits.
+ * @throws Error when a field is present but unusable.
+ */
+export function resolveInterventionsConfig(authored: ReflexInterventionsConfig | undefined): ResolvedInterventionsConfig {
+  const block = authored ?? {};
+  const mode = (resolveInterventionSetting(block.mode, false, 'interventions.mode') ?? 'observe') as InterventionMode;
+
+  const capabilities = {} as Record<InterventionCapability, InterventionMode>;
+  for (const capability of INTERVENTION_CAPABILITIES) {
+    const setting = resolveInterventionSetting(
+      block.capabilities?.[capability],
+      true,
+      `interventions.capabilities.${capability}`
+    );
+    capabilities[capability] = setting === undefined || setting === 'inherit' ? mode : setting;
+  }
+
+  const counts: Array<[number | undefined, string, number, number]> = [
+    [block.maxInterventionsPerTurn, 'maxInterventionsPerTurn', 3, 0],
+    [block.maxJudgmentsPerTurn, 'maxJudgmentsPerTurn', 3, 0],
+    [block.maxJudgmentsPerSession, 'maxJudgmentsPerSession', 20, 0],
+    [block.repeatThreshold, 'repeatThreshold', 3, 2],
+    [block.failureThreshold, 'failureThreshold', 3, 2],
+    [block.windowSize, 'windowSize', 6, 3],
+    [block.pruneHeadChars, 'pruneHeadChars', 400, 0],
+    [block.pruneTailChars, 'pruneTailChars', 400, 0]
+  ];
+  const resolved: Record<string, number> = {};
+  for (const [value, name, fallback, minimum] of counts) {
+    if (value === undefined) {
+      resolved[name] = fallback;
+      continue;
+    }
+    if (!Number.isInteger(value) || value < minimum) {
+      throw new Error(`interventions.${name} must be an integer >= ${minimum} (got "${String(value)}")`);
+    }
+    resolved[name] = value;
+  }
+
+  const minConfidence = block.minConfidence ?? 0.6;
+  if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
+    throw new Error(`interventions.minConfidence must be a number in [0, 1] (got "${String(block.minConfidence)}")`);
+  }
+  const pruneFloorRatio = block.pruneFloorRatio ?? 0.5;
+  if (!Number.isFinite(pruneFloorRatio) || pruneFloorRatio < 0 || pruneFloorRatio > 1) {
+    throw new Error(`interventions.pruneFloorRatio must be a number in [0, 1] (got "${String(block.pruneFloorRatio)}")`);
+  }
+
+  return {
+    mode,
+    capabilities,
+    // One capability may be enabled by its own override while the master mode is
+    // `off`, so the switch that decides whether anything is installed reads the
+    // effective modes rather than the master alone.
+    enabled: INTERVENTION_CAPABILITIES.some((capability) => capabilities[capability] !== 'off'),
+    maxInterventionsPerTurn: resolved.maxInterventionsPerTurn!,
+    maxJudgmentsPerTurn: resolved.maxJudgmentsPerTurn!,
+    maxJudgmentsPerSession: resolved.maxJudgmentsPerSession!,
+    repeatThreshold: resolved.repeatThreshold!,
+    failureThreshold: resolved.failureThreshold!,
+    minConfidence,
+    windowSize: resolved.windowSize!,
+    pruneFloorRatio,
+    pruneHeadChars: resolved.pruneHeadChars!,
+    pruneTailChars: resolved.pruneTailChars!,
+    intent: optionalText(block.intent) ?? 'extract diagnostics, relevant results and errors'
+  };
+}
 
 /**
  * Trim one optional authored string, treating blank text as absent.
@@ -403,7 +660,8 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
       ...(setting === undefined ? {} : { setting }),
       fallback: effortFallback,
       minConfidence
-    }
+    },
+    interventions: resolveInterventionsConfig(validated.interventions)
   };
 }
 

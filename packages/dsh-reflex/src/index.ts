@@ -6,6 +6,8 @@ import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
 import { defineReflexTools, reflexToolNames } from './tools.js';
 import { mountReflexPanel } from './panel-mount.js';
+import { installInterventions } from './interventions.js';
+import { appendInterventionRecord, appendPrunedOriginal } from './session-audit.js';
 import { installActualProjection } from './actual-projection.js';
 
 /**
@@ -33,6 +35,24 @@ export const name = 'dsh-reflex';
 export const inject = ['tools', 'llm'];
 
 export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, routingActive, createReflexRuntime, defineReflexTools, reflexToolNames };
+export {
+  INTERVENTION_CAPABILITIES,
+  INTERVENTION_MODES,
+  INTERVENTION_SETTINGS,
+  resolveInterventionSetting,
+  resolveInterventionsConfig
+} from './config.js';
+export type { InterventionCapability, InterventionMode, InterventionSetting, ReflexInterventionsConfig, ResolvedInterventionsConfig } from './config.js';
+export { INTERVENTION_SOURCE_KIND, InterventionEngine, installInterventions } from './interventions.js';
+export type {
+  InterventionAction,
+  InterventionBaseline,
+  InterventionCostBucket,
+  InterventionInstallation,
+  InterventionPlan,
+  InterventionReport
+} from './interventions.js';
+export type { InterventionAuditRecord } from './session-audit.js';
 export { createBackend } from './bridge.js';
 export {
   PANEL_BASE,
@@ -95,6 +115,14 @@ export {
   snapEffort
 } from './effort.js';
 export { EFFORT_RECORD_TYPE, appendEffortRecord, effortRecordsOf, toEffortAuditRecord } from './session-audit.js';
+// Retrieval of a pruned original is a public API, not an internal detail: the guide
+// tells a reader to import the function from the package root, so the root entry has
+// to export it together with the two names a caller needs to use it — the record's
+// own type, and the locator builder for the digest a decision record carries.
+// Exporting it only from `session-audit.js` would leave the documented example
+// unrunnable for an installed package.
+export { PRUNED_ORIGINAL_RECORD_TYPE, pruneLocator, readPrunedOriginal } from './session-audit.js';
+export type { PrunedOriginalRecord } from './session-audit.js';
 export { ReflexVirtualAdapter } from './virtual-adapter.js';
 export {
   ReflexRoutingError,
@@ -192,6 +220,32 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     });
 
     const stopRouting = installRouting(ctx, runtime, resolved.routing.maxTaskChars);
+    // The automatic half of the plugin: the same System 1 judgments, spent at the
+    // Host's own hook points instead of waiting for the model to call a tool. The
+    // installer registers nothing when every capability is `off`, so an inactive
+    // deployment pays for no listener and no state.
+    const interventions = installInterventions(ctx, {
+      config: resolved.interventions,
+      pruneThreshold: resolved.pruneThreshold,
+      // The eight tools of this plugin are already the optimizer's own output:
+      // judging them again would spend a second judgment on the same payload.
+      ownTools: reflexToolNames(resolved),
+      stagnation: runtime.stagnationService,
+      prune: runtime.pruneService,
+      gate: runtime.gateService,
+      audit: (record, session) => {
+        // The session log is the one place a decision is durable; an agent without
+        // a session simply records nothing, which is why this is guarded.
+        if (session) appendInterventionRecord(session, record);
+      },
+      // Pruning is only allowed to replace a result when the original has really
+      // been retained in a place that survives the replacement. The session log is
+      // that place: a plugin record is ignorable by the model, carried by resume
+      // and fork, and readable back — which the retention verifies before it
+      // reports a locator. No verified retention, no reduction.
+      retain: (session, request) => appendPrunedOriginal(session, request)
+    });
+    runtime.attachInterventions(interventions.engine);
     const unmountPanel = mountReflexPanel(ctx, runtime);
 
     const injectSettings = (ctx as { inject?: (deps: string[], cb: (scope: any) => void) => void }).inject;
@@ -207,6 +261,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     return () => {
       stopObserving();
       stopRouting();
+      for (const dispose of interventions.disposers.reverse()) dispose();
       unmountPanel();
       for (const dispose of disposers.reverse()) dispose();
       runtime.dispose();

@@ -1,0 +1,2335 @@
+/**
+ * Automatic interventions on the Host's native tool and agent lifecycle hooks.
+ *
+ * The plugin's eight MCP tools are pull-based: they act only when the *model*
+ * decides to call one. This module is the push half — the same System 1
+ * judgments, spent automatically at the four points where the Host already asks
+ * its listeners a question:
+ *
+ * | Hook | Capability | What it may do |
+ * | --- | --- | --- |
+ * | `tools/pre-execute` | `stagnation` | deny a call the run is repeating |
+ * | `tools/post-execute` | `prune` | replace an oversized result with its reduction |
+ * | `tools/post-execute` | `gate` | turn a repeated failure into corrective feedback |
+ * | `agent/pre-step` | `stagnation` | attach the correction to the next step |
+ * | `agent/turn-stopping` | `closing` | object to a turn closing on contradicted evidence |
+ *
+ * ## The three-state discipline
+ *
+ * Every capability runs in one of three modes. The distinction is *not* "on/off
+ * with logging": `observe` runs the same detection, the same judgment, and the
+ * same plan as `active`, and withholds only the application. That is what makes
+ * the mode worth having — what observe measures is exactly what active would
+ * have done, on the same payloads, at the same cost.
+ *
+ * | Mode | Detection | Judgment | Application | Model-visible change |
+ * | --- | --- | --- | --- | --- |
+ * | `off` | none | none | none | none |
+ * | `observe` | full | full | none | **none at all** |
+ * | `active` | full | full | full | the planned text |
+ *
+ * `observe` is therefore *not* the reference plugin's shadow mode: that one
+ * injects a model-visible notice saying it changed nothing. Here an observation
+ * has no model-visible surface whatsoever — no message, no rewritten content, no
+ * denial, no steering. The one thing it produces is an audit record in the
+ * session log, which the model cannot read.
+ *
+ * ## Cost discipline
+ *
+ * A deterministic, local pre-trigger decides whether a *judgment* may be spent
+ * at all, and judgments are budgeted per turn and per session: at most
+ * {@link ResolvedInterventionsConfig.maxJudgmentsPerTurn} per turn and
+ * {@link ResolvedInterventionsConfig.maxJudgmentsPerSession} per agent, with one
+ * verdict reused by every hook of the same turn. A turn presenting twenty
+ * similar results therefore costs one judgment, not twenty. Applied
+ * interventions carry their own ceiling, so an intervention can never become the
+ * loop it was meant to break.
+ *
+ * ## Fail-open and isolation
+ *
+ * Every hook delegates first (`await next()`), and every planning step is
+ * wrapped: an exception, an aborted signal, or an unusable verdict leaves the
+ * call, the result, the messages, and the turn exactly as the rest of the
+ * waterfall left them. Detection state is keyed by agent id, so two agents in one
+ * process can never see each other's history, verdicts, or budgets. Nothing here
+ * grants a permission the Host would not have granted, and nothing here overrides
+ * one either: a call the rest of the waterfall denied, cancelled, or routed to an
+ * approval flow is returned untouched, so the only decision this module can add
+ * is a strictly narrower one on top of a plain `allow`.
+ *
+ * ## Retained originals
+ *
+ * A reduction is installed only after the bytes it replaces have been retained
+ * in the agent's own Session log, in the plugin-record channel the audit trail
+ * already uses. The replacement publishes a locator derived from the payload's
+ * digest, a reader resolves it back to the verbatim original, and a payload that
+ * cannot be retained — too large, no session, a log that did not commit — is
+ * never replaced: `saved` is reported only for a replacement that really
+ * happened and can really be checked.
+ *
+ * @module dsh-reflex/interventions
+ */
+import { createHash } from 'node:crypto';
+import type { Context } from '@deepseek-ai/cordis';
+import { MessageId, boundContextSummary } from '@deepseek-ai/dsh-llm';
+import type { ContentBlock, ContextFormed, UserMessage } from '@deepseek-ai/dsh-llm';
+import type { PreStepDecision } from '@deepseek-ai/dsh-agent';
+import type { PostToolDecision, PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools';
+
+import {
+  INTERVENTION_CAPABILITIES,
+  type InterventionCapability,
+  type InterventionMode,
+  type ResolvedInterventionsConfig
+} from './config.js';
+import { appendInterventionRecord, pruneLocator, type InterventionAuditRecord } from './session-audit.js';
+import type { ReflexGateService, StagnationDetector, ToolResultPruner } from './vendor/harness-reflex/index.js';
+import type { ActionStep, PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
+
+/**
+ * Producer-owned source kind of every message this plugin appends.
+ *
+ * Session format v4 has no catch-all `plugin` kind and refuses that literal
+ * outright, so the producer names itself — the same identity this plugin already
+ * uses for its audit records.
+ */
+export const INTERVENTION_SOURCE_KIND = 'plugin:dsh-reflex';
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** One corrective context this plugin attached to a step. */
+    'plugin:dsh-reflex': { kind: 'plugin:dsh-reflex' } & ContextFormed;
+  }
+}
+
+/** Default share of a floored reduction's context budget taken from the head. */
+const FLOOR_HEAD_CHARS = 400;
+/** Default share of a floored reduction's context budget taken from the tail. */
+const FLOOR_TAIL_CHARS = 400;
+/** Characters of one observed step's input or output retained for judging. */
+const STEP_CHARS = 600;
+/** Steps one agent's detection window may retain. */
+const MAX_STEPS = 12;
+/** Characters of assistant text retained per turn for the closing check. */
+const CLAIM_CHARS = 4000;
+/** Failing evidence lines retained per turn for the closing check. */
+const MAX_EVIDENCE = 6;
+/** Characters of one evidence line. */
+const EVIDENCE_CHARS = 400;
+/** Completion claims submitted to one closing judgment. */
+const MAX_CLAIMS = 3;
+/** Agent states retained before the least recently used is dropped. */
+const MAX_AGENTS = 64;
+/** Reductions memoized per activation, bounded by least recent use. */
+const MAX_MEMO = 128;
+/** Audit records retained for the panel, per activation. */
+const MAX_RECENT = 20;
+/** Longest corrective text this module hands to the model, in characters. */
+const FEEDBACK_CHARS = 600;
+/**
+ * Line breaks a payload needs before it is treated as line-oriented output.
+ *
+ * A prune rewrites a *result* — command output, a test log, a build trace — and
+ * the judgment is asked to extract the diagnostics from exactly that shape. A
+ * payload with no line structure (one long JSON document, a single runaway
+ * line) is not that shape: its value is semantic rather than diagnostic, and
+ * cutting it in half would destroy it rather than compress it. Those payloads
+ * are left alone, in both modes, and the skip is reported as
+ * `unsupported-payload`.
+ */
+const PRUNE_MIN_LINES = 4;
+/**
+ * Largest payload this module is willing to copy into the session log.
+ *
+ * Retention is what makes a reduction safe, so the cap is a *precondition* of
+ * pruning rather than a fallback: above it the engine reports
+ * `retention-too-large` and leaves the result untouched, so an oversized
+ * payload can never be reported as saved on the strength of a copy that was
+ * never kept. A hundred kilobyte log line stays readable and bounded.
+ */
+const MAX_RETAINED_CHARS = 100_000;
+
+/** Matches the completion claims a closing turn must be able to back with evidence. */
+const COMPLETION_CLAIM = /\b(pass|passed|passing|green|successful|succeed|succeeded|complete|completed|finished|done|verified|works)\b/i;
+/** Matches the failure markers that make a completion claim self-contradictory. */
+const FAILURE_MARKER = /(\berror\b|\berrors\b|\bfailed\b|\bfailure\b|\bfailures\b|\bfail\b|exit code [1-9]|\bnot ok\b|\bFAIL\b|\bexception\b|\btraceback\b)/i;
+
+/** The action names one plan may carry. */
+export type InterventionAction =
+  | 'deny-call'
+  | 'prune-result'
+  | 'corrective-feedback'
+  | 'corrective-context'
+  | 'steer-closing';
+
+/**
+ * One planned intervention, before the mode decides whether it is applied.
+ *
+ * The plan is the *same* object in observe and active mode; only the audit
+ * record's `applied` differs. That is what lets a reader compare what a mode
+ * measured with what it did.
+ */
+export interface InterventionPlan {
+  capability: InterventionCapability;
+  action: InterventionAction;
+  reason: string;
+  /** Text the active path hands to the model; never empty. */
+  feedback: string;
+  detail: {
+    pattern?: string;
+    confidence?: number;
+    repeats?: number;
+    digest?: string;
+    floorApplied?: boolean;
+    turn?: number;
+    step?: number;
+  };
+}
+
+/**
+ * The identity of one tool call, stable across its pre- and post-execute hooks.
+ * @param exec - the execution.
+ * @returns the call's own identity, falling back to its name.
+ */
+function callKeyOf(exec: ToolExecution): string {
+  const token = (exec as { token?: unknown }).token;
+  if (typeof token === 'string' && token.length > 0) return token;
+  const callId = (exec as { callId?: unknown }).callId;
+  return typeof callId === 'string' && callId.length > 0 ? callId : exec.name;
+}
+
+/** One step of one agent's detection window. */
+interface ObservedStep {
+  /** `tool:argumentsDigest` — the identity a repetition is measured on. */
+  signature: string;
+  tool: string;
+  input: string;
+  output: string;
+  error: string;
+  failed: boolean;
+  turn: number;
+  at: number;
+}
+
+/** One agent's detection state, budgets, and counters. */
+interface AgentState {
+  /** Session this agent's state belongs to; memoized reductions never cross it. */
+  sessionKey: string;
+  turn: number;
+  step: number;
+  steps: ObservedStep[];
+  /** Assistant text of the current turn, for the closing check. */
+  claims: string;
+  /** Failing evidence the current turn produced. */
+  evidence: string[];
+  /** Interventions applied in the current turn. */
+  interventions: number;
+  judgmentsTurn: number;
+  judgmentsCount: number;
+  judgmentsSession: number;
+  verdictTurn: number;
+  /** Identity of the window the cached verdict was about. */
+  verdictKey: string;
+  verdict?: StagnationCheckResponse;
+  /** Identities this turn already intervened on, so no action repeats itself. */
+  applied: Set<string>;
+  /** Call signatures already refused this turn. */
+  denied: Set<string>;
+  /** Calls this engine refused, keyed by the call identity. */
+  refused: Set<string>;
+}
+
+/** One token and latency account of a mode or a capability. */
+export interface InterventionCostBucket {
+  /** Decisions planned. */
+  plans: number;
+  /** Decisions whose plan was executed. */
+  applied: number;
+  /** System 1 judgments paid for. */
+  judgments: number;
+  /** Judgments served from the per-turn verdict memo instead of a new call. */
+  memoHits: number;
+  /** Milliseconds spent in local, deterministic work. */
+  localLatencyMs: number;
+  /** Milliseconds spent waiting for System 1. */
+  remoteLatencyMs: number;
+  /** Tokens the judgments reasoned about. */
+  judgeTokens: number;
+  /** Tokens of the payloads decisions were made about. */
+  originalTokens: number;
+  /** Tokens the candidates would carry. */
+  candidateTokens: number;
+  /** Tokens the candidates would have saved. */
+  potentialSavedTokens: number;
+  /** Tokens actually removed from the model-visible surface. */
+  actualSavedTokens: number;
+  /** Tokens actually added to the model-visible surface. */
+  injectedTokens: number;
+}
+
+/** The baseline side of the accounting: what the hooks were shown, untouched. */
+export interface InterventionBaseline {
+  /** Results the post-execute hook was shown. */
+  results: number;
+  /** Tokens those results carried. */
+  originalTokens: number;
+  /** Failing results the post-execute hook was shown. */
+  failures: number;
+}
+
+/** One activation's intervention accounting, as the panel and tests read it. */
+export interface InterventionReport {
+  mode: InterventionMode;
+  capabilities: Record<InterventionCapability, InterventionMode>;
+  baseline: InterventionBaseline;
+  observe: InterventionCostBucket;
+  active: InterventionCostBucket;
+  byCapability: Record<InterventionCapability, InterventionCostBucket>;
+  /** Hook-level refusals, by reason, sorted. */
+  skips: Record<string, number>;
+  /** The most recent decisions, oldest first, bounded. */
+  recent: InterventionAuditRecord[];
+  /**
+   * Originals this activation retained before replacing them.
+   *
+   * `copies` counts every verified retention; `locators` keeps the most recent
+   * ones, so a reader can resolve a live replacement back to its bytes without
+   * scanning the whole log.
+   */
+  retained: { copies: number; locators: string[] };
+}
+
+/** Dependencies of one intervention engine. */
+export interface InterventionEngineOptions {
+  /** Resolved `interventions` block. */
+  config: ResolvedInterventionsConfig;
+  /** Character threshold above which a result is a pruning candidate. */
+  pruneThreshold: number;
+  stagnation: Pick<StagnationDetector, 'check'>;
+  prune: Pick<ToolResultPruner, 'prune'>;
+  gate: Pick<ReflexGateService, 'verify'>;
+  /** Names of this plugin's own tools: their output is already optimized. */
+  ownTools?: readonly string[];
+  /** Clock seam. */
+  now?: () => number;
+  /**
+   * Controlled retention of a payload a reduction is about to replace.
+   *
+   * Mandatory for pruning: the engine asks the sink to keep the original, and
+   * only a *verifiable* copy — the locator the replacement will publish — makes
+   * the reduction installable. A sink that returns `undefined`, throws, or is not
+   * configured at all leaves the result untouched and the saving at zero, so a
+   * deployment without controlled retention still runs, it just does not prune.
+   */
+  retain?: (session: unknown, request: PruneRetentionRequest) => PruneRetention | undefined;
+  /** Audit sink; the plugin attaches the session log here. */
+  audit?: (record: InterventionAuditRecord, session: unknown) => void;
+}
+
+/** A fresh, zeroed cost bucket. */
+function emptyBucket(): InterventionCostBucket {
+  return {
+    plans: 0,
+    applied: 0,
+    judgments: 0,
+    memoHits: 0,
+    localLatencyMs: 0,
+    remoteLatencyMs: 0,
+    judgeTokens: 0,
+    originalTokens: 0,
+    candidateTokens: 0,
+    potentialSavedTokens: 0,
+    actualSavedTokens: 0,
+    injectedTokens: 0
+  };
+}
+
+/**
+ * Tokens one text costs, at the ledger's shared four-characters-per-token rate.
+ * @param text - any text.
+ * @returns the estimated token count.
+ */
+export function estimateTokens(text: string): number {
+  return text.length === 0 ? 0 : Math.ceil(text.length / 4);
+}
+
+/**
+ * Stable short digest of one value, used as a tool-call identity.
+ * @param value - the text to digest.
+ * @returns sixteen hexadecimal characters.
+ */
+export function digestOf(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+/**
+ * Concatenate the text blocks of one content list.
+ * @param content - message or result content.
+ * @returns the text, in block order.
+ */
+export function textOfContent(content: readonly ContentBlock[] | undefined): string {
+  if (!content) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') {
+      parts.push((block as { text?: string }).text ?? '');
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Whether one content list carries at least one text block.
+ * @param content - message or result content.
+ * @returns whether there is text to rewrite.
+ */
+export function hasTextBlock(content: readonly ContentBlock[] | undefined): boolean {
+  if (!content) return false;
+  for (const block of content) {
+    if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') return true;
+  }
+  return false;
+}
+
+/**
+ * Bound one text to a character budget, marking the cut.
+ * @param text - any text.
+ * @param max - maximum characters to keep.
+ * @returns the bounded text.
+ */
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+// ── what counts as a failed result ──────────────────────────────────────────
+
+/**
+ * The exit status one tool result carries in its own canonical value.
+ *
+ * A shell result is *reported*, not errored: a command that exits 1 returns a
+ * successful `ToolExecutionResult` whose `value.exitCode` is the whole truth. The
+ * distinction matters twice over — a correction that never fires because the
+ * failure looked like a success, and a closing check that reads a green claim
+ * over a red build — so the status is taken from the tool's own structured field
+ * whenever the payload exposes one.
+ *
+ * @param value - the result's canonical value, when it has one.
+ * @returns the exit status, or `undefined` when the value is not a shell result.
+ */
+export function structuredExitStatus(value: unknown): { exitCode: number; signal?: string } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const candidate = value as { exitCode?: unknown; signal?: unknown };
+  if (typeof candidate.exitCode !== 'number' || !Number.isFinite(candidate.exitCode)) return undefined;
+  const status: { exitCode: number; signal?: string } = { exitCode: candidate.exitCode };
+  if (typeof candidate.signal === 'string') status.signal = candidate.signal;
+  return status;
+}
+
+/**
+ * Whether the text ends in the Host's own exit marker for a failed command.
+ *
+ * The marker is the last line of the model-facing content, so anchoring it to the
+ * end of the text keeps an *ordinary* result that merely mentions "exit code 1"
+ * in its body from being misread as a failure. This is the fallback for a result
+ * that carries no structured value — a Virtual tool, a replay from an older
+ * record — not a replacement for {@link structuredExitStatus}.
+ * @param text - the model-facing text.
+ * @returns whether the last marker line reports a non-zero exit or a signal.
+ */
+export function exitMarkerFailure(text: string): boolean {
+  const match = /(?:^|\n)\[exit code: ([0-9]+)\]\s*$/.exec(text);
+  if (match) return Number(match[1]) !== 0;
+  return /(?:^|\n)\[killed by signal: [^\]\n]+\]\s*$/.test(text);
+}
+
+/**
+ * Whether one result is a failure the interventions may act on.
+ *
+ * Three sources, in order of authority: the Host's own `isError` flag, the exit
+ * status inside the tool's structured value, and the exit marker the Host appends
+ * to the text. A text heuristic over words like "failed" is deliberately absent:
+ * a test log that prints the word is not a failing command, and treating it as
+ * one would both spend a judgment on it and block a legitimate retry.
+ *
+ * @param result - the execution-local result.
+ * @param text - the effective model-facing text of that result.
+ * @returns whether the result proves a failure.
+ */
+export function failureOf(result: Readonly<ToolExecutionResult> | undefined, text: string): boolean {
+  if (!result) return false;
+  if (result.isError === true) return true;
+  const status = structuredExitStatus((result as { value?: unknown }).value);
+  if (status) return status.exitCode !== 0 || status.signal !== undefined;
+  return exitMarkerFailure(text);
+}
+
+/** The floor decision of one reduction, computed from lengths alone. */
+export interface PruneFloorPlan {
+  /** Whether the floor form replaces the judged candidate. */
+  floored: boolean;
+  /** Characters the installed text will carry. */
+  resultChars: number;
+  /** Characters the installed form does not carry. */
+  omittedChars: number;
+  /** Context characters taken from the head of the original. */
+  headChars: number;
+  /** Context characters taken from the tail of the original. */
+  tailChars: number;
+  /**
+   * Marker characters the installed form carries, summed over its sides.
+   *
+   * Zero when nothing is floored, one marker when only the mandatory locator side
+   * fits, two when the share's budget can pay for a matching marker after the
+   * candidate. Publishing it is what lets {@link applyPruneFloor} rebuild exactly
+   * the form whose size the plan promised.
+   */
+  markerChars: number;
+}
+
+/** The floor options shared by the plan and the composition. */
+export interface PruneFloorOptions {
+  /** Lowest share of the original a reduction may keep. */
+  floorRatio: number;
+  /** Default split of the context budget, in characters. */
+  headChars?: number;
+  /** Default split of the context budget, in characters. */
+  tailChars?: number;
+  /**
+   * Length of the marker the installed form carries per side.
+   *
+   * A caller that composes a locator-carrying form passes the real marker
+   * length here; a caller that only accounts for it passes the same number. That
+   * is what keeps the predicted size and the installed size identical in both
+   * modes.
+   */
+  markerChars?: number;
+}
+
+/**
+ * Decide the deterministic floor of one reduction from lengths alone.
+ *
+ * Lengths are enough because the floor form is fixed: context, marker, candidate,
+ * marker, context. Deciding it this way is what lets `observe` account for the
+ * *same* candidate `active` would install without building it.
+ *
+ * The floor is a *share*, not a suggestion. `pruneFloorRatio` says how much of
+ * the original must survive, so the context budget is derived from it rather than
+ * capped by the head/tail hints: a candidate that keeps 8% of a long payload is
+ * not "floored" to 8% plus two small slices, it is widened until the installed
+ * form really carries the promised share. The head/tail hints only decide how
+ * that budget is split. A plan that cannot reach the share — because the marker
+ * alone would eat the whole allowance — is refused, so a reduction never grows
+ * the context.
+ *
+ * @param originalChars - length of the raw payload.
+ * @param candidateChars - length of the judged candidate.
+ * @param options - floor ratio, split hints, and marker length.
+ * @returns the floor decision.
+ */
+export function pruneFloorPlan(
+  originalChars: number,
+  candidateChars: number,
+  options: PruneFloorOptions
+): PruneFloorPlan {
+  if (candidateChars === 0 || candidateChars >= originalChars) {
+    return idleFloorPlan(originalChars);
+  }
+  const marker = Math.max(0, options.markerChars ?? 0);
+  const head = Math.max(0, options.headChars ?? FLOOR_HEAD_CHARS);
+  const tail = Math.max(0, options.tailChars ?? FLOOR_TAIL_CHARS);
+  const share = Math.min(1, Math.max(0, options.floorRatio));
+  const target = Math.ceil(originalChars * share);
+  // The judged candidate is already the installed text when the floor does not
+  // apply, and it carries no marker; only a deeper cut pays for the marker.
+  if (candidateChars >= target) {
+    return {
+      floored: false,
+      resultChars: candidateChars,
+      omittedChars: originalChars - candidateChars,
+      headChars: 0,
+      tailChars: 0,
+      markerChars: 0
+    };
+  }
+  // One marker side is mandatory: it carries the locator of the original. The
+  // second is bought only when the share's budget leaves room for it.
+  if (candidateChars + marker >= originalChars) return idleFloorPlan(originalChars);
+  let budget = Math.max(candidateChars + marker, Math.min(originalChars, target));
+  let markerChars = marker;
+  let context = budget - candidateChars - markerChars;
+  if (context >= marker) {
+    markerChars += marker;
+    context -= marker;
+  }
+  const split = splitContext(context, head, tail);
+  const resultChars = candidateChars + markerChars + context;
+  if (resultChars >= originalChars) return idleFloorPlan(originalChars);
+  return {
+    floored: true,
+    resultChars,
+    omittedChars: originalChars - resultChars,
+    headChars: split.head,
+    tailChars: split.tail,
+    markerChars
+  };
+}
+
+/**
+ * Split one context budget between the head and the tail.
+ *
+ * The hints describe the *shape* of the context, not its ceiling, so a large
+ * budget keeps their proportion instead of stopping at their sum. A zero-shaped
+ * split degrades to an even one rather than dropping the context.
+ * @param context - characters available for context.
+ * @param head - head hint.
+ * @param tail - tail hint.
+ * @returns the two slice lengths, summing to the context.
+ */
+function splitContext(context: number, head: number, tail: number): { head: number; tail: number } {
+  const total = head + tail;
+  const headChars = total <= 0 ? Math.ceil(context / 2) : Math.ceil((context * head) / total);
+  return { head: Math.min(context, headChars), tail: context - Math.min(context, headChars) };
+}
+
+/** The plan of a reduction that is not happening. */
+function idleFloorPlan(originalChars: number): PruneFloorPlan {
+  return { floored: false, resultChars: originalChars, omittedChars: 0, headChars: 0, tailChars: 0, markerChars: 0 };
+}
+
+/** The marker one floored reduction carries on each side of its candidate. */
+export function pruneMarker(locator: string): string {
+  return `\n… [reflex prune: full original retrievable as ${locator}] …\n`;
+}
+
+/**
+ * Enforce the deterministic floor of a judged reduction.
+ *
+ * The judgment proposes; this floor disposes. A candidate that cut deeper than
+ * {@link ResolvedInterventionsConfig.pruneFloorRatio} of the original is replaced
+ * by a form that keeps the head and the tail — the two places a compiler error, a
+ * stack-trace summary, and a final result usually are — around the judgment's own
+ * extract, with explicit markers that name where the full original was retained.
+ * A candidate that is not actually smaller is refused outright, so a "reduction"
+ * can never grow the context.
+ *
+ * The composition is exactly the {@link pruneFloorPlan} of the same lengths, with
+ * the marker length taken from the locator the caller will publish. A payload
+ * this function cannot install — no text blocks, a locator that would not fit —
+ * is reported through the plan rather than through a silent short write.
+ *
+ * @param original - the raw payload.
+ * @param candidate - the judged reduction.
+ * @param options - floor options plus the locator the replacement publishes.
+ * @returns the text to install, the floor decision, and the sizes involved.
+ */
+export function applyPruneFloor(
+  original: string,
+  candidate: string,
+  options: PruneFloorOptions & { locator: string }
+): PruneFloorPlan & { text: string } {
+  const marker = pruneMarker(options.locator);
+  const plan = pruneFloorPlan(original.length, candidate.length, { ...options, markerChars: marker.length });
+  if (!plan.floored) {
+    return { ...plan, text: plan.resultChars === candidate.length ? candidate : original };
+  }
+  const head = original.slice(0, plan.headChars);
+  const tail = plan.tailChars === 0 ? '' : original.slice(original.length - plan.tailChars);
+  const text = `${head}${marker}${candidate}${plan.markerChars > marker.length ? marker : ''}${tail}`;
+  return { ...plan, text };
+}
+
+/**
+ * Count the identical trailing repeats of one signature.
+ * @param steps - observed steps, oldest first.
+ * @param signature - the identity to count.
+ * @returns the length of the trailing run of that signature.
+ */
+export function countTrailingRepeats(steps: readonly ObservedStep[], signature: string): number {
+  let count = 0;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index]!.signature !== signature) break;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Count the trailing consecutive failures.
+ * @param steps - observed steps, oldest first.
+ * @returns the length of the trailing run of failing steps.
+ */
+export function countTrailingFailures(steps: readonly ObservedStep[]): number {
+  let count = 0;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (!steps[index]!.failed) break;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Whether the window's tail alternates between exactly two call identities.
+ *
+ * `A B A B` is the cheapest loop to miss and among the most wasteful to run:
+ * neither call repeats consecutively, so a consecutive-repeat trigger never
+ * fires.
+ * @param steps - observed steps, oldest first.
+ * @param window - how many trailing steps to inspect.
+ * @returns whether the tail oscillates.
+ */
+export function detectOscillation(steps: readonly ObservedStep[], window: number): boolean {
+  const tail = steps.slice(Math.max(0, steps.length - window));
+  if (tail.length < 4) return false;
+  const signatures = new Set(tail.map((step) => step.signature));
+  if (signatures.size !== 2) return false;
+  for (let index = 2; index < tail.length; index += 1) {
+    if (tail[index]!.signature !== tail[index - 2]!.signature) return false;
+  }
+  return true;
+}
+
+/** Why a deterministic pre-trigger wants a judgment. */
+export interface StagnationSuspicion {
+  suspicious: boolean;
+  /** The pattern the trigger suspects, before System 1 confirms it. */
+  pattern?: 'repetition' | 'oscillation' | 'failing_retry';
+  /** Human-readable trigger facts, for the audit record. */
+  note: string;
+  /** How many steps the pattern was measured on. */
+  repeats: number;
+}
+
+/**
+ * Decide, locally and deterministically, whether a judgment is worth spending.
+ *
+ * This is the cost gate of the whole module: the expensive path is a System 1
+ * call, and it only opens when the *cheap* path already sees a pattern. A single
+ * distinctive call is never judged, however large its output.
+ *
+ * @param steps - observed steps, oldest first.
+ * @param options - thresholds, window, and the current call identity.
+ * @returns the suspicion, with `suspicious: false` when nothing justifies a call.
+ */
+export function suspicionOf(
+  steps: readonly ObservedStep[],
+  options: { repeatThreshold: number; failureThreshold: number; window: number; signature: string }
+): StagnationSuspicion {
+  const window = steps.slice(Math.max(0, steps.length - options.window));
+  const repeats = countTrailingRepeats(window, options.signature);
+  if (repeats >= options.repeatThreshold) {
+    return { suspicious: true, pattern: 'repetition', note: `identical call repeated ${repeats}x`, repeats };
+  }
+  const failures = countTrailingFailures(window);
+  if (failures >= options.failureThreshold) {
+    return { suspicious: true, pattern: 'failing_retry', note: `${failures} consecutive failing steps`, repeats: failures };
+  }
+  if (detectOscillation(window, options.window)) {
+    return { suspicious: true, pattern: 'oscillation', note: `two calls alternating over ${window.length} steps`, repeats: window.length };
+  }
+  return { suspicious: false, note: 'no local pattern', repeats: 0 };
+}
+
+/** One memoized reduction, keyed by the payload's digest within one session. */
+interface PruneMemo {
+  /** The real reduction, absent until the mode that installs one has computed it. */
+  text?: string;
+  originalChars: number;
+  prunedChars: number;
+  tokensSaved: number;
+  /** Whether the reduction was floored, so a memo hit reports the same plan. */
+  floored: boolean;
+  /** Locator of the retained original, once a retention for this payload succeeded. */
+  locator?: string;
+}
+
+/**
+ * What the engine hands its retention sink before it replaces a payload.
+ *
+ * The request carries the payload *verbatim*, so a sink never has to reconstruct
+ * it, and the digest, so the sink can name it the same way the judgment and the
+ * replacement do.
+ */
+export interface PruneRetentionRequest {
+  /** Payload identity: `digestOf(text)`. */
+  digest: string;
+  /** Identity and name of the call whose result is about to shrink. */
+  callId: string;
+  tool: string;
+  /** Turn and step of the replacement. */
+  turn: number;
+  step: number;
+  /** The replaced payload, verbatim. */
+  text: string;
+}
+
+/** The controlled copy one retention produced. */
+export interface PruneRetention {
+  /** Locator the replacement publishes. */
+  locator: string;
+  /** Committed log position, when the sink can report one. */
+  seq?: number;
+}
+
+/** What one judgment cost, charged exactly once per judgment. */
+interface JudgmentCharge {
+  judgments: number;
+  memoHits: number;
+  localLatencyMs: number;
+  remoteLatencyMs: number;
+  judgeTokens: number;
+}
+
+/** One charge against a mode's and a capability's account. */
+interface Charge {
+  judgments?: number;
+  memoHits?: number;
+  localLatencyMs?: number;
+  remoteLatencyMs?: number;
+  judgeTokens?: number;
+  originalTokens?: number;
+  candidateTokens?: number;
+  potentialSavedTokens?: number;
+  actualSavedTokens?: number;
+  injectedTokens?: number;
+}
+
+/** The verdict that stands in when no judgment could be spent. */
+const EMPTY_VERDICT: StagnationCheckResponse = { isStuck: false, confidence: 0, latencyMs: 0 };
+
+/**
+ * The automatic-intervention engine of one plugin activation.
+ *
+ * One instance serves every agent in the process; all per-agent facts live in
+ * {@link AgentState}, keyed by agent id, so isolation is structural rather than
+ * conventional.
+ */
+export class InterventionEngine {
+  /** Resolved `interventions` block. */
+  readonly config: ResolvedInterventionsConfig;
+  readonly #pruneThreshold: number;
+  readonly #stagnation: Pick<StagnationDetector, 'check'>;
+  readonly #prune: Pick<ToolResultPruner, 'prune'>;
+  readonly #gate: Pick<ReflexGateService, 'verify'>;
+  readonly #now: () => number;
+  readonly #retain?: (session: unknown, request: PruneRetentionRequest) => PruneRetention | undefined;
+  readonly #audit?: (record: InterventionAuditRecord, session: unknown) => void;
+
+  readonly #states = new Map<string, AgentState>();
+  readonly #ownTools: ReadonlySet<string>;
+  readonly #memo = new Map<string, PruneMemo>();
+  readonly #costs: { observe: InterventionCostBucket; active: InterventionCostBucket };
+  readonly #byCapability: Record<InterventionCapability, InterventionCostBucket>;
+  readonly #baseline: InterventionBaseline = { results: 0, originalTokens: 0, failures: 0 };
+  readonly #skips = new Map<string, number>();
+  readonly #recent: InterventionAuditRecord[] = [];
+  readonly #retained: string[] = [];
+  #retainedCopies = 0;
+  #counter = 0;
+
+  /**
+   * @param options - services, thresholds, clock, and audit sink.
+   */
+  constructor(options: InterventionEngineOptions) {
+    this.config = options.config;
+    this.#pruneThreshold = options.pruneThreshold;
+    this.#stagnation = options.stagnation;
+    this.#prune = options.prune;
+    this.#gate = options.gate;
+    this.#now = options.now ?? (() => Date.now());
+    this.#retain = options.retain;
+    this.#audit = options.audit;
+    this.#ownTools = new Set(options.ownTools ?? []);
+    this.#costs = { observe: emptyBucket(), active: emptyBucket() };
+    this.#byCapability = {
+      stagnation: emptyBucket(),
+      prune: emptyBucket(),
+      gate: emptyBucket(),
+      closing: emptyBucket()
+    };
+  }
+
+  /** Whether any capability may act at all. */
+  get enabled(): boolean {
+    return this.config.enabled;
+  }
+
+  /**
+   * Effective mode of one capability.
+   * @param capability - the capability to ask about.
+   * @returns its resolved three-state mode.
+   */
+  modeOf(capability: InterventionCapability): InterventionMode {
+    return this.config.capabilities[capability];
+  }
+
+  /**
+   * Whether a hook serving one capability must be registered at all.
+   * @param capabilities - capabilities the hook serves.
+   * @returns whether at least one of them is not `off`.
+   */
+  serves(...capabilities: InterventionCapability[]): boolean {
+    if (!this.config.enabled) return false;
+    return capabilities.some((capability) => this.modeOf(capability) !== 'off');
+  }
+
+  /** The whole activation's accounting. */
+  report(): InterventionReport {
+    return {
+      mode: this.config.mode,
+      capabilities: { ...this.config.capabilities },
+      baseline: { ...this.#baseline },
+      observe: { ...this.#costs.observe },
+      active: { ...this.#costs.active },
+      byCapability: {
+        stagnation: { ...this.#byCapability.stagnation },
+        prune: { ...this.#byCapability.prune },
+        gate: { ...this.#byCapability.gate },
+        closing: { ...this.#byCapability.closing }
+      },
+      skips: Object.fromEntries([...this.#skips.entries()].sort()),
+      recent: [...this.#recent],
+      retained: { copies: this.#retainedCopies, locators: [...this.#retained] }
+    };
+  }
+
+  /**
+   * Whether one capability already acted on one identity this turn.
+   * @param agentId - agent identity.
+   * @param key - capability-qualified identity.
+   * @returns whether it already acted.
+   */
+  hasApplied(agentId: string, key: string): boolean {
+    return this.#states.get(agentId)?.applied.has(key) ?? false;
+  }
+
+  /**
+   * Detection state of one agent, for tests and diagnostics.
+   * @param agentId - agent identity.
+   * @returns the observable facts, or undefined for an agent never seen.
+   */
+  stateOf(
+    agentId: string
+  ): { turn: number; step: number; steps: number; interventions: number; judgmentsSession: number; claims: number; evidence: number } | undefined {
+    const state = this.#states.get(agentId);
+    if (!state) return undefined;
+    return {
+      turn: state.turn,
+      step: state.step,
+      steps: state.steps.length,
+      interventions: state.interventions,
+      judgmentsSession: state.judgmentsSession,
+      claims: state.claims.length,
+      evidence: state.evidence.length
+    };
+  }
+
+  /**
+   * Drop one agent's state — on disposal, so nothing outlives its session.
+   * @param agentId - agent identity.
+   */
+  forget(agentId: string): void {
+    this.#states.delete(agentId);
+  }
+
+  /** Drop every agent's state and every account, for a fresh measurement. */
+  reset(): void {
+    this.#states.clear();
+    this.#memo.clear();
+    this.#costs.observe = emptyBucket();
+    this.#costs.active = emptyBucket();
+    for (const capability of INTERVENTION_CAPABILITIES) this.#byCapability[capability] = emptyBucket();
+    this.#baseline.results = 0;
+    this.#baseline.originalTokens = 0;
+    this.#baseline.failures = 0;
+    this.#skips.clear();
+    this.#recent.length = 0;
+    this.#retained.length = 0;
+    this.#retainedCopies = 0;
+  }
+
+  // ── hook entry points ──────────────────────────────────────────────────────
+
+  /**
+   * `tools/pre-execute`: refuse a call the run is repeating.
+   *
+   * Delegates first and returns the downstream decision **by identity** whenever
+   * that decision is not a plain `allow`. A later listener may already have sent
+   * the call to an approval flow, denied it with its own structured error
+   * identity, or cancelled it; overwriting any of those would drop information the
+   * Host attached and could turn a stricter decision into a weaker one. The only
+   * decision this hook ever *adds* is a `deny` on top of an `allow`, which is
+   * strictly narrower than what the waterfall already permitted — permissions
+   * here are monotone by construction, never escalated and never relaxed.
+   *
+   * @param exec - the tool call about to run.
+   * @param next - the rest of the waterfall.
+   * @returns the decision the Host dispatches on.
+   */
+  async toolCall(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
+    const downstream = await next();
+    const capability = this.modeOf('stagnation');
+    if (capability === 'off' || !this.config.enabled) return downstream;
+    if (this.#ownTools.has(exec.name)) return downstream;
+    if (exec.signal?.aborted) return downstream;
+
+    const started = this.#now();
+    try {
+      const agentId = agentKeyOf(exec.agent);
+      const state = this.#state(agentId, exec.agent);
+      const signature = callSignature(exec);
+      // The call about to run is part of its own window: three identical calls
+      // are a repetition at the moment the third one is proposed, and the
+      // judgment has to see all three. The pending entry is local — it is not
+      // committed to the agent's history, which the result records for real.
+      const pending = this.#observed(state, exec, signature);
+      const suspicion = suspicionOf([...state.steps, pending], {
+        repeatThreshold: this.config.repeatThreshold,
+        failureThreshold: this.config.failureThreshold,
+        window: this.config.windowSize,
+        signature
+      });
+      if (!suspicion.suspicious || state.denied.has(signature)) return downstream;
+      if (state.applied.has(`stagnation:${signature}`)) {
+        this.#skip('duplicate-intervention');
+        return downstream;
+      }
+      if (!this.#actionWithinBudget(state)) {
+        this.#skip('intervention-cap');
+        return downstream;
+      }
+
+      const verdict = await this.#judge(state, exec.signal, [...state.steps, pending]);
+      const judgment = this.#judgmentCharge(verdict, started, this.#now());
+      // Denial is latched per signature whether or not it was applied: in observe
+      // mode the refusal is what would have happened, and `denied` is what keeps
+      // the *next* identical attempt from being judged again in the same turn.
+      state.denied.add(signature);
+      if (!verdict.useful) {
+        this.#charge('stagnation', judgment);
+        this.#skip(verdict.skip ?? 'unconfirmed');
+        return downstream;
+      }
+
+      const plan: InterventionPlan = {
+        capability: 'stagnation',
+        action: 'deny-call',
+        reason: `System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern} stagnation before ${exec.name}`,
+        feedback: this.#denyFeedback(exec.name, suspicion, verdict.response),
+        detail: {
+          pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
+          confidence: verdict.response.confidence,
+          repeats: suspicion.repeats,
+          turn: state.turn,
+          step: state.step
+        }
+      };
+      const applied = capability === 'active' && downstream.kind === 'allow';
+      if (capability === 'active' && !applied) this.#skip('downstream-decided');
+      // The decision is latched in both modes. Observe has to plan exactly what
+      // active would do — one refusal per episode, subject to the same turn cap —
+      // otherwise its column would over-count the very thing it is measuring.
+      state.refused.add(callKeyOf(exec));
+      state.applied.add(`stagnation:${signature}`);
+      this.#bookAction(state);
+      this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
+      return applied ? { kind: 'deny', reason: plan.feedback } : downstream;
+    } catch {
+      // FAIL-OPEN: a planning failure must never veto a call the rest of the
+      // waterfall already allowed.
+      this.#skip('planning-error');
+      return downstream;
+    }
+  }
+
+  /**
+   * `tools/post-execute`: reduce an oversized result, or correct a repeated
+   * failure — and observe both without touching either.
+   *
+   * @param exec - the call that produced the result.
+   * @param result - its canonical outcome.
+   * @param next - the rest of the waterfall.
+   * @returns the decision the Host commits.
+   */
+  async toolResult(
+    exec: ToolExecution,
+    result: Readonly<ToolExecutionResult>,
+    next: () => Promise<PostToolDecision>
+  ): Promise<PostToolDecision> {
+    const downstream = await next();
+    if (!this.config.enabled) return downstream;
+    if (this.#ownTools.has(exec.name)) return downstream;
+    const started = this.#now();
+    try {
+      const agentId = agentKeyOf(exec.agent);
+      const state = this.#state(agentId, exec.agent);
+      if (state.refused.has(callKeyOf(exec))) {
+        // The result of a call this engine refused is the refusal itself. It is
+        // neither evidence about the run nor a payload worth reducing, and
+        // correcting it would bill one episode twice.
+        this.#skip('refused-result');
+        return downstream;
+      }
+      // The *effective* content: whatever the rest of the waterfall decided the
+      // model will read, which is not the same thing as the result's own content.
+      // An earlier listener may have replaced it, and the replacement is what this
+      // hook must reason about and, in active mode, reduce.
+      const content = 'content' in downstream && Array.isArray(downstream.content) ? downstream.content : result.content;
+      const text = textOfContent(content);
+      const failed = failureOf(result, text);
+      const signature = callSignature(exec);
+      this.#observe(state, {
+        signature,
+        tool: exec.name,
+        input: clip(this.#argumentsOf(exec), STEP_CHARS),
+        output: clip(text, STEP_CHARS),
+        error: failed ? clip(this.#errorOf(result), STEP_CHARS) : '',
+        failed,
+        turn: state.turn,
+        at: this.#now()
+      });
+
+      this.#baseline.results += 1;
+      this.#baseline.originalTokens += estimateTokens(text);
+      if (failed) this.#baseline.failures += 1;
+
+      if (!failed) return await this.#pruneResult(exec, downstream, content, state, text, started);
+      this.#rememberEvidence(state, exec.name, this.#errorOf(result), text);
+      return await this.#correctFailure(exec, result, downstream, state, signature, started);
+    } catch {
+      // FAIL-OPEN: the result is handed on exactly as the waterfall produced it.
+      this.#skip('planning-error');
+      return downstream;
+    }
+  }
+
+  /**
+   * `agent/pre-step`: attach the correction to the step after the loop repeated
+   * itself, and keep the turn and step bookkeeping every other hook shares.
+   *
+   * @param payload - the proposed step.
+   * @param next - the rest of the waterfall.
+   * @returns the decision the loop enters with.
+   */
+  async preStep(
+    payload: { agent: unknown; messages: readonly UserMessage[]; turn: number; step: number; signal?: AbortSignal },
+    next: () => Promise<PreStepDecision>
+  ): Promise<PreStepDecision> {
+    const downstream = await next();
+    const started = this.#now();
+    try {
+      const agentId = agentKeyOf(payload.agent);
+      const state = this.#state(agentId, payload.agent);
+      // Turn bookkeeping is unconditional: the closing check needs the turn's own
+      // words and evidence to exist even when stagnation is off.
+      if (state.turn !== payload.turn) {
+        state.turn = payload.turn;
+        state.step = payload.step;
+        state.interventions = 0;
+        state.judgmentsCount = 0;
+        state.judgmentsTurn = payload.turn;
+        state.verdictTurn = payload.turn;
+        state.verdictKey = '';
+        state.verdict = undefined;
+        state.claims = '';
+        state.evidence = [];
+        state.applied.clear();
+        state.denied.clear();
+        state.refused.clear();
+      }
+      state.step = payload.step;
+
+      const capability = this.modeOf('stagnation');
+      if (capability === 'off' || !this.config.enabled) return downstream;
+      if (payload.signal?.aborted || downstream.kind !== 'enter') return downstream;
+
+      const signature = state.steps[state.steps.length - 1]?.signature;
+      if (signature === undefined) return downstream;
+      if (state.applied.has(`stagnation:${signature}`)) {
+        this.#skip('duplicate-intervention');
+        return downstream;
+      }
+      if (!this.#actionWithinBudget(state)) {
+        this.#skip('intervention-cap');
+        return downstream;
+      }
+      const suspicion = suspicionOf(state.steps, {
+        repeatThreshold: this.config.repeatThreshold,
+        failureThreshold: this.config.failureThreshold,
+        window: this.config.windowSize,
+        signature
+      });
+      if (!suspicion.suspicious) return downstream;
+
+      const verdict = await this.#judge(state, payload.signal);
+      const judgment = this.#judgmentCharge(verdict, started, this.#now());
+      if (!verdict.useful) {
+        this.#charge('stagnation', judgment);
+        this.#skip(verdict.skip ?? 'unconfirmed');
+        return downstream;
+      }
+
+      const plan: InterventionPlan = {
+        capability: 'stagnation',
+        action: 'corrective-context',
+        reason: `System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern} stagnation before step ${payload.step}`,
+        feedback: this.#contextFeedback(suspicion, verdict.response),
+        detail: {
+          pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
+          confidence: verdict.response.confidence,
+          repeats: suspicion.repeats,
+          turn: state.turn,
+          step: payload.step
+        }
+      };
+      const applied = capability === 'active';
+      // The latch is mode-independent on purpose. Observe has to consume the same
+      // episode — one intervention per detected loop, one charge against the turn's
+      // cap — or its accounting would describe a run nobody could reproduce;
+      // installing the message is the only thing the mode gates.
+      state.applied.add(`stagnation:${signature}`);
+      this.#bookAction(state);
+      this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
+      if (!applied) return downstream;
+      return {
+        ...downstream,
+        messages: [...downstream.messages, this.#message(agentId, state.turn, payload.step, plan.feedback)]
+      };
+    } catch {
+      // FAIL-OPEN: the step enters with exactly the messages it would have had.
+      this.#skip('planning-error');
+      return downstream;
+    }
+  }
+
+  /**
+   * `agent/turn-stopping`: object when the turn is about to close on evidence
+   * that contradicts what the turn claims.
+   *
+   * The objection is *data*, not a veto: this method steers the corrective text
+   * into the agent's inbox, and the loop's own rule decides. Steering is the only
+   * way a listener may extend a turn, so a failure here can never block a turn
+   * from closing.
+   *
+   * @param payload - the agent whose turn reached its stop boundary.
+   */
+  async turnStopping(payload: { agent: unknown; turn: number; signal?: AbortSignal }): Promise<void> {
+    const capability = this.modeOf('closing');
+    if (capability === 'off' || !this.config.enabled) return;
+    const started = this.#now();
+    try {
+      const agentId = agentKeyOf(payload.agent);
+      const state = this.#state(agentId, payload.agent);
+      const claimsText = state.claims;
+      const evidence = state.evidence.join('\n');
+      // A closing check is only worth its judgment when the turn both claimed
+      // completion and produced a failure: two local, deterministic facts.
+      if (claimsText.length === 0 || evidence.length === 0) return;
+      const assertions = claimsOf(claimsText);
+      if (assertions.length === 0) return;
+      if (state.applied.has(`closing:turn:${payload.turn}`)) {
+        this.#skip('duplicate-intervention');
+        return;
+      }
+      if (!this.#actionWithinBudget(state)) {
+        this.#skip('intervention-cap');
+        return;
+      }
+      if (payload.signal?.aborted) return;
+      // The closing verdict is a judgment like any other: it is bought from the
+      // same turn and session budget as a stagnation check, so enabling three
+      // capabilities cannot triple what one turn is allowed to spend.
+      const skip = this.#spendJudgment(state);
+      if (skip) {
+        this.#skip(skip);
+        return;
+      }
+
+      const verdict = await this.#gate.verify(assertions, evidence, {
+        latchCacheKey: `reflex-closing:${agentId}:${payload.turn}`
+      });
+      const judgeTokens = assertions.reduce((sum, item) => sum + estimateTokens(item.statement), estimateTokens(evidence));
+      const judgment: JudgmentCharge = {
+        judgments: 1,
+        memoHits: 0,
+        localLatencyMs: Math.max(0, this.#now() - started - verdict.latencyMs),
+        remoteLatencyMs: verdict.latencyMs,
+        judgeTokens
+      };
+      // `escalate` is not a contradiction. It means the gate could not decide —
+      // an unavailable backend degrades exactly this way — and steering a turn on
+      // an undecided verdict would turn a backend failure into a model-visible
+      // objection. Only a verdict that really contradicts the claim steers.
+      const contradicted = verdict.results
+        .filter((item) => item.outcome === 'contradicted')
+        .map((item) => clip(item.statement, 160));
+      const undecided = verdict.results.filter((item) => item.outcome === 'escalate').length;
+      if (contradicted.length === 0) {
+        this.#charge('closing', judgment);
+        this.#skip(undecided > 0 ? 'closing-undecided' : verdict.passed ? 'closing-evidence-consistent' : 'closing-unconfirmed');
+        return;
+      }
+
+      const plan: InterventionPlan = {
+        capability: 'closing',
+        action: 'steer-closing',
+        reason: `closing evidence contradicts ${contradicted.length} completion claim(s)`,
+        feedback: this.#closingFeedback(contradicted),
+        detail: { confidence: verdict.results[0]?.confidence, turn: payload.turn, step: state.step }
+      };
+      const applied = capability === 'active';
+      // Latched in both modes, for the same reason as the stagnation path: the
+      // episode is consumed once, and only the steering is gated on the mode.
+      state.applied.add(`closing:turn:${payload.turn}`);
+      this.#bookAction(state);
+      this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
+      if (applied) this.#steer(payload.agent, this.#message(agentId, payload.turn, state.step, plan.feedback));
+    } catch {
+      // FAIL-OPEN: a failed closing check leaves the turn boundary alone.
+      this.#skip('planning-error');
+    }
+  }
+
+  /**
+   * `agent/assistant-stream`: retain the turn's own words for the closing check.
+   *
+   * Deliberately not model-visible: this is a read of what the model already
+   * said, kept so the turn can be checked against its own evidence. Nothing is
+   * published, and the text is bounded per turn.
+   *
+   * @param payload - one stream frame of one attempt.
+   */
+  observeAssistantStream(payload: { agent: unknown; frame?: { type?: string; chunk?: { type?: string; text?: string } } }): void {
+    if (!this.serves('closing')) return;
+    try {
+      const frame = payload.frame;
+      if (frame?.type !== 'chunk' || frame.chunk?.type !== 'text-delta') return;
+      const text = frame.chunk.text ?? '';
+      if (text.length === 0) return;
+      const state = this.#state(agentKeyOf(payload.agent), payload.agent);
+      state.claims = clip(`${state.claims}${text}`, CLAIM_CHARS);
+    } catch {
+      // Advisory only: a malformed frame must not disturb streaming.
+    }
+  }
+
+  // ── capabilities ───────────────────────────────────────────────────────────
+
+  /**
+   * Plan, and in active mode apply, the reduction of one oversized result.
+   *
+   * The order of operations here *is* the safety property, so it is spelled out:
+   * decide whether this payload is one the module is willing to rewrite, make sure
+   * an original can be retained, buy a judgment from the shared budget, obtain the
+   * real candidate, retain the original, build the replacement, check that the
+   * replacement really shrank the text, and only then record a saving. Every "no"
+   * on that path returns the downstream decision untouched, which is why an
+   * unverifiable reduction can never be reported as applied.
+   *
+   * @param exec - the call that produced the result.
+   * @param downstream - what the rest of the waterfall decided.
+   * @param effective - the content the model will read (`downstream` first).
+   * @param state - the deciding agent's state.
+   * @param text - the effective text of that content.
+   * @param started - clock reading at hook entry, for local latency.
+   * @returns the decision the Host commits.
+   */
+  async #pruneResult(
+    exec: ToolExecution,
+    downstream: PostToolDecision,
+    effective: readonly ContentBlock[] | undefined,
+    state: AgentState,
+    text: string,
+    started: number
+  ): Promise<PostToolDecision> {
+    const capability = this.modeOf('prune');
+    if (capability === 'off') return downstream;
+    if (downstream.kind === 'block') return downstream;
+    if ('value' in downstream && downstream.value !== undefined) {
+      // A value-shaped accept replaced the payload wholesale; nothing here knows
+      // what its text is, so nothing here may touch it.
+      this.#skip('value-shaped-accept');
+      return downstream;
+    }
+    if (!hasTextBlock(effective)) {
+      // Nothing to replace, and nothing that could be reported as replaced. Asked
+      // before the size checks: an image-only payload is not "small", it is out of
+      // scope, and the skip reason should say so.
+      this.#skip('no-text-block');
+      return downstream;
+    }
+    if (text.length < this.#pruneThreshold) {
+      this.#skip('below-threshold');
+      return downstream;
+    }
+    if ((text.match(/\n/g)?.length ?? 0) < PRUNE_MIN_LINES) {
+      // Not line-oriented output: the judge is asked to extract diagnostics, and a
+      // payload with no lines does not have any to extract. Rewriting it would
+      // destroy semantic data rather than compress a trace.
+      this.#skip('unsupported-payload');
+      return downstream;
+    }
+    if (text.length > MAX_RETAINED_CHARS) {
+      // Retention is a precondition of replacing anything, so an oversized payload
+      // is refused *before* it is judged or reported as a saving.
+      this.#skip('retention-too-large');
+      return downstream;
+    }
+    const retain = this.#retain;
+    if (!retain) {
+      // Without a retention sink nothing may be replaced: the module will not
+      // destroy the only copy of a result it cannot give back.
+      this.#skip('retention-unavailable');
+      return downstream;
+    }
+    if (!this.#actionWithinBudget(state)) {
+      // A reduction is an intervention like a refusal or a correction, so it draws
+      // on the same per-turn allowance — and it is asked here, before a judgment is
+      // bought, so a full turn costs nothing to refuse. Both modes are checked:
+      // observe has to plan no more actions than active could take, including the
+      // ones the memo would have answered for free.
+      this.#skip('intervention-cap');
+      return downstream;
+    }
+    // Whether *this* agent can retain is the sink's answer, not this module's
+    // guess: the production sink refuses a session-less agent by returning nothing,
+    // which lands on the same fail-open path below.
+    const session = sessionOf(exec.agent);
+
+    const digest = digestOf(text);
+    // The locator is derived from the payload, and the production sink names the
+    // retained copy the same way — which is what makes the plan's size the size of
+    // the form active will install, in both modes.
+    const locator = pruneLocator(digest);
+    const memo = this.#memoGet(state, digest);
+    // A memo hit answers the question the judgment already answered; only a mode
+    // that needs the reduction's *text* has to ask for it again.
+    const needsCandidate = capability === 'active' && (memo?.text === undefined);
+    if (!memo || needsCandidate) {
+      const skip = this.#spendJudgment(state);
+      if (skip) {
+        this.#skip(skip);
+        return downstream;
+      }
+    }
+
+    const response: PruneResponse =
+      memo && !needsCandidate
+        ? {
+            processedOutput: memo.text ?? text,
+            originalChars: memo.originalChars,
+            prunedChars: memo.prunedChars,
+            estimatedTokensSaved: memo.tokensSaved,
+            reductionPercentage: reductionPercentage(memo.originalChars, memo.prunedChars),
+            shadow: memo.text === undefined,
+            latencyMs: 0
+          }
+        : await this.#prune.prune(text, { intent: this.config.intent, shadowMode: capability !== 'active' });
+
+    const originalTokens = estimateTokens(text);
+    // `prunedChars` describes the candidate in *both* modes: a shadow measurement
+    // withholds the candidate's text but still reports its size, which is what lets
+    // observe plan — and pay for — the reduction active would install.
+    const floor = pruneFloorPlan(text.length, response.prunedChars, {
+      floorRatio: this.config.pruneFloorRatio,
+      headChars: this.config.pruneHeadChars,
+      tailChars: this.config.pruneTailChars,
+      markerChars: pruneMarker(locator).length
+    });
+    const candidateTokens = Math.ceil(floor.resultChars / 4);
+    const judged = !memo || needsCandidate;
+    const judgment: JudgmentCharge = {
+      judgments: judged ? 1 : 0,
+      memoHits: judged ? 0 : 1,
+      localLatencyMs: Math.max(0, this.#now() - started - (judged ? response.latencyMs : 0)),
+      remoteLatencyMs: judged ? response.latencyMs : 0,
+      // The pre-prune payload is what the pruner reasoned about; a backend call is
+      // a judgment even when it returns locally in under a millisecond.
+      judgeTokens: judged ? originalTokens : 0
+    };
+    if (candidateTokens >= originalTokens) {
+      this.#charge('prune', { ...judgment, originalTokens });
+      this.#skip('no-reduction');
+      return downstream;
+    }
+
+    const plan: InterventionPlan = {
+      capability: 'prune',
+      action: 'prune-result',
+      reason: `${exec.name} returned ${originalTokens} tokens; the judged reduction carries ${candidateTokens}`,
+      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, floor.floored),
+      detail: {
+        digest,
+        floorApplied: floor.floored,
+        confidence: response.reductionPercentage,
+        turn: state.turn,
+        step: state.step
+      }
+    };
+    const planCosts = { originalTokens, candidateTokens, potentialSavedTokens: originalTokens - candidateTokens };
+
+    if (capability !== 'active') {
+      // Observe: the plan is real and charged, the surface is untouched, and the
+      // memo keeps the plan — never a reduction this mode never saw. A plan this
+      // mode records is the action active would have taken, so it books the slot
+      // active would have booked.
+      this.#bookAction(state);
+      this.#conclude(plan, false, exec.agent, planCosts, judgment);
+      if (!memo) {
+        this.#memoSet(state, digest, {
+          originalChars: text.length,
+          prunedChars: floor.resultChars,
+          tokensSaved: originalTokens - candidateTokens,
+          floored: floor.floored
+        });
+      }
+      return downstream;
+    }
+
+    // Active. The original is retained *before* anything is replaced, and only a
+    // verified retention makes the replacement installable at all. A payload whose
+    // copy is already retained keeps that copy instead of writing a second one.
+    const alreadyRetained = memo?.locator;
+    const retention = alreadyRetained
+      ? { locator: alreadyRetained }
+      : retain(session, {
+          digest,
+          callId: exec.callId,
+          tool: exec.name,
+          turn: state.turn,
+          step: state.step,
+          text
+        });
+    if (!retention || typeof retention.locator !== 'string' || retention.locator.length === 0) {
+      // No controlled copy, no reduction. The result stays exactly as the rest of
+      // the waterfall produced it, and no saving is recorded — but the judgment
+      // that got this far was really made, so it is charged rather than hidden.
+      this.#charge('prune', judgment);
+      this.#skip('retention-failed');
+      return downstream;
+    }
+
+    // The composition uses the locator the sink really published, which is what a
+    // reader has to type to recover the original; in production it is the same
+    // string the plan was built from, so the sizes agree exactly.
+    const installed = applyPruneFloor(text, memo?.text ?? response.processedOutput, {
+      floorRatio: this.config.pruneFloorRatio,
+      headChars: this.config.pruneHeadChars,
+      tailChars: this.config.pruneTailChars,
+      locator: retention.locator
+    });
+    if (installed.text.length === 0 || installed.text.length >= text.length) {
+      // The plan said the form is smaller; the form that was really built must be
+      // too, or nothing is installed and nothing is saved.
+      this.#skip('no-reduction');
+      return downstream;
+    }
+    const replacement = this.#replaceText(effective, installed.text);
+    if (!replacement) {
+      this.#skip('no-text-block');
+      return downstream;
+    }
+
+    // Only now is there a decision that really took effect, so only now is the
+    // saving recorded — against the text that is really about to enter the context.
+    const installedTokens = Math.max(0, Math.ceil(installed.text.length / 4));
+    plan.detail.floorApplied = installed.floored;
+    plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, installed.floored);
+    // Booked only here: a candidate that was not smaller, a replacement that could
+    // not be composed, and a retention that failed all returned above, so none of
+    // them consumed the turn's allowance for an action that never happened.
+    this.#bookAction(state);
+    this.#conclude(
+      plan,
+      true,
+      exec.agent,
+      {
+        originalTokens,
+        candidateTokens: installedTokens,
+        potentialSavedTokens: originalTokens - installedTokens,
+        actualSavedTokens: originalTokens - installedTokens
+      },
+      judgment,
+      retention.locator
+    );
+    // Retention is counted once per payload: a duplicate install reuses the copy
+    // that is already in the log, and the locator naming it never changes.
+    if (!this.#retained.includes(retention.locator)) {
+      this.#retained.push(retention.locator);
+      if (this.#retained.length > MAX_RECENT) this.#retained.shift();
+    }
+    this.#retainedCopies += 1;
+    this.#memoSet(state, digest, {
+      text: installed.text,
+      originalChars: text.length,
+      prunedChars: installed.text.length,
+      tokensSaved: originalTokens - installedTokens,
+      floored: installed.floored,
+      locator: retention.locator
+    });
+    return {
+      kind: 'accept',
+      content: replacement,
+      ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
+        ? { additionalContexts: [...downstream.additionalContexts] }
+        : {})
+    };
+  }
+
+  /** Plan, and in active mode apply, the correction of one repeated failure. */
+  async #correctFailure(
+    exec: ToolExecution,
+    result: Readonly<ToolExecutionResult>,
+    downstream: PostToolDecision,
+    state: AgentState,
+    signature: string,
+    started: number
+  ): Promise<PostToolDecision> {
+    const capability = this.modeOf('gate');
+    if (capability === 'off') return downstream;
+    if (downstream.kind === 'block') return downstream;
+    const suspicion = suspicionOf(state.steps, {
+      repeatThreshold: this.config.repeatThreshold,
+      failureThreshold: this.config.failureThreshold,
+      window: this.config.windowSize,
+      signature
+    });
+    if (!suspicion.suspicious || state.applied.has(`gate:${signature}`)) {
+      if (suspicion.suspicious) this.#skip('duplicate-intervention');
+      return downstream;
+    }
+    if (!this.#actionWithinBudget(state)) {
+      this.#skip('intervention-cap');
+      return downstream;
+    }
+    const agentId = agentKeyOf(exec.agent);
+    const verdict = await this.#judge(state, exec.signal);
+    const judgment = this.#judgmentCharge(verdict, started, this.#now());
+    if (!verdict.useful) {
+      this.#charge('gate', judgment);
+      this.#skip(verdict.skip ?? 'unconfirmed');
+      return downstream;
+    }
+
+    const plan: InterventionPlan = {
+      capability: 'gate',
+      action: 'corrective-feedback',
+      reason: `${exec.name} failed ${suspicion.repeats} times; System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern}`,
+      feedback: this.#failureFeedback(exec.name, this.#errorOf(result), suspicion, verdict.response),
+      detail: {
+        pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
+        confidence: verdict.response.confidence,
+        repeats: suspicion.repeats,
+        turn: state.turn,
+        step: state.step
+      }
+    };
+    const applied = capability === 'active';
+    state.applied.add(`gate:${signature}`);
+    this.#bookAction(state);
+    this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
+    if (!applied) return downstream;
+    return {
+      kind: 'block',
+      feedback: [{ type: 'text', text: plan.feedback }],
+      ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
+        ? { additionalContexts: [...downstream.additionalContexts] }
+        : {})
+    };
+  }
+
+  // ── judgment, budgets, and memo ─────────────────────────────────────────────
+
+  /**
+   * Whether this turn still has room for one more planned action.
+   *
+   * This is the *action* ceiling, and it is deliberately not the judgment budget:
+   * a judgment is the question System 1 was asked, this is the number of things
+   * the run is allowed to do about the answer. Every capability draws on the same
+   * allowance, and both modes draw on it the same way — the plan observe measures
+   * is the action active would install, so an observe run that planned more than
+   * the ceiling would be measuring a turn that cannot exist.
+   *
+   * Asked before a judgment is bought, so a turn that is already full is refused
+   * for free.
+   * @param state - the deciding agent's state.
+   * @returns whether one more planned action fits this turn.
+   */
+  #actionWithinBudget(state: AgentState): boolean {
+    return state.interventions < this.config.maxInterventionsPerTurn;
+  }
+
+  /**
+   * Book one planned action against the turn's shared allowance.
+   *
+   * Called at the one point where a plan becomes real: observe books the plan it
+   * records, active books the replacement its retention made installable. Never
+   * called earlier — a plan abandoned by a failed judgment, a failed retention, or
+   * a candidate that turned out not to be smaller must not consume the turn's
+   * allowance, or a turn would be spent on actions that never happened.
+   * @param state - the deciding agent's state.
+   */
+  #bookAction(state: AgentState): void {
+    state.interventions += 1;
+  }
+
+  /**
+   * Spend at most one System 1 stagnation judgment per agent and turn.
+   *
+   * Every hook of one turn shares the verdict — the pre-execute refusal, the
+   * pre-step correction, and the failure correction all ask the same question
+   * about the same window, so asking it three times would be three times the cost
+   * for one answer.
+   */
+  async #judge(
+    state: AgentState,
+    signal?: AbortSignal,
+    steps: readonly ObservedStep[] = state.steps
+  ): Promise<{
+    useful: boolean;
+    paid: boolean;
+    reused: boolean;
+    judgeTokens: number;
+    localLatencyMs: number;
+    remoteLatencyMs: number;
+    skip?: string;
+    response: StagnationCheckResponse;
+  }> {
+    // The question is the trailing window, so the answer is cached against it:
+    // the same episode is never judged twice, while a *different* episode in the
+    // same turn is a new question — and therefore subject to the turn's budget.
+    const key = steps
+      .slice(-Math.max(1, this.config.repeatThreshold))
+      .map((step) => step.signature)
+      .join('|');
+    const cached = state.verdictTurn === state.turn && state.verdictKey === key ? state.verdict : undefined;
+    if (cached) {
+      return {
+        useful: this.#useful(cached),
+        paid: false,
+        reused: true,
+        judgeTokens: 0,
+        localLatencyMs: 0,
+        remoteLatencyMs: 0,
+        response: cached
+      };
+    }
+    if (state.judgmentsCount >= this.config.maxJudgmentsPerTurn) {
+      return this.#noJudgment('judgment-turn-cap');
+    }
+    if (state.judgmentsSession >= this.config.maxJudgmentsPerSession) {
+      return this.#noJudgment('judgment-session-cap');
+    }
+    if (signal?.aborted) return this.#noJudgment('aborted');
+    this.#spendJudgment(state);
+
+    const history: ActionStep[] = steps.map((step) => ({
+      tool: step.tool,
+      input: step.input,
+      ...(step.output ? { output: step.output } : {}),
+      ...(step.error ? { error: step.error } : {}),
+      timestamp: step.at
+    }));
+    const judgeTokens = history.reduce(
+      (sum, step) => sum + estimateTokens(`${step.tool}${step.input}${step.output ?? ''}${step.error ?? ''}`),
+      0
+    );
+    const started = this.#now();
+    const response = await this.#stagnation.check(undefined, history);
+    const remoteLatencyMs = Number.isFinite(response.latencyMs) ? response.latencyMs : 0;
+    state.verdict = response;
+    state.verdictTurn = state.turn;
+    state.verdictKey = key;
+    return {
+      useful: this.#useful(response),
+      paid: true,
+      reused: false,
+      judgeTokens,
+      localLatencyMs: Math.max(0, this.#now() - started - remoteLatencyMs),
+      remoteLatencyMs,
+      response
+    };
+  }
+
+  /**
+   * Charge one judgment against the turn's and the session's budget.
+   *
+   * Both budgets are spent at the one place a judgment is actually made, so a
+   * capability cannot buy its way around them by calling a service directly. The
+   * caller decides whether a refusal means "plan nothing" or "do not act"; what
+   * matters here is that the count is never overrun and that a shadowed
+   * application is charged like a real one — an observe run has to cost what the
+   * active run would cost, or its column would flatter it.
+   * @param state - the deciding agent's state.
+   * @returns `undefined` when the judgment was spent, else the skip reason.
+   */
+  #spendJudgment(state: AgentState): string | undefined {
+    if (state.judgmentsCount >= this.config.maxJudgmentsPerTurn) return 'judgment-turn-cap';
+    if (state.judgmentsSession >= this.config.maxJudgmentsPerSession) return 'judgment-session-cap';
+    state.judgmentsCount += 1;
+    state.judgmentsSession += 1;
+    return undefined;
+  }
+
+  /** The zero-cost verdict of a judgment that could not be spent. */
+  #noJudgment(skip: string): {    useful: boolean;
+    paid: boolean;
+    reused: boolean;
+    judgeTokens: number;
+    localLatencyMs: number;
+    remoteLatencyMs: number;
+    skip?: string;
+    response: StagnationCheckResponse;
+  } {
+    // Not a memo hit: nothing was reused, the budget simply refused to spend.
+    return {
+      useful: false,
+      paid: false,
+      reused: false,
+      judgeTokens: 0,
+      localLatencyMs: 0,
+      remoteLatencyMs: 0,
+      skip,
+      response: EMPTY_VERDICT
+    };
+  }
+
+  /** The charge of one judgment, so every judgment is billed exactly once. */
+  #judgmentCharge(
+    verdict: { paid: boolean; reused: boolean; judgeTokens: number; localLatencyMs: number; remoteLatencyMs: number },
+    started: number,
+    finished: number
+  ): JudgmentCharge {
+    if (!verdict.paid) {
+      return { judgments: 0, memoHits: verdict.reused ? 1 : 0, localLatencyMs: 0, remoteLatencyMs: 0, judgeTokens: 0 };
+    }
+    return {
+      judgments: 1,
+      memoHits: 0,
+      localLatencyMs: Math.max(verdict.localLatencyMs, Math.max(0, finished - started - verdict.remoteLatencyMs)),
+      remoteLatencyMs: verdict.remoteLatencyMs,
+      judgeTokens: verdict.judgeTokens
+    };
+  }
+
+  /** Whether a verdict justifies acting: stuck, confident, and about a pattern. */
+  #useful(response: StagnationCheckResponse): boolean {
+    return (
+      response.isStuck === true &&
+      response.confidence >= this.config.minConfidence &&
+      (response.patternType ?? 'none') !== 'none'
+    );
+  }
+
+  // ── accounting and audit ───────────────────────────────────────────────────
+
+  /**
+   * Record one planned decision and bill its plan side.
+   *
+   * The judgment is passed in rather than recomputed: it was already charged
+   * (or is charged here for the first time) exactly once, and it appears in the
+   * audit record so one decision's full cost is readable in one place.
+   *
+   * Two rules keep the record honest. `injectedTokens` counts only text that was
+   * *really* injected — a reduction's explanatory note is never sent to the model,
+   * so reducing costs no context. And `actualSavedTokens` is the caller's
+   * measurement of the payload that really left the surface, not the plan's
+   * intention; `#pruneResult` passes the size of the text it actually installed.
+   *
+   * @param plan - what was planned.
+   * @param applied - whether active mode executed it.
+   * @param agent - the agent it concerns, for isolation and the audit trail.
+   * @param planCosts - the payload sizes of this decision.
+   * @param judgment - the judgment this decision rode on.
+   * @param originalLocator - locator of the retained original, when one exists.
+   */
+  #conclude(
+    plan: InterventionPlan,
+    applied: boolean,
+    agent: unknown,
+    planCosts: {
+      originalTokens?: number;
+      candidateTokens?: number;
+      potentialSavedTokens: number;
+      /** Tokens really removed; defaults to the plan's own estimate. */
+      actualSavedTokens?: number;
+    },
+    judgment?: JudgmentCharge,
+    originalLocator?: string
+  ): void {
+    const originalTokens = planCosts.originalTokens ?? 0;
+    const candidateTokens = planCosts.candidateTokens ?? 0;
+    const potentialSavedTokens = planCosts.potentialSavedTokens;
+    // The injection column counts text handed to the model. A deny's reason and a
+    // correction's feedback are injected; a prune's note travels in the audit
+    // record only, so its plan never inflates the cost of the saving it made.
+    const injects = applied && plan.action !== 'prune-result';
+    const injectedTokens = injects ? estimateTokens(plan.feedback) : 0;
+    const actualSavedTokens =
+      applied && plan.action === 'prune-result'
+        ? planCosts.actualSavedTokens ?? potentialSavedTokens
+        : 0;
+    const charge: Charge = {
+      ...(judgment ?? { judgments: 0, memoHits: 0, localLatencyMs: 0, remoteLatencyMs: 0, judgeTokens: 0 }),
+      originalTokens,
+      candidateTokens,
+      potentialSavedTokens,
+      actualSavedTokens,
+      injectedTokens
+    };
+    this.#charge(plan.capability, charge, 1, applied ? 1 : 0);
+
+    const record: InterventionAuditRecord = {
+      capability: plan.capability,
+      action: plan.action,
+      mode: this.modeOf(plan.capability),
+      applied,
+      reason: plan.reason,
+      feedback: applied ? plan.feedback : '',
+      localLatencyMs: judgment?.localLatencyMs ?? 0,
+      remoteLatencyMs: judgment?.remoteLatencyMs ?? 0,
+      judgeTokens: judgment?.judgeTokens ?? 0,
+      originalTokens,
+      candidateTokens,
+      potentialSavedTokens,
+      actualSavedTokens,
+      injectedTokens,
+      at: this.#now(),
+      agentId: agentKeyOf(agent),
+      ...(plan.detail.pattern === undefined ? {} : { pattern: plan.detail.pattern }),
+      ...(plan.detail.confidence === undefined ? {} : { confidence: plan.detail.confidence }),
+      ...(plan.detail.repeats === undefined ? {} : { repeats: plan.detail.repeats }),
+      ...(plan.detail.digest === undefined ? {} : { digest: plan.detail.digest }),
+      ...(plan.detail.floorApplied === undefined ? {} : { floorApplied: plan.detail.floorApplied }),
+      ...(judgment?.memoHits ? { memoHit: true } : {}),
+      ...(originalLocator === undefined ? {} : { originalLocator }),
+      ...(plan.detail.turn === undefined ? {} : { turn: plan.detail.turn }),
+      ...(plan.detail.step === undefined ? {} : { step: plan.detail.step })
+    };
+    this.#recent.push(record);
+    if (this.#recent.length > MAX_RECENT) this.#recent.shift();
+    try {
+      this.#audit?.(record, (agent as { session?: unknown } | undefined)?.session);
+    } catch {
+      // An audit sink is never allowed to fail a turn.
+    }
+  }
+
+  /**
+   * Bill one decision against its mode's and its capability's account.
+   *
+   * Every counter has exactly one writer, so a reader can add the parts up
+   * without meeting a number twice.
+   */
+  #charge(capability: InterventionCapability, charge: Charge, plans = 0, applied = 0): void {
+    const mode = this.modeOf(capability) === 'active' ? 'active' : 'observe';
+    for (const bucket of [this.#costs[mode], this.#byCapability[capability]]) {
+      bucket.plans += plans;
+      bucket.applied += applied;
+      bucket.judgments += charge.judgments ?? 0;
+      bucket.memoHits += charge.memoHits ?? 0;
+      bucket.localLatencyMs += charge.localLatencyMs ?? 0;
+      bucket.remoteLatencyMs += charge.remoteLatencyMs ?? 0;
+      bucket.judgeTokens += charge.judgeTokens ?? 0;
+      bucket.originalTokens += charge.originalTokens ?? 0;
+      bucket.candidateTokens += charge.candidateTokens ?? 0;
+      bucket.potentialSavedTokens += charge.potentialSavedTokens ?? 0;
+      bucket.actualSavedTokens += charge.actualSavedTokens ?? 0;
+      bucket.injectedTokens += charge.injectedTokens ?? 0;
+    }
+  }
+
+  /** Count one hook-level refusal by reason. */
+  #skip(reason: string): void {
+    this.#skips.set(reason, (this.#skips.get(reason) ?? 0) + 1);
+  }
+
+  // ── state ─────────────────────────────────────────────────────────────────
+
+  /** One agent's state, created on first sight and bounded overall. */
+  #state(agentId: string, agent?: unknown): AgentState {
+    const sessionKey = sessionKeyOf(agent);
+    const existing = this.#states.get(agentId);
+    if (existing && existing.sessionKey === sessionKey) {
+      this.#states.delete(agentId);
+      this.#states.set(agentId, existing);
+      return existing;
+    }
+    // A new session for the same agent id is a new run: no window, verdict,
+    // budget, or memoized reduction of the old one may leak into it.
+    if (existing) this.#memoForget(existing.sessionKey);
+    const state: AgentState = {
+      sessionKey,
+      turn: 0,
+      step: 0,
+      steps: [],
+      claims: '',
+      evidence: [],
+      interventions: 0,
+      judgmentsTurn: 0,
+      judgmentsCount: 0,
+      judgmentsSession: 0,
+      verdictTurn: 0,
+      verdictKey: '',
+      applied: new Set<string>(),
+      denied: new Set<string>(),
+      refused: new Set<string>()
+    };
+    this.#states.set(agentId, state);
+    if (this.#states.size > MAX_AGENTS) {
+      const oldest = this.#states.keys().next().value;
+      if (typeof oldest === 'string' && oldest !== agentId) this.#states.delete(oldest);
+    }
+    return state;
+  }
+
+  /**
+   * The step a call about to run would add, without committing it.
+   * @param state - the agent's bookkeeping.
+   * @param exec - the proposed call.
+   * @param signature - its identity.
+   * @returns the step the result path will record once the call completes.
+   */
+  #observed(state: AgentState, exec: ToolExecution, signature: string): ObservedStep {
+    return {
+      signature,
+      tool: exec.name,
+      input: clip(this.#argumentsOf(exec), STEP_CHARS),
+      output: '',
+      error: '',
+      // The call about to run is a retry exactly when this identity failed before.
+      failed: state.steps.some((step) => step.signature === signature && step.failed),
+      turn: state.turn,
+      at: this.#now()
+    };
+  }
+
+  /** Append one observed step, bounded. */
+  #observe(state: AgentState, step: ObservedStep): void {
+    state.steps.push(step);
+    if (state.steps.length > MAX_STEPS) state.steps.shift();
+  }
+
+  /** Retain one failing evidence line for the closing check. */
+  #rememberEvidence(state: AgentState, tool: string, error: string, text: string): void {
+    const line = clip(`${tool}: ${error.length > 0 ? error : text}`.replace(/\s+/g, ' ').trim(), EVIDENCE_CHARS);
+    if (line.length === 0) return;
+    state.evidence.push(line);
+    if (state.evidence.length > MAX_EVIDENCE) state.evidence.shift();
+  }
+
+  /** The arguments of one call, as the text a judgment and a digest see. */
+  #argumentsOf(exec: ToolExecution): string {
+    const args: unknown = exec.arguments;
+    if (typeof args === 'string') return args;
+    try {
+      return JSON.stringify(args ?? {}) ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  /** The failure text of one result. */
+  #errorOf(result: Readonly<ToolExecutionResult>): string {
+    const failure = (result as { error?: { message?: string } }).error;
+    if (failure && typeof failure.message === 'string' && failure.message.length > 0) return failure.message;
+    return textOfContent(result.content);
+  }
+
+  /** Replace the text blocks of one content list, preserving every other block. */
+  #replaceText(content: readonly ContentBlock[] | undefined, text: string): ContentBlock[] | undefined {
+    if (!content) return undefined;
+    const out: ContentBlock[] = [];
+    let placed = false;
+    for (const block of content) {
+      if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') {
+        if (!placed) {
+          out.push({ type: 'text', text } as ContentBlock);
+          placed = true;
+        }
+        continue;
+      }
+      out.push(block);
+    }
+    return placed ? out : undefined;
+  }
+
+  /**
+   * The explanatory note of one reduction.
+   *
+   * It travels in the audit record, never in the model's context: a prune is
+   * supposed to *remove* context, so sending an explanation of the removal would
+   * work against the thing it is accounting for.
+   */
+  #pruneFeedback(tool: string, originalTokens: number, candidateTokens: number, floored: boolean): string {
+    const kept = originalTokens === 0 ? 100 : Math.round((candidateTokens / originalTokens) * 100);
+    return clip(
+      `Reflex reduced ${tool}: ${originalTokens} → ${candidateTokens} tokens (${kept}% kept). ` +
+        `${floored ? 'The head, the judged extract and the tail were kept; ' : 'The judged extract was kept whole; '}` +
+        `the full output was retained in this session's log and is not in context.`,
+      FEEDBACK_CHARS
+    );
+  }
+
+  /** The memoized reduction of one payload, when it is still remembered. */
+  #memoGet(state: AgentState, digest: string): PruneMemo | undefined {
+    const key = `${state.sessionKey}:${digest}`;
+    const hit = this.#memo.get(key);
+    if (!hit) return undefined;
+    this.#memo.delete(key);
+    this.#memo.set(key, hit);
+    return hit;
+  }
+
+  /**
+   * Remember one payload's reduction, bounded by least recent use.
+   *
+   * The entry records the *plan* — the sizes both modes report — and, once a mode
+   * really computed it, the reduction's text. Observe never has that text (the
+   * shadow service withholds it and reports only its size) and never pretends to:
+   * a later active decision re-plans that payload for real instead of installing a
+   * cached fragment it never saw.
+   */
+  #memoSet(state: AgentState, digest: string, memo: PruneMemo): void {
+    const key = `${state.sessionKey}:${digest}`;
+    this.#memo.set(key, memo);
+    if (this.#memo.size > MAX_MEMO) {
+      const oldest = this.#memo.keys().next().value;
+      if (typeof oldest === 'string') this.#memo.delete(oldest);
+    }
+  }
+
+  /** Drop the memo entries of one session, so a replaced run leaves nothing behind. */
+  #memoForget(sessionKey: string): void {
+    const prefix = `${sessionKey}:`;
+    for (const key of [...this.#memo.keys()]) {
+      if (key.startsWith(prefix)) this.#memo.delete(key);
+    }
+  }
+
+  /** Build one model-facing message, attributed to this plugin. */
+  #message(agentId: string, turn: number, step: number, text: string): UserMessage {
+    this.#counter += 1;
+    const summary = boundContextSummary(text.replace(/\s+/g, ' ').trim());
+    return {
+      id: MessageId(`reflex-intervention-${agentId}-${turn}-${step}-${this.#counter}`),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: INTERVENTION_SOURCE_KIND, form: 'notice', summary }
+    };
+  }
+
+  /** Steer one message into an agent's inbox, when the agent can receive it. */
+  #steer(agent: unknown, message: UserMessage): void {
+    const steer = (agent as { steer?: (message: UserMessage) => void } | undefined)?.steer;
+    if (typeof steer !== 'function') return;
+    steer.call(agent, message);
+  }
+
+  /** The refusal text handed to the model when a repeated call is denied. */
+  #denyFeedback(tool: string, suspicion: StagnationSuspicion, verdict: StagnationCheckResponse): string {
+    const advice = clip((verdict.recommendedIntervention ?? '').replace(/\s+/g, ' ').trim(), 240);
+    return clip(
+      `Reflex intervention: ${tool} was called with identical arguments ${suspicion.repeats} times in this turn and System 1 confirms ` +
+        `${verdict.patternType ?? suspicion.pattern} stagnation (confidence ${verdict.confidence.toFixed(2)}). The call was not executed. ` +
+        `Change the approach: ${advice || 'use different arguments or a different tool, and inspect the previous result before retrying.'}`,
+      FEEDBACK_CHARS
+    );
+  }
+
+  /** The corrective context attached to the step after a repeated loop. */
+  #contextFeedback(suspicion: StagnationSuspicion, verdict: StagnationCheckResponse): string {
+    const advice = clip((verdict.recommendedIntervention ?? '').replace(/\s+/g, ' ').trim(), 240);
+    return clip(
+      `Reflex intervention: the last steps repeated the same call ${suspicion.repeats} times (System 1: ${verdict.patternType ?? suspicion.pattern}, ` +
+        `confidence ${verdict.confidence.toFixed(2)}). Stop the loop and change strategy: ` +
+        `${advice || 're-read the last failure, then either fix the cause or try a different tool.'}`,
+      FEEDBACK_CHARS
+    );
+  }
+
+  /** The corrective feedback carried by a repeated failing result. */
+  #failureFeedback(tool: string, error: string, suspicion: StagnationSuspicion, verdict: StagnationCheckResponse): string {
+    const advice = clip((verdict.recommendedIntervention ?? '').replace(/\s+/g, ' ').trim(), 240);
+    return clip(
+      `Reflex intervention: ${tool} failed ${suspicion.repeats} consecutive times with ${clip(error.replace(/\s+/g, ' ').trim(), 160)}. ` +
+        `System 1 confirms ${verdict.patternType ?? suspicion.pattern} (confidence ${verdict.confidence.toFixed(2)}). ` +
+        `This result is treated as a policy failure: change the command or the code before retrying. ${advice}`,
+      FEEDBACK_CHARS
+    );
+  }
+
+  /** The objection steered into a turn that is closing on contradicted evidence. */
+  #closingFeedback(contradicted: readonly string[]): string {
+    return clip(
+      `Reflex closing check: this turn is about to close while its own tool results carry failures that contradict what it claims ` +
+        `(${contradicted.map((item) => `"${item}"`).join('; ')}). Before concluding, either fix the failing evidence or state the failure ` +
+        `plainly instead of the completion claim.`,
+      FEEDBACK_CHARS
+    );
+  }
+}
+
+/** The installer's product: the detachers and the engine behind them. */
+export interface InterventionInstallation {
+  /** Detachers of every registered listener, in registration order. */
+  disposers: Array<() => void>;
+  /** The engine the listeners drive, for the panel and for tests. */
+  engine: InterventionEngine;
+}
+
+/**
+ * Install the automatic interventions of one activation.
+ *
+ * Registration itself is mode-aware: a capability in `off` gets no listener at
+ * all, so "off" is the absence of the feature rather than a flag every hook has
+ * to remember to check. A Host missing one of these hooks is tolerated: the
+ * registration is guarded, so a stripped-down embedder loses one capability
+ * instead of failing to load.
+ *
+ * What is *not* per-capability is the turn frame. One turn has one lifecycle
+ * whatever combination of capabilities is enabled: `agent/pre-step` opens it —
+ * the turn's counters, its step number, and its stale latches — and
+ * `agent/disposed` closes it. A prune-only deployment used to get neither, so its
+ * first result was counted against turn 0, its intervention cap never reset, and
+ * nothing was disposed. Registering the frame once for every enabled capability is
+ * what makes the budget a per-turn budget rather than an accident of which
+ * capability happened to be on.
+ *
+ * @param ctx - registrant context.
+ * @param options - engine options, including the audit sink.
+ * @returns the detachers and the engine.
+ */
+export function installInterventions(ctx: Context, options: InterventionEngineOptions): InterventionInstallation {
+  const engine = new InterventionEngine(options);
+  const disposers: Array<() => void> = [];
+  if (!engine.enabled) return { disposers, engine };
+
+  const guard = (register: () => unknown): void => {
+    try {
+      const detach = register();
+      if (typeof detach === 'function') disposers.push(detach as unknown as () => void);
+    } catch {
+      // A Host without the hook simply does not get that intervention.
+    }
+  };
+
+  // ── the turn frame, shared by every capability that acts inside a turn ─────
+  guard(() => ctx.on('agent/pre-step', (payload, next) => engine.preStep(payload, next)));
+  guard(() =>
+    ctx.on('agent/disposed', (payload) => {
+      engine.forget(agentKeyOf(payload));
+    })
+  );
+
+  // ── the result pipeline: stagnation evidence, pruning, failure evidence ────
+  // Every capability reads this pipeline: stagnation needs the recorded calls,
+  // pruning needs the payloads, the gate needs the failures, and the closing check
+  // needs the failing evidence of the turn. Registering it for a subset would
+  // silently disable the capability that was left out of the list.
+  if (engine.serves('stagnation', 'prune', 'gate', 'closing')) {
+    guard(() => ctx.on('tools/pre-execute', (exec, next) => engine.toolCall(exec, next)));
+    guard(() => ctx.on('tools/post-execute', (exec, result, next) => engine.toolResult(exec, result, next)));
+  }
+
+  // ── the closing check's own inputs and its turn boundary ──────────────────
+  if (engine.serves('closing')) {
+    guard(() => ctx.on('agent/turn-stopping', (payload) => engine.turnStopping(payload)));
+    guard(() =>
+      ctx.on('agent/assistant-stream', (payload) => {
+        engine.observeAssistantStream(payload);
+      })
+    );
+  }
+
+  return { disposers, engine };
+}
+
+/**
+ * The isolation key of one agent, tolerating a disposal payload that wraps it.
+ * @param value - an agent, or a payload carrying one.
+ * @returns its key; `anonymous` when no identity is available.
+ */
+export function agentKeyOf(value: unknown): string {
+  const direct = value as { id?: unknown } | undefined;
+  if (typeof direct?.id === 'string' && direct.id.length > 0) return direct.id;
+  const wrapped = (value as { agent?: { id?: unknown } } | undefined)?.agent;
+  if (typeof wrapped?.id === 'string' && wrapped.id.length > 0) return wrapped.id;
+  return 'anonymous';
+}
+
+/**
+ * The session one agent decides in.
+ * @param value - an agent, or a payload carrying one.
+ * @returns the session object, or `undefined` when the agent has none.
+ */
+export function sessionOf(value: unknown): unknown {
+  const agent = (value as { agent?: unknown } | undefined)?.agent ?? value;
+  const session = (agent as { session?: unknown } | undefined)?.session;
+  return session && typeof session === 'object' ? session : undefined;
+}
+
+/**
+ * The identity of the session one agent decides in.
+ *
+ * A memo of reductions is only valid inside the run that produced it: the same
+ * agent id in a resumed or forked session is a different log, with different
+ * retained originals behind the same payload digests. Keying by the session —
+ * and falling back to the agent itself when no session is visible — is what keeps
+ * one run's cached reduction from being installed into another run.
+ * @param value - an agent, or a payload carrying one.
+ * @returns the session identity, or the agent's own key when it has none.
+ */
+export function sessionKeyOf(value: unknown): string {
+  const session = sessionOf(value) as { id?: unknown } | undefined;
+  return typeof session?.id === 'string' && session.id.length > 0 ? session.id : `agent:${agentKeyOf(value)}`;
+}
+
+/** The identity a repeated call is measured on: its name and its arguments. */
+function callSignature(exec: ToolExecution): string {
+  let args: string;
+  const raw: unknown = exec.arguments;
+  if (typeof raw === 'string') args = raw;
+  else {
+    try {
+      args = JSON.stringify(raw ?? {}) ?? '';
+    } catch {
+      args = '';
+    }
+  }
+  return `${exec.name}:${digestOf(args)}`;
+}
+
+/** The percentage one reduction reports, at the shared token rate. */
+function reductionPercentage(originalChars: number, prunedChars: number): number {
+  return originalChars === 0 ? 0 : Math.round(((originalChars - prunedChars) / originalChars) * 1000) / 10;
+}
+
+/**
+ * The completion claims of one turn's assistant text.
+ *
+ * Deterministic and local on purpose: the closing judgment is the most expensive
+ * one in this module (it reads the turn's own claims against its failures), so
+ * only sentences that actually claim completion are ever submitted, and a
+ * sentence that already carries a failure marker is never one of them.
+ *
+ * @param text - the turn's assistant text.
+ * @returns bounded, deduplicated claims.
+ */
+function claimsOf(text: string): Array<{ statement: string; criteria?: string }> {
+  const assertions: Array<{ statement: string; criteria?: string }> = [];
+  const seen = new Set<string>();
+  for (const raw of text.split(/(?<=[.!?。！？\n])/)) {
+    const sentence = raw.replace(/\s+/g, ' ').trim();
+    if (sentence.length < 8 || !COMPLETION_CLAIM.test(sentence) || FAILURE_MARKER.test(sentence)) continue;
+    const statement = clip(sentence, 200);
+    if (seen.has(statement)) continue;
+    seen.add(statement);
+    assertions.push({ statement });
+    if (assertions.length >= MAX_CLAIMS) break;
+  }
+  return assertions;
+}
+
+// Re-exported so a Host attaching the session log does not have to import the
+// audit module directly.
+export { appendInterventionRecord };

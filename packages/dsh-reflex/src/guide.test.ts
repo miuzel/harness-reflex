@@ -83,10 +83,10 @@ test('the embedded guide is the repository document, byte for byte', () => {
   assert.deepEqual(generated<string[]>('GUIDE_LANGUAGES'), ['zh', 'en']);
 });
 
-test('both guide revisions document the same twelve sections', () => {
+test('both guide revisions document the same thirteen sections', () => {
   const zh = readFileSync(PATHS.zh, 'utf8');
   const en = readFileSync(PATHS.en, 'utf8');
-  const numbers = Array.from({ length: 12 }, (_, index) => index + 1);
+  const numbers = Array.from({ length: 13 }, (_, index) => index + 1);
   assert.deepEqual(sectionNumbers(zh), numbers, 'the Chinese guide lost or reordered a section');
   assert.deepEqual(sectionNumbers(en), numbers, 'the English guide lost or reordered a section');
 
@@ -108,6 +108,9 @@ test('both guide revisions document the same twelve sections', () => {
     'reflex_gate',
     'reflex_prune',
     'reflex_detect_stagnation',
+    'interventions.mode',
+    'actualSavedTokens',
+    'fail-open',
     'reflex_route',
     'reflex_status_ledger'
   ];

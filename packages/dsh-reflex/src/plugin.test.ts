@@ -68,6 +68,7 @@ test('resolveConfig validates and fills every field', () => {
     'backend',
     'calibrationPath',
     'effort',
+    'interventions',
     'ledgerPath',
     'pruneThreshold',
     'routing',

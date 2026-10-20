@@ -27,6 +27,7 @@ import type {
 import type { ResolvedReflexConfig } from './config.js';
 import { resolveApiKey } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
+import type { InterventionEngine } from './interventions.js';
 import { VirtualModelRouter } from './router.js';
 
 /** Payload of the `choice` operation, mirroring the stdio MCP surface. */
@@ -81,6 +82,7 @@ export class ReflexRuntime {
 
   #disposed = false;
   #surface: readonly string[] = [];
+  #interventions?: InterventionEngine;
 
   /**
    * @param config - resolved plugin configuration.
@@ -295,6 +297,23 @@ export class ReflexRuntime {
     return this.effortStatusFeed.statusLine(agentId);
   }
 
+  /**
+   * Attach the automatic-intervention engine of this activation.
+   *
+   * Set by the plugin lifecycle right after the listeners are installed, so the
+   * panel and the tests read the same engine the hooks drive. Absent when every
+   * capability is `off`: nothing is installed, and nothing is reported.
+   * @param engine - the engine behind this activation's listeners.
+   */
+  attachInterventions(engine: InterventionEngine | undefined): void {
+    this.#interventions = engine;
+  }
+
+  /** The automatic-intervention engine, when this activation installed one. */
+  get interventions(): InterventionEngine | undefined {
+    return this.#interventions;
+  }
+
   /** Whether the owning plugin activation has been disposed. */
   get disposed(): boolean {
     return this.#disposed;
@@ -304,6 +323,11 @@ export class ReflexRuntime {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    // No residue on unload: the per-agent detection state, the reduction memo,
+    // and the accounts of the intervention engine are dropped with the runtime,
+    // exactly like the effort feed and the ledger.
+    this.#interventions?.reset();
+    this.#interventions = undefined;
     this.effortStatusFeed.clear();
     this.ledger.clear();
   }

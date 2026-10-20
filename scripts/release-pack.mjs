@@ -424,12 +424,23 @@ if (!skipInstall) {
   fs.writeFileSync(path.join(pluginScratch, 'package.json'), `${JSON.stringify({ name: 'reflex-plugin-smoke', private: true, version: '0.0.0', type: 'module' }, null, 2)}\n`);
   const pluginImport = run(
     process.execPath,
-    ['--input-type=module', '-e', "const m = await import('dsh-reflex'); console.log(JSON.stringify({ apply: typeof m.apply, keys: Object.keys(m).sort() }));"],
+    [
+      '--input-type=module',
+      '-e',
+      "const m = await import('dsh-reflex'); console.log(JSON.stringify({ apply: typeof m.apply, reader: typeof m.readPrunedOriginal, locator: typeof m.pruneLocator, keys: Object.keys(m).sort() }));"
+    ],
     { cwd: pluginScratch }
   );
   const pluginExports = JSON.parse(pluginImport.stdout.trim().split('\n').pop());
-  smoke.plugin = { linked, apply: pluginExports.apply };
+  smoke.plugin = { linked, apply: pluginExports.apply, reader: pluginExports.reader };
   check('smoke: the extracted plugin resolves and exposes apply()', pluginExports.apply === 'function' && linked.includes('@deepseek-ai'), `linked ${linked.join(', ')}`);
+  // The user guide tells a reader to import the retrieval API from the package root,
+  // so the installed root — not an internal subpath — has to carry it.
+  check(
+    'smoke: the extracted plugin exposes the documented retrieval API from its root',
+    pluginExports.reader === 'function' && pluginExports.locator === 'function',
+    `reader ${String(pluginExports.reader)}, locator ${String(pluginExports.locator)}`
+  );
 } else {
   check('smoke: skipped on request', true, '--skip-install');
 }

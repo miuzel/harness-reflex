@@ -252,7 +252,116 @@ intent and context before each real API request, asks System 1 for the
 
 ---
 
-## 7. Settings panel (DSH Settings UI)
+## 7. Automatic intervention gates (`off` / `observe` / `active`)
+
+The plugin can intervene on its own through the Host's native hooks, **without the
+model calling any `reflex_*` tool**. There is exactly one switch, `interventions.mode`, taking `off`,
+`observe` or `active`, and it defaults to `observe`:
+
+```yaml
+interventions:
+  mode: observe        # off | observe | active
+  capabilities:        # optional per-capability override; inherit follows mode
+    stagnation: inherit
+    prune: inherit
+    gate: inherit
+    closing: inherit
+  maxInterventionsPerTurn: 3
+  maxJudgmentsPerTurn: 3
+  maxJudgmentsPerSession: 20
+```
+
+| Mode | Behaviour |
+| --- | --- |
+| `off` | No hook listener is registered at all; tool execution is byte-identical to running without the plugin |
+| `observe` (default) | Full detection and judging, accounting only: no content rewriting, no injected message, no refused tool, no steer |
+| `active` | The full chain: a repeated call is refused before it runs, an oversized result is pruned before it enters the context, a repeated failure is rewritten into corrective feedback, and a turn closing on contradicted evidence is objected to |
+
+| Capability | Hook | What `active` does |
+| --- | --- | --- |
+| `stagnation` | `tools/pre-execute`, `agent/pre-step` | After a confirmed repetition or oscillation, refuses that call or attaches corrective context to the next step |
+| `prune` | `tools/post-execute` | For a result above the threshold, retains the original first and then rewrites: the original goes into the session log under a locator, and the replacement keeps head and tail and names that locator |
+| `gate` | `tools/post-execute` | Rewrites the result into corrective feedback once one call has failed repeatedly; failure is read from the tool source's structured exit status or the Host's exit badge, never from wording |
+| `closing` | `agent/turn-stopping` | Re-checks the turn's claims against its evidence with `reflex_gate` and steers once when they contradict |
+
+### How to get a pruned original back
+
+`active` pruning retains first and replaces second, and that order is not a figure of speech:
+
+1. the replacement is built only after the judgment passed **and** retention succeeded;
+2. the original is written into the session log as a `plugin:dsh-reflex/pruned-original`
+   record (the Host's `appendPluginRecord`); it never enters the model-visible surface, and
+   `fork` / `resume` carry it with the rest of the log;
+3. the replacement names the locator `plugin:dsh-reflex/pruned-original#<digest>` in its
+   middle, so the model can always ask for the omitted part;
+4. when retention fails (no session, a missing log, a failed read-back check) **nothing is
+   replaced** and no `actualSavedTokens` is reported — the result stays byte-identical
+   (recorded as `retention-failed`; the judgment was really paid for, and is still booked).
+
+Retrieval is a read of the session events under that locator:
+
+```ts
+import { readPrunedOriginal } from 'dsh-reflex';
+
+const record = readPrunedOriginal(session.ownEvents(), locator);
+record?.text;    // the original, byte for byte
+record?.chars;   // the size it was retained at
+record?.digest;  // the digest the decision was recorded under
+```
+
+The `pruneFloorRatio` floor (0.5 by default) is the **smallest share of the original the
+installed text may keep**: a judged candidate below it is padded with head and tail context
+up to that share, and the middle diagnostics the judgment chose are kept whole — the floor
+never drops them. Retention has boundaries: a payload with fewer than four newlines (under
+five lines) or more than 100 000 characters is not pruned at all (recorded as
+`unsupported-payload` / `retention-too-large`), so single-line output and oversized logs pass
+through untouched; a payload that repeats reuses the copy retained the first time instead of
+writing a second one.
+
+### Cost and traceability
+
+- The ledger is split by `mode` and by `capability`: `plans` (decisions taken),
+  `applied` (decisions executed), `judgments` / `memoHits`, `judgeTokens`,
+  `originalTokens` / `candidateTokens` / `potentialSavedTokens` (what could be
+  saved) / `actualSavedTokens` (what really stopped entering the context);
+- `observe` always reports `actualSavedTokens` 0, and its `potentialSavedTokens`
+  matches `active` on the same input, item by item;
+- Judging cost is separated: `localLatencyMs` (local arbitration) versus
+  `remoteLatencyMs` (backend judgment);
+- Every pruning record carries the replaced original's `digest`, its `turn`/`step` and its
+  `originalLocator`; that locator reads the original back byte for byte (see "How to get a
+  pruned original back" above);
+- Retention is a precondition of replacement: when it fails nothing is replaced and no
+  `actualSavedTokens` is reported, and `plans` does not claim a reduction that never happened;
+- `off` is strictly zero behaviour: no listener, no sampling, no judgment — byte-identical to
+  running without the plugin;
+- The judgment cache is keyed by turn plus trailing window: one question costs one
+  judgment per turn. `maxJudgmentsPerTurn`, `maxJudgmentsPerSession` and
+  `maxInterventionsPerTurn` bound judgments per turn, judgments per session and
+  interventions per turn;
+- Interventions for one `(agent, call signature)` are de-duplicated within a turn,
+  and the result of a call this plugin refused is never judged a second time;
+- This plugin's own eight tools are never judged — their output is already the
+  optimizer's — so the frozen `reflex_*` payloads are unaffected.
+
+### Safety and rollback
+
+- **fail-open**: any judging step that throws hands the downstream result on
+  unchanged (recorded as `planning-error`); a tool call never fails because of it;
+- **failure is never inferred from wording**: the structured `exitCode`/`signal` decides, then
+  the exit badge the Host appends as the last line; the word "failed" inside an ordinary result
+  is not a failure and never blocks a legitimate retry;
+- **Monotonic permission**: `tools/pre-execute` only ever appends a `deny` to a downstream
+  `allow`; an `ask`/`deny`/`cancel` from downstream is returned as the same object, with its
+  `info` intact — never loosened, never overwritten;
+- **Session isolation**: detection windows, verdict caches and budgets are booked
+  per agent and never shared between agents;
+- **No residue**: unloading the plugin detaches every listener and clears the
+  engine's state; the ledger stays in memory unless `ledgerPath` is set.
+
+---
+
+## 8. Settings panel (DSH Settings UI)
 
 The plugin declares its browser half through `dsh.client` and registers into the
 `settings.section` slot:
@@ -275,7 +384,7 @@ The plugin declares its browser half through `dsh.client` and registers into the
 
 ---
 
-## 8. MCP tools ↔ DSH native tools
+## 9. MCP tools ↔ DSH native tools
 
 Both forms expose the **same eight tools** with identical arguments and payloads;
 only registration and call overhead differ.
@@ -304,7 +413,7 @@ Differences:
 
 ---
 
-## 9. Decision ledger and audit
+## 10. Decision ledger and audit
 
 Every judgement appends one JSONL record (`type` is one of `gate`, `prune`,
 `stagnation`, `route`, `model-route`, `effort`, `choice`) carrying the backend,
@@ -323,7 +432,7 @@ node dist/cli/index.js ledger      # terminal summary
 
 ---
 
-## 10. Tests and release
+## 11. Tests and release
 
 ```bash
 npm test                 # root package: ledger / score / MCP surface / packaging manifest
@@ -353,7 +462,7 @@ stdio MCP `tools/list` for real.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
@@ -367,7 +476,7 @@ stdio MCP `tools/list` for real.
 
 ---
 
-## 12. Version and compatibility
+## 13. Version and compatibility
 
 - Version: `harness-reflex` and `dsh-reflex` ship together at v0.1.0-alpha.2;
 - Node: `>= 18` (root package `engines`); DSH Host dependencies `@deepseek-ai/*@0.2.1-alpha.4`;
