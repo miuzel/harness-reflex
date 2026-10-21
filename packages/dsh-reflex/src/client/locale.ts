@@ -66,7 +66,9 @@ export const zh = {
   labelEffortEnabled: '启用自适应推理强度',
   effortDisabledHint: '关闭后不再做自适应判定，也不再注入 reflex 档位；已写死的具体档位原样下发。',
   effortUnset: '不干预（不设置 reasoningEffort）',
-  effortHint: 'reflex / auto 让每轮自行决策，选择具体档位则固定下发该档位。',
+  effortAdaptive: 'Reflex（自适应）',
+  effortHint:
+    '「不干预」完全不改写 reasoningEffort；模型选择器里由插件注入的「Reflex (Auto)」档位仍可主动选中，选中即每轮自适应；显式选择具体档位时照常原样下发。',
   effortLatest: '最近一次自适应决策',
   effortNoDecision: '本次激活尚未产生自适应决策。',
   effortDecisions: '自适应决策数',
@@ -109,7 +111,7 @@ export const zh = {
   helpEffortEnabled:
     '用途：是否允许按轮自适应决定推理强度；格式：布尔开关；默认：开启；留空：未写时按开启处理，关闭后不再做自适应判定、也不再注入 reflex 档位。',
   helpEffortSetting:
-    '用途：决定每轮下发的推理强度；格式：留空、reflex（别名 auto）或一个具体档位；默认：不干预；留空：完全不设置 reasoningEffort，把选择权交给调用方。',
+    '用途：决定每轮下发的推理强度；格式：留空、Reflex（自适应，旧值 auto 等价）或一个具体档位 off/minimal/low/medium/high/max；默认：不干预；留空：插件完全不改写 reasoningEffort，交给模型或供应商默认，但模型选择器里由插件注入的「Reflex (Auto)」档位仍然存在，用户可以主动选中它、选中即按每轮自适应执行，而显式选择具体档位时照常原样下发；范围：minimal 与 max 取决于目标模型声明的档位集合，模型未声明时按既有规则降档或清除。',
   helpEffortFallback:
     '用途：System One 与线索分类器都没有证据时使用的兜底档位；格式：一个自适应档位；默认：medium；范围：必须是已提供的自适应档位之一，留空按默认处理。',
   helpEffortMinConfidence:
@@ -397,7 +399,9 @@ export const en: Record<keyof typeof zh, string> = {
   effortDisabledHint:
     'Off stops every adaptive decision and withdraws the injected reflex level; a concrete level that was pinned is still dispatched as written.',
   effortUnset: 'Leave untouched (never set reasoningEffort)',
-  effortHint: 'reflex / auto lets every turn decide for itself; a concrete level pins the dispatched effort.',
+  effortAdaptive: 'Reflex (adaptive)',
+  effortHint:
+    '"Leave untouched" never rewrites reasoningEffort; the injected "Reflex (Auto)" level is still there to pick in the model selector, and picking it adapts every turn; an explicit concrete level is dispatched as written.',
   effortLatest: 'Latest adaptive decision',
   effortNoDecision: 'No adaptive decision yet in this activation.',
   effortDecisions: 'Adaptive decisions',
@@ -442,7 +446,7 @@ export const en: Record<keyof typeof zh, string> = {
   helpEffortEnabled:
     'Use: whether each turn may adapt its reasoning effort; Format: boolean switch; Default: on; Blank: treated as on when omitted, and off withdraws adaptive decisions and the injected reflex level.',
   helpEffortSetting:
-    'Use: the reasoning effort dispatched each turn; Format: blank, reflex (alias auto), or one concrete level; Default: leave untouched; Blank: never set reasoningEffort, leaving the choice to the caller.',
+    'Use: the reasoning effort dispatched each turn; Format: blank, Reflex (adaptive, the legacy auto is equivalent), or one concrete level off/minimal/low/medium/high/max; Default: leave untouched; Blank: the plugin never rewrites reasoningEffort and leaves the model or vendor default in place, yet the "Reflex (Auto)" level injected into the model selector still exists and the user can still choose it, which then adapts every turn, while an explicit concrete level is dispatched as written; Range: whether minimal and max are available depends on the levels the target model declares, and unsupported levels are snapped or cleared by the existing rules.',
   helpEffortFallback:
     'Use: the level used when System One and the cue classifier both lack evidence; Format: one adaptive level; Default: medium; Range: must be an offered adaptive level, and blank means the default.',
   helpEffortMinConfidence:

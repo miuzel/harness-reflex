@@ -16,9 +16,9 @@ import { createElement as h, useCallback, useEffect, useMemo, useRef, useState, 
 
 import {
   ADAPTIVE_EFFORT_LEVELS,
+  ADAPTIVE_EFFORT_POLICY,
   BACKEND_CHOICES,
   EFFORT_LEVELS,
-  EFFORT_TRIGGERS,
   INTERVENTION_CAPABILITIES,
   INTERVENTION_MODES,
   INTERVENTION_SETTINGS,
@@ -28,6 +28,7 @@ import {
   interpolate,
   ledgerRows,
   levelTone,
+  normalizeEffortPolicy,
   overviewMetrics,
   panelStatus,
   recommendedToolSwitches,
@@ -535,11 +536,11 @@ function LevelChip(props: { level: string; label?: string }): ReactNode {
   );
 }
 
-/** Options of an effort-policy select. */
+/** Options of an effort-policy select: leave untouched, one adaptive entry, then pinned levels. */
 function effortPolicyOptions(t: Translate): { value: string; label: string }[] {
   return [
     { value: '', label: t('effortUnset') },
-    ...EFFORT_TRIGGERS.map((value) => ({ value, label: value })),
+    { value: ADAPTIVE_EFFORT_POLICY, label: t('effortAdaptive') },
     ...EFFORT_LEVELS.map((value) => ({ value, label: value }))
   ];
 }
@@ -833,7 +834,7 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
             t,
             path: 'effort.setting',
             hint: t('effortHint'),
-            value: draft.effort.setting,
+            value: normalizeEffortPolicy(draft.effort.setting),
             options: effortPolicyOptions(t),
             disabled,
             onChange: (value) => setEffort({ setting: value })

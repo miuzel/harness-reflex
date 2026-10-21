@@ -23,11 +23,34 @@ export const EFFORT_LEVELS: readonly string[] = ['off', 'minimal', 'low', 'mediu
 /** Levels the adaptive controller may choose from, mirroring the Host vocabulary. */
 export const ADAPTIVE_EFFORT_LEVELS: readonly string[] = ['off', 'low', 'medium', 'high'];
 
-/** `reasoningEffort` sentinels that ask for a per-turn decision, mirroring the Host. */
+/**
+ * `reasoningEffort` sentinels that ask for a per-turn decision, mirroring the
+ * Host. `auto` is a legacy alias of `reflex`: it stays in this recognised set so
+ * an authored document that still carries it parses, but the page offers only
+ * {@link ADAPTIVE_EFFORT_POLICY} — two names for one behaviour would read as two
+ * choices.
+ */
 export const EFFORT_TRIGGERS: readonly string[] = ['reflex', 'auto'];
 
+/** The single adaptive entry the panel offers; the `auto` alias folds onto it. */
+export const ADAPTIVE_EFFORT_POLICY = 'reflex';
+
 /** Effort policies the panel offers: leave untouched, adapt per turn, or pin a level. */
-export const EFFORT_POLICIES: readonly string[] = ['', ...EFFORT_TRIGGERS, ...EFFORT_LEVELS];
+export const EFFORT_POLICIES: readonly string[] = ['', ADAPTIVE_EFFORT_POLICY, ...EFFORT_LEVELS];
+
+/**
+ * Fold the legacy `auto` alias onto the panel's canonical adaptive sentinel.
+ *
+ * Configuration compatibility lives in the Host (which still accepts `auto`);
+ * the page needs one name, so every path that seeds, validates, shows, or writes
+ * an effort policy goes through here.
+ * @param setting - authored or resolved `reasoningEffort` value.
+ * @returns the value the page edits and writes.
+ */
+export function normalizeEffortPolicy(setting: string): string {
+  const trimmed = setting.trim();
+  return trimmed === 'auto' ? ADAPTIVE_EFFORT_POLICY : trimmed;
+}
 
 /** Backend implementations the panel offers. */
 export const BACKEND_CHOICES: readonly string[] = ['auto', 'mock', 'jev', 'vllm'];
@@ -359,7 +382,7 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
   if (!draft.effort.setting && snapshot.effort?.setting) {
     draft.effort = {
       ...draft.effort,
-      setting: snapshot.effort.setting,
+      setting: normalizeEffortPolicy(snapshot.effort.setting),
       fallback: snapshot.effort.fallback || draft.effort.fallback,
       minConfidence: snapshot.effort.minConfidence !== undefined ? String(snapshot.effort.minConfidence) : draft.effort.minConfidence
     };
@@ -396,7 +419,7 @@ export function draftFromConfig(value: unknown): PanelDraft {
       pools: poolsFromRouting(routing)
     },
     effort: {
-      setting: asText(effort.reasoningEffort),
+      setting: normalizeEffortPolicy(asText(effort.reasoningEffort)),
       fallback: asText(effort.fallback) || EMPTY_DRAFT.effort.fallback,
       minConfidence: asText(effort.minConfidence) || EMPTY_DRAFT.effort.minConfidence,
       enabled: asBoolean(effort.enabled, EMPTY_DRAFT.effort.enabled)
@@ -496,7 +519,9 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   }
   if (draft.routing.enabled && !draft.routing.pools.some((pool) => pool.entries.length > 0)) errors.push('errPoolEmpty');
 
-  if (!EFFORT_POLICIES.includes(draft.effort.setting)) errors.push('errEffortSetting');
+  // Accept a draft that still carries the `auto` alias and fold it before the
+  // policy check, so compat never depends on which path seeded the draft.
+  if (!EFFORT_POLICIES.includes(normalizeEffortPolicy(draft.effort.setting))) errors.push('errEffortSetting');
   if (!ADAPTIVE_EFFORT_LEVELS.includes(draft.effort.fallback)) errors.push('errFallback');
   const minConfidence = asNumber(draft.effort.minConfidence);
   if (minConfidence === undefined || minConfidence < 0 || minConfidence > 1) errors.push('errMinConfidence');
@@ -634,7 +659,9 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
           path: [group],
           value: {
             enabled: draft.effort.enabled,
-            ...(present(draft.effort.setting) === undefined ? {} : { reasoningEffort: draft.effort.setting.trim() }),
+            ...(present(draft.effort.setting) === undefined
+              ? {}
+              : { reasoningEffort: normalizeEffortPolicy(draft.effort.setting) }),
             ...(present(draft.effort.fallback) === undefined ? {} : { fallback: draft.effort.fallback.trim() }),
             ...(asNumber(draft.effort.minConfidence) === undefined ? {} : { minConfidence: asNumber(draft.effort.minConfidence) })
           }
