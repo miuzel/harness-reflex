@@ -1772,3 +1772,83 @@ test('the (?) disclosure is keyboard-operable and its text is always readable', 
 });
 
 //#endregion
+
+//#region degraded System One banner
+
+/** The degraded banner of the rendered tree, if any. */
+function degradedBanner(tree: unknown): Element | undefined {
+  return elements(tree).find((element) => element.props['data-reflex-degraded'] === 'true');
+}
+
+test('a degraded System One backend shows a bilingual reason banner on every tab and it disappears on recovery', async () => {
+  for (const language of ['zh', 'en'] as const) {
+    const { form } = settingsForm(AUTHORED);
+    const degradedFacts: PanelRuntimeFacts = {
+      ...facts(true),
+      systemOneHealth: {
+        available: false,
+        lastFailureReason: 'fetch failed',
+        lastFailureAt: '2024-03-04T05:06:07.000Z',
+        consecutiveFailures: 2
+      }
+    };
+    const mounted = await mountPanel({ facts: degradedFacts, form, language });
+    try {
+      let tree = await mounted.runtime.flush();
+      const banner = degradedBanner(tree);
+      assert.ok(banner !== undefined, `${language}: no degraded banner in the header`);
+      const copy = textOf(banner);
+      assert.match(copy, /fetch failed/, `${language}: the banner does not name the reason`);
+      if (language === 'zh') {
+        assert.match(copy, /降级/, 'the Chinese banner does not say decisions degraded');
+        assert.match(copy, /恢复后本提示自动消失/, 'the Chinese banner does not promise automatic recovery');
+      } else {
+        assert.match(copy, /degraded/i, 'the English banner does not say decisions degraded');
+        assert.match(copy, /disappears automatically/i, 'the English banner does not promise automatic recovery');
+      }
+
+      // The banner belongs to the header, not to one page: it survives tab switches.
+      openTab(mounted.tree, language === 'zh' ? '决策账本' : 'Decision ledger');
+      tree = await mounted.runtime.flush();
+      assert.ok(degradedBanner(tree) !== undefined, `${language}: the banner vanished on another tab`);
+
+      // Its refresh button pulls a fresh snapshot.
+      const refresh = elements(banner).find(
+        (element) => element.type === 'button' && textOf(element).includes(language === 'zh' ? '刷新' : 'Refresh')
+      );
+      assert.ok(refresh !== undefined, `${language}: the banner has no refresh button`);
+      const before = mounted.observed.calls.filter((call) => call.url.includes('/panel')).length;
+      fire(refresh, 'onClick');
+      await mounted.runtime.flush();
+      const after = mounted.observed.calls.filter((call) => call.url.includes('/panel')).length;
+      assert.ok(after > before, `${language}: the refresh button did not re-read the snapshot`);
+    } finally {
+      mounted.unmount();
+    }
+  }
+});
+
+test('the banner is absent while the backend is healthy or when it publishes no health', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const healthy: PanelRuntimeFacts = {
+    ...facts(true),
+    systemOneHealth: { available: true, consecutiveFailures: 0 }
+  };
+  const mountedHealthy = await mountPanel({ facts: healthy, form });
+  try {
+    const tree = await mountedHealthy.runtime.flush();
+    assert.equal(degradedBanner(tree), undefined, 'a healthy backend still shows the degraded banner');
+  } finally {
+    mountedHealthy.unmount();
+  }
+
+  const mountedUnknown = await mountPanel({ facts: facts(true), form });
+  try {
+    const tree = await mountedUnknown.runtime.flush();
+    assert.equal(degradedBanner(tree), undefined, 'an in-process backend is misread as an outage');
+  } finally {
+    mountedUnknown.unmount();
+  }
+});
+
+//#endregion

@@ -639,17 +639,25 @@ test('prune honours shadowMode by returning the untouched raw output', async () 
   }
 });
 
-test('a failing segment judgment falls back to the local candidate and records why', async () => {
+test('a failing segment judgment falls back to a named degraded path and records why', async () => {
   const stub = stubFetch(() => ({ status: 500, statusText: 'Internal Server Error' }));
   try {
-    const result = await judgingBackend(1).prune({ rawOutput: LOG, intent: 'find the test failure' });
+    const backend = judgingBackend(1);
+    const result = await backend.prune({ rawOutput: LOG, intent: 'find the test failure' });
     const expected = pickLocalPruneCandidate(buildPruneCandidates(LOG, 'find the test failure'));
+    // The degraded path returns the smaller of the local candidate and the
+    // template compression; for a lint log the deterministic filter wins.
     assert.equal(result.processedOutput, expected?.text);
     assert.ok(result.processedOutput.includes('AssertionError: expected 3 to equal 4'));
     assert.ok(result.processedOutput.length < LOG.length);
-    assert.equal(result.judgePath, 'local');
+    assert.equal(result.judgePath, 'fallback');
+    assert.equal(result.compression, 'local');
     assert.ok((result.fallbackReason ?? '').length > 0, 'the fallback reason must be observable');
     assert.equal(result.shadow, false);
+    const health = backend.health();
+    assert.equal(health.available, false, 'a failed request must mark the backend unavailable');
+    assert.equal(health.consecutiveFailures, 1);
+    assert.match(health.lastFailureReason ?? '', /500/, 'the health record keeps the failure reason');
   } finally {
     stub.restore();
   }

@@ -98,6 +98,7 @@ export type {
   PanelRuntimeFacts,
   PanelSnapshot,
   PanelSource,
+  PanelSystemOneHealth,
   PanelSystemOneView
 } from './panel-api.js';
 export { mountReflexPanel } from './panel-mount.js';

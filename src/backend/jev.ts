@@ -1,5 +1,6 @@
 import {
   ActionStep,
+  BackendHealth,
   ChoiceOption,
   ChoiceRequest,
   ChoiceResponse,
@@ -582,6 +583,110 @@ export function pickLocalPruneCandidate(candidates: readonly PruneCandidate[]): 
 }
 
 /* -------------------------------------------------------------------------- */
+/* Format-independent template compression (fallback path only)                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Lines that always survive a template compression verbatim.
+ *
+ * A degraded run must not lose the line that explains why the run failed, so
+ * these are forced anchors next to the first and last line of the output.
+ */
+const TEMPLATE_DIAGNOSTIC_LINE = /error|failed|FAIL|warn|exception|traceback|assert|exit code [1-9]|non-zero/i;
+
+/** One line standing in for a run of near-identical lines. */
+function templateOmittedMarker(omitted: number): string {
+  return `… [${String(omitted)} similar lines omitted] …`;
+}
+
+/**
+ * Reduce one line to the template later lines are compared against.
+ *
+ * Variable tokens (UUIDs, timestamps, IPs, hex ids, durations, percentages,
+ * floats, plain numbers) become placeholders and runs of whitespace collapse,
+ * so "progress 001" and "progress 002" share a template while two genuinely
+ * different lines do not. The original line is what is printed, never this
+ * string.
+ * @param line - one line of the output.
+ * @returns its shape, whitespace-normalized.
+ */
+export function templateOfLine(line: string): string {
+  let template = line.trim();
+  template = template.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>');
+  template = template.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<time>');
+  template = template.replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>');
+  template = template.replace(/\b0x[0-9a-f]+\b/gi, '<hex>');
+  template = template.replace(/\b[0-9a-f]{8,}\b/gi, '<hex>');
+  template = template.replace(/\b\d{1,2}(?::\d{2}){1,2}(?:[.,]\d+)?\b/g, '<time>');
+  template = template.replace(/\d+(?:\.\d+)?\s?%/g, '<pct>');
+  template = template.replace(/\b\d+(?:\.\d+)?\s?(?:ms|secs?|seconds?|mins?|minutes?|hours?|h)\b/gi, '<duration>');
+  template = template.replace(/\d+\.\d+/g, '<float>');
+  template = template.replace(/\d+/g, '<num>');
+  return template.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Compress a bulk output by its line templates, independent of any format.
+ *
+ * Consecutive lines whose templates match form a run: a run of four or more
+ * keeps its first two and its last line and replaces the rest with one marker.
+ * Consecutive blank lines collapse to one. The first line, the last line and
+ * every diagnostic line survive verbatim. This is the fallback used when System
+ * One cannot judge — it never replaces a real decision.
+ * @param rawOutput - the bulk output to reduce.
+ * @returns the reduced text; never longer than the input.
+ */
+export function compressByTemplate(rawOutput: string): string {
+  if (rawOutput.length === 0) return rawOutput;
+  const lines = rawOutput.split('\n');
+  if (lines.length <= 2) return rawOutput;
+
+  const lastIndex = lines.length - 1;
+  const out: string[] = [];
+  let index = 0;
+
+  while (index <= lastIndex) {
+    const line = lines[index] as string;
+    const blank = line.trim().length === 0;
+    if (blank) {
+      let end = index;
+      while (end + 1 <= lastIndex && (lines[end + 1] as string).trim().length === 0) end++;
+      out.push(index === 0 || end === lastIndex ? line : '');
+      index = end + 1;
+      continue;
+    }
+
+    if (index === 0 || index === lastIndex || TEMPLATE_DIAGNOSTIC_LINE.test(line)) {
+      out.push(line);
+      index += 1;
+      continue;
+    }
+
+    const template = templateOfLine(line);
+    let end = index;
+    while (
+      end + 1 < lastIndex &&
+      (lines[end + 1] as string).trim().length > 0 &&
+      !TEMPLATE_DIAGNOSTIC_LINE.test(lines[end + 1] as string) &&
+      templateOfLine(lines[end + 1] as string) === template
+    ) {
+      end += 1;
+    }
+
+    const run = end - index + 1;
+    if (run >= 4) {
+      out.push(lines[index] as string, lines[index + 1] as string, templateOmittedMarker(run - 3), lines[end] as string);
+    } else {
+      for (let cursor = index; cursor <= end; cursor++) out.push(lines[cursor] as string);
+    }
+    index = end + 1;
+  }
+
+  const compressed = out.join('\n');
+  return compressed.length < rawOutput.length ? compressed : rawOutput;
+}
+
+/* -------------------------------------------------------------------------- */
 /* System One segment judging                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -971,6 +1076,13 @@ export class JevDecisionBackend implements DecisionBackend {
   private readonly timeoutMs: number;
   /** Character count from which pruning judges segments through System One. */
   private readonly pruneJudgeMinChars: number;
+  /**
+   * Health of the gateway conversation of this backend.
+   *
+   * Every request updates it; a success clears the failure fields and resets the
+   * run. It lives in memory only, so a restarted Host starts healthy.
+   */
+  private healthState: BackendHealth = { available: true, consecutiveFailures: 0 };
 
   constructor(config?: JevBackendConfig) {
     this.endpoint = normalizeSystemOneEndpoint(
@@ -992,6 +1104,29 @@ export class JevDecisionBackend implements DecisionBackend {
       'jev-latest';
     this.timeoutMs = config?.timeoutMs || 10000;
     this.pruneJudgeMinChars = resolvePruneJudgeMinChars(config?.pruneJudgeMinChars);
+  }
+
+  /**
+   * Health of the outbound gateway conversation.
+   * @returns a copy of the counters, safe to hand to a panel snapshot.
+   */
+  health(): BackendHealth {
+    return { ...this.healthState };
+  }
+
+  /** Record one successful request: the backend is available again. */
+  private noteSuccess(): void {
+    this.healthState = { available: true, consecutiveFailures: 0 };
+  }
+
+  /** Record one failed request and its reason. */
+  private noteFailure(reason: string): void {
+    this.healthState = {
+      available: false,
+      lastFailureReason: reason,
+      lastFailureAt: new Date().toISOString(),
+      consecutiveFailures: this.healthState.consecutiveFailures + 1
+    };
   }
 
   /**
@@ -1028,7 +1163,11 @@ export class JevDecisionBackend implements DecisionBackend {
       if (!data || typeof data !== 'object' || typeof data.answers !== 'object' || data.answers === null) {
         throw new Error('Jev API response carries no answers object');
       }
+      this.noteSuccess();
       return data;
+    } catch (err) {
+      this.noteFailure(errorMessage(err));
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -1247,6 +1386,29 @@ export class JevDecisionBackend implements DecisionBackend {
     return local.text.length < raw.length ? local.text : raw;
   }
 
+  /**
+   * Reduce the payload when System One cannot judge it.
+   *
+   * Template compression is format-independent, so it still shrinks output the
+   * deterministic line filters cannot (progress art they would drop entirely, a
+   * table whose rows differ only by a number). It is only ever used here, on the
+   * degraded path, and the smaller of it and the local candidates wins.
+   * @param raw - the original output.
+   * @param intent - what the caller is looking for.
+   * @param maxTokens - optional token budget.
+   * @returns the reduced text and which strategy produced it.
+   */
+  private fallbackPruneText(
+    raw: string,
+    intent: string,
+    maxTokens?: number
+  ): { text: string; compression: 'template' | 'local' } {
+    const local = this.localPruneText(raw, intent, maxTokens);
+    const template = compressByTemplate(raw);
+    if (template.length < local.length) return { text: template, compression: 'template' };
+    return { text: local, compression: 'local' };
+  }
+
   /** The per-segment System One path, with the local candidates as its fallback. */
   private async pruneWithSegments(
     req: PruneRequest,
@@ -1272,9 +1434,11 @@ export class JevDecisionBackend implements DecisionBackend {
     try {
       const scores = await this.scoreSegments(judged, segments.length, intent);
       if (scores.size === 0) {
-        return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
-          judgePath: 'local',
+        const fallback = this.fallbackPruneText(raw, intent, req.maxTokens);
+        return this.pruneResponse(raw, fallback.text, req.shadowMode, start, {
+          judgePath: 'fallback',
           fallbackReason: 'System One returned no usable segment score',
+          compression: fallback.compression,
           ...diagnostics
         });
       }
@@ -1283,10 +1447,14 @@ export class JevDecisionBackend implements DecisionBackend {
       const text = balanced !== undefined && balanced.text.length < raw.length ? balanced.text : raw;
       return this.pruneResponse(raw, text, req.shadowMode, start, { judgePath: 'segmented', ...diagnostics });
     } catch (err) {
-      // FAIL-OPEN: the deterministic candidate still prunes; the harness never breaks.
-      return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
-        judgePath: 'local',
+      // FAIL-OPEN: template compression keeps the pruned output useful even when
+      // the deterministic line filters have nothing to drop; the harness never
+      // breaks and never returns the raw blob just because the gateway blinked.
+      const fallback = this.fallbackPruneText(raw, intent, req.maxTokens);
+      return this.pruneResponse(raw, fallback.text, req.shadowMode, start, {
+        judgePath: 'fallback',
         fallbackReason: errorMessage(err),
+        compression: fallback.compression,
         ...diagnostics
       });
     }
@@ -1340,7 +1508,7 @@ export class JevDecisionBackend implements DecisionBackend {
     text: string,
     shadow: boolean | undefined,
     start: number,
-    meta?: Pick<PruneResponse, 'judgePath' | 'fallbackReason' | 'judgedSegments' | 'unjudgedSegments'>
+    meta?: Pick<PruneResponse, 'judgePath' | 'fallbackReason' | 'compression' | 'judgedSegments' | 'unjudgedSegments'>
   ): PruneResponse {
     const originalChars = raw.length;
     const prunedChars = text.length;

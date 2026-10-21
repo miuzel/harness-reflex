@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { CommandResult } from '@deepseek-ai/dsh-commands';
 
 import type { ReflexLedgerResult, ReflexRuntime } from './bridge.js';
+import type { BackendHealth } from './vendor/harness-reflex/index.js';
 
 /**
  * The human command that reads this activation's decision ledger.
@@ -76,6 +77,28 @@ function entryLine(entry: LedgerEntry): string {
 }
 
 /**
+ * Render the degraded-backend notice appended to the command reply, if any.
+ *
+ * The line is bilingual because the panel is, and it stays in the command text:
+ * it is a fact for the person typing `/reflex-ledger`, never a message the agent
+ * reads. A recovered backend returns `undefined`, so the notice disappears on
+ * its own.
+ * @param health - backend health at read time, when the backend tracks it.
+ * @returns the notice line, or `undefined` when the backend is healthy.
+ */
+export function systemOneHealthLine(health: BackendHealth | undefined): string | undefined {
+  if (health === undefined || health.available) return undefined;
+  const reason = health.lastFailureReason ?? 'unknown error';
+  const count = health.consecutiveFailures;
+  const when = health.lastFailureAt === undefined ? '' : `，最近 ${clockOf(health.lastFailureAt)}`;
+  const whenEn = health.lastFailureAt === undefined ? '' : `, latest ${clockOf(health.lastFailureAt)}`;
+  return [
+    `⚠ System One 后端不可用（${reason}，连续 ${String(count)} 次失败${when}）；决策已降级为本地压缩与确定性兜底。`,
+    `System One backend unavailable (${reason}, ${String(count)} consecutive failures${whenEn}); decisions degraded to local compression and deterministic fallback.`
+  ].join(' / ');
+}
+
+/**
  * Render the ledger summary as plain text a person reads in the command output.
  *
  * The aggregate is always printed; the recent decisions are printed newest
@@ -87,12 +110,17 @@ function entryLine(entry: LedgerEntry): string {
  */
 export function formatLedgerReport(result: ReflexLedgerResult): string {
   const { summary } = result;
+  const health = systemOneHealthLine(result.systemOneHealth);
+  const withHealth = (lines: string[]): string => {
+    if (health !== undefined) lines.push(health);
+    return lines.join('\n');
+  };
   if (summary.totalCalls === 0) {
-    return [
+    return withHealth([
       `Reflex 决策账本（${REFLEX_LEDGER_COMMAND}）：暂无记录`,
       '本插件激活以来，System 1 还没有做出任何判定。',
       '第一次判定之后（工具调用或自动干预），这里会给出调用数、时延、节省的 token、门禁结果与停滞告警。'
-    ].join('\n');
+    ]);
   }
 
   const byType = Object.entries(summary.callsByType)
@@ -115,7 +143,7 @@ export function formatLedgerReport(result: ReflexLedgerResult): string {
     lines.push(`最近 ${recent.length} 条决策（最新在前）：`);
     for (const entry of recent) lines.push(entryLine(entry));
   }
-  return lines.join('\n');
+  return withHealth(lines);
 }
 
 /**

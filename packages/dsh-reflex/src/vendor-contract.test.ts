@@ -82,6 +82,39 @@ test('both copies build identical deterministic candidates', async () => {
   const root = await loadRoot();
   for (const raw of [LOG, PROGRESS]) {
     assert.deepEqual(vendor.buildPruneCandidates(raw, INTENT), root.buildPruneCandidates(raw, INTENT));
+    assert.equal(vendor.compressByTemplate(raw), root.compressByTemplate(raw), 'template compression drifted');
+  }
+});
+
+test('both copies fall back to the same template compression when the gateway is unreachable', async () => {
+  const root = await loadRoot();
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new TypeError('fetch failed');
+  }) as unknown as typeof fetch;
+  try {
+    const rootBackend = backendOf(root, 10000);
+    const vendorBackend = backendOf(vendor, 10000);
+    const [rootResult, vendorResult] = await Promise.all([
+      rootBackend.prune({ rawOutput: PROGRESS, intent: INTENT }),
+      vendorBackend.prune({ rawOutput: PROGRESS, intent: INTENT })
+    ]);
+
+    for (const result of [rootResult, vendorResult]) {
+      assert.equal(result.judgePath, 'fallback');
+      assert.equal(result.compression, 'template');
+      assert.ok(result.prunedChars < result.originalChars, 'the degraded path returned the raw blob');
+      assert.ok((result.judgedSegments ?? 0) > 0, 'the degraded path skipped segmentation');
+      assert.match(result.fallbackReason ?? '', /fetch failed/);
+    }
+    assert.equal(rootResult.processedOutput, vendorResult.processedOutput, 'the two copies compress differently');
+    assert.equal(rootResult.prunedChars, vendorResult.prunedChars);
+    assert.equal(rootResult.reductionPercentage, vendorResult.reductionPercentage);
+    assert.equal(rootBackend.health().available, false);
+    assert.equal(vendorBackend.health().available, false);
+    assert.equal(rootBackend.health().consecutiveFailures, vendorBackend.health().consecutiveFailures);
+  } finally {
+    globalThis.fetch = original;
   }
 });
 

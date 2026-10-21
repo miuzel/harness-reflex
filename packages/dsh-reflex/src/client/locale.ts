@@ -17,6 +17,9 @@ export const zh = {
   nav: 'Reflex 决策运行时',
   title: 'Reflex · System One 决策运行时',
   subtitle: '虚拟模型池、自适应推理强度、System 1 后端与决策账本',
+  systemOneDegraded:
+    'System One 后端不可用（{reason}），决策已降级为本地压缩与确定性兜底；恢复后本提示自动消失。',
+  systemOneDegradedUnknown: '未知原因',
   tabOverview: '概览',
   tabRouting: '虚拟 Provider',
   tabEffort: '推理强度',
@@ -315,6 +318,9 @@ export const en: Record<keyof typeof zh, string> = {
   nav: 'Reflex runtime',
   title: 'Reflex · System One decision runtime',
   subtitle: 'Virtual model pools, adaptive reasoning effort, System 1 backend, decision ledger',
+  systemOneDegraded:
+    'The System One backend is unavailable ({reason}); decisions have degraded to local template compression and deterministic fallbacks. This notice disappears automatically when the backend recovers.',
+  systemOneDegradedUnknown: 'unknown error',
   tabOverview: 'Overview',
   tabRouting: 'Virtual provider',
   tabEffort: 'Reasoning effort',

@@ -105,6 +105,8 @@ export function panelFacts(
 
   const modelCatalog = ctx ? catalogCache.get(ctx) : undefined;
 
+  const systemOneHealth = runtime.systemOneHealth();
+
   return {
     config: runtime.config,
     backendName: runtime.backendName,
@@ -116,6 +118,7 @@ export function panelFacts(
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
     apiKeyPresent: resolveApiKey(runtime.config.systemOne, env) !== undefined,
+    ...(systemOneHealth === undefined ? {} : { systemOneHealth }),
     ...(modelCatalog === undefined ? {} : { modelCatalog })
   };
 }

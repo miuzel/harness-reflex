@@ -979,6 +979,16 @@ export interface PanelSnapshotLike {
     apiKeyEnv?: string;
     apiKeyPresent?: boolean;
     timeoutMs?: number;
+    /**
+     * Live gateway health. Absent for a backend that answers in-process; only
+     * `available === false` means the decisions are degraded.
+     */
+    health?: {
+      available?: boolean;
+      lastFailureReason?: string;
+      lastFailureAt?: string;
+      consecutiveFailures?: number;
+    };
   };
   /** Effective automatic-intervention state, as the runtime resolved it. */
   interventions?: {
@@ -1029,6 +1039,36 @@ export interface PanelSnapshotLike {
     clearable?: boolean;
   };
   modelCatalog?: Array<{ id: string; name?: string; models: Array<{ id: string; name?: string }> }>;
+}
+
+/** Facts of a degraded System One backend, as the banner renders them. */
+export interface SystemOneDegradedView {
+  /** Why the last request failed; empty when the Host carried no reason. */
+  reason: string;
+  /** Consecutive failures, as the Host counted them. */
+  consecutiveFailures: number;
+  /** ISO timestamp of the last failure, when known. */
+  lastFailureAt?: string;
+}
+
+/**
+ * Whether the snapshot says System One is degraded.
+ *
+ * Only an explicit `available: false` qualifies: a mock backend publishes no
+ * health block at all, and "no health" must never render as an outage.
+ * @param snapshot - the live snapshot.
+ * @returns the facts to show, or `undefined` when the backend is healthy/unknown.
+ */
+export function systemOneDegraded(snapshot: PanelSnapshotLike | null): SystemOneDegradedView | undefined {
+  const health = snapshot?.systemOne?.health;
+  if (health === undefined || health.available !== false) return undefined;
+  return {
+    reason: typeof health.lastFailureReason === 'string' ? health.lastFailureReason : '',
+    consecutiveFailures: typeof health.consecutiveFailures === 'number' ? health.consecutiveFailures : 0,
+    ...(typeof health.lastFailureAt === 'string' && health.lastFailureAt.length > 0
+      ? { lastFailureAt: health.lastFailureAt }
+      : {})
+  };
 }
 
 /** Badges describing one snapshot. */

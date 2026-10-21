@@ -77,13 +77,34 @@ export interface PruneResponse {
    * `local` used the deterministic candidates (small payload, or a fallback).
    * Optional so existing response literals stay valid.
    */
-  judgePath?: 'segmented' | 'local';
+  judgePath?: 'segmented' | 'local' | 'fallback';
   /** Why the segmented path fell back to the local candidates, when it did. */
   fallbackReason?: string;
+  /** How the returned text was reduced when the judging path degraded. */
+  compression?: 'segmented' | 'local' | 'template';
   /** Segments handed to System One in one request (0 when the local path ran). */
   judgedSegments?: number;
   /** Segments beyond the per-request limit, kept deterministically instead. */
   unjudgedSegments?: number;
+}
+
+/**
+ * In-memory health of one System One backend.
+ *
+ * Every request the backend sends updates it: a success clears the failure
+ * fields, a failure records when and why it happened and counts the run. It is
+ * deliberately not persisted — a restarted Host starts healthy and discovers
+ * the truth with its first call.
+ */
+export interface BackendHealth {
+  /** Whether the most recent request succeeded (true before the first request). */
+  available: boolean;
+  /** Reason of the most recent failure; cleared by a success. */
+  lastFailureReason?: string;
+  /** ISO timestamp of the most recent failure; cleared by a success. */
+  lastFailureAt?: string;
+  /** Consecutive failed requests; a single success resets it to 0. */
+  consecutiveFailures: number;
 }
 
 export interface ActionStep {
@@ -171,6 +192,13 @@ export interface DecisionBackend {
   prune(req: PruneRequest): Promise<PruneResponse>;
   checkStagnation(req: StagnationCheckRequest): Promise<StagnationCheckResponse>;
   route(req: RouteRequest): Promise<RouteResponse>;
+  /**
+   * Health of the backend's outbound conversation, when it has one.
+   *
+   * In-process backends (mock) serve every call locally and simply omit this:
+   * absence means "healthy by construction", not "unknown".
+   */
+  health?(): BackendHealth;
 }
 
 export type SystemOneBackend = DecisionBackend;

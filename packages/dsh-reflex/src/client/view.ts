@@ -31,6 +31,7 @@ import {
   overviewMetrics,
   panelChips,
   recommendedToolSwitches,
+  systemOneDegraded,
   type PanelDraft,
   type ToolAdvice
 } from './panel';
@@ -77,6 +78,18 @@ const S = {
     lineHeight: '1.5'
   },
   header: { display: 'flex', flexDirection: 'column', gap: '6px' },
+  banner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+    border: `1px solid ${token('--dsw-alias-state-warn-primary', '#fbbf24')}`,
+    borderRadius: '6px',
+    padding: '8px 10px',
+    background: token('--dsw-alias-bg-layer-2', 'rgba(251,191,36,.08)'),
+    color: token('--dsw-alias-state-warn-primary', '#fbbf24'),
+    fontSize: '12px'
+  },
   titleRow: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
   title: { fontSize: '15px', fontWeight: 600, margin: 0 },
   subtitle: { color: token('--dsw-alias-label-tertiary', '#8a8a8a'), fontSize: '12px' },
@@ -514,6 +527,8 @@ function adaptiveLevelOptions(): { value: string; label: string }[] {
 function Header(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
   const { t, state, store } = props;
   const chips = panelChips(state.snapshot);
+  const degraded = systemOneDegraded(state.snapshot);
+  const degradedReason = degraded === undefined || degraded.reason.length === 0 ? t('systemOneDegradedUnknown') : degraded.reason;
   const canWrite = state.writable && state.configStatus === 'ready';
   return h(
     'header',
@@ -536,6 +551,14 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
       )
     ),
     h('span', { style: S.subtitle }, t('subtitle')),
+    degraded === undefined
+      ? null
+      : h(
+          'div',
+          { style: S.banner, 'data-reflex-degraded': 'true', role: 'status' },
+          h('span', null, interpolate(t('systemOneDegraded'), { reason: degradedReason })),
+          Button({ label: t('refresh'), onClick: () => void store.refresh() })
+        ),
     h(
       'div',
       { style: S.actions },

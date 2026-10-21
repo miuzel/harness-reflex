@@ -14,6 +14,7 @@ import {
 } from './vendor/harness-reflex/index.js';
 import type {
   ActionStep,
+  BackendHealth,
   CandidateItem,
   ChoiceResponse,
   DecisionBackend,
@@ -45,6 +46,14 @@ export interface ReflexPruneResult {
 export interface ReflexLedgerResult {
   summary: ReturnType<DecisionLedger['getSummary']>;
   recentEntries?: ReturnType<DecisionLedger['getEntries']>;
+  /**
+   * Health of the backend at read time, when it tracks one.
+   *
+   * `/reflex-ledger` prints a degraded notice from it. It is deliberately not
+   * part of any model-facing tool payload: a health warning is a diagnostics
+   * fact for the person reading the command, not context for the agent.
+   */
+  systemOneHealth?: BackendHealth;
 }
 
 /**
@@ -128,6 +137,18 @@ export class ReflexRuntime {
   /** Name of the active decision backend, for diagnostics and tests. */
   get backendName(): string {
     return this.backend.name;
+  }
+
+  /**
+   * Health of the backend's gateway conversation, or `undefined` for a backend
+   * that answers every call in-process.
+   *
+   * Read by the settings panel and `/reflex-ledger`; never passed to a model.
+   * @returns a copy of the counters.
+   */
+  systemOneHealth(): BackendHealth | undefined {
+    const health = (this.backend as Partial<DecisionBackend>).health;
+    return typeof health === 'function' ? health.call(this.backend) : undefined;
   }
 
   /**
@@ -274,8 +295,10 @@ export class ReflexRuntime {
   statusLedger(request: { includeEntries?: boolean } = {}): ReflexLedgerResult {
     this.#assertLive();
     const summary = this.ledger.getSummary();
-    if (!request.includeEntries) return { summary };
-    return { summary, recentEntries: this.ledger.getEntries().slice(-10) };
+    const health = this.systemOneHealth();
+    const base: ReflexLedgerResult = health === undefined ? { summary } : { summary, systemOneHealth: health };
+    if (!request.includeEntries) return base;
+    return { ...base, recentEntries: this.ledger.getEntries().slice(-10) };
   }
 
   /**

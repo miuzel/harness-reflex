@@ -195,6 +195,18 @@ export interface PanelLedgerView {
   clearable: boolean;
 }
 
+/** Health of the System One gateway conversation, as the panel renders it. */
+export interface PanelSystemOneHealth {
+  /** Whether the most recent request succeeded; `false` shows the degraded banner. */
+  available: boolean;
+  /** Why the most recent request failed, if it did. */
+  lastFailureReason?: string;
+  /** ISO timestamp of the most recent failure. */
+  lastFailureAt?: string;
+  /** Consecutive failed requests; a single success resets it. */
+  consecutiveFailures: number;
+}
+
 /** System One backend block of the snapshot. */
 export interface PanelSystemOneView {
   /** Selected implementation; `auto` resolves through the environment. */
@@ -207,6 +219,11 @@ export interface PanelSystemOneView {
   /** Whether `apiKeyEnv` currently holds a non-empty value. Never the value. */
   apiKeyPresent: boolean;
   timeoutMs?: number;
+  /**
+   * Live gateway health, when the backend keeps any. Backends that answer every
+   * call in-process (mock) omit it; the absence is not an outage.
+   */
+  health?: PanelSystemOneHealth;
 }
 
 /** Plugin identity block of the snapshot. */
@@ -267,6 +284,8 @@ export interface PanelRuntimeFacts {
   effort: ReflexEffortStatus | undefined;
   /** Whether an API key is currently reachable through the declared variable. */
   apiKeyPresent: boolean;
+  /** Health of the backend's gateway conversation, when it tracks one. */
+  systemOneHealth?: PanelSystemOneHealth;
   /** Available physical model catalog from ctx.llm. */
   modelCatalog?: PanelModelGroup[];
   /** Timestamp of the snapshot; defaults to now. */
@@ -402,6 +421,7 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       backend: config.systemOne.backend,
       active: facts.backendName,
       apiKeyPresent: facts.apiKeyPresent,
+      ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),
       ...(config.systemOne.baseUrl === undefined ? {} : { baseUrl: config.systemOne.baseUrl }),
       ...(config.systemOne.model === undefined ? {} : { model: config.systemOne.model }),
       ...(config.systemOne.apiKeyEnv === undefined ? {} : { apiKeyEnv: config.systemOne.apiKeyEnv }),
