@@ -45,15 +45,17 @@ V=0.1.0
 
   通过判据：上述文件无 alpha.2；`docs/dsh-plugin.md` 的历史章节、本发布文档中的历史引用不计入。
 
-- [ ] 包名/渠道现状复核（**负责人人工 gate**）：
+- [x] 包名/渠道现状复核（**已完成 2026-10-22**）：
 
   ```bash
-  npm view dsh-harness-reflex version  # 期望 404（非 scoped 名可用）；若已存在则必须换名
-  npm view harness-reflex version      # 期望 404（根包名可用）
+  npm view dsh-harness-reflex version  # 已占名并发布 0.1.0（维护者 miuzel）
+  npm view harness-reflex version      # 已发布 0.1.0
   npm whoami                           # 期望打印用户名；E401 即未登录
   ```
 
   通过判据：负责人已复核插件包名并明确 0.1.0 的发布渠道（tarball 直发 / registry）。
+
+  > **实测结果（2026-10-22）**：`dsh-harness-reflex@0.1.0` 与 `harness-reflex@0.1.0` 均已发布到 npm；旧名 `@miuzel/dsh-reflex@0.1.0` 与占位版 `0.0.0-stage` 保留并建议 deprecate。上游发布的插件 tarball 与本仓库 `release/dsh-harness-reflex-0.1.0.tgz` **逐文件内容一致**（file-list 与 per-file sha256 均为 0 差异）；根包 0.1.0 早于最终改名发布，仅文档内的包名不同，负责人已确认不重发。
 
 ---
 
