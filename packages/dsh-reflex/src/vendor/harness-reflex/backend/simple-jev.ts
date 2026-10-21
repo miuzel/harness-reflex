@@ -2,6 +2,8 @@ import {
   DecisionBackend,
   ChoiceRequest,
   ChoiceResponse,
+  ClaimClassificationRequest,
+  ClaimClassificationResponse,
   GateRequest,
   GateResponse,
   PruneRequest,
@@ -313,6 +315,34 @@ Answer (A or B):`;
       bestCandidate: choiceRes.bestOption,
       latencyMs: Math.round(performance.now() - start)
     };
+  }
+
+  /**
+   * Classify completion claims through the logits backend's choice primitive.
+   *
+   * This backend has no `postSystemOne` channel to batch score questions over,
+   * so each sentence is one next-token choice; the two options mirror the Jev
+   * batch's criterion order (index 1 is "claims completion").
+   */
+  async classifyClaims(req: ClaimClassificationRequest): Promise<ClaimClassificationResponse> {
+    const start = performance.now();
+    const statements = Array.isArray(req.statements) ? req.statements : [];
+    const results: ClaimClassificationResponse['results'] = [];
+    for (const statement of statements) {
+      try {
+        const answer = await this.choice({
+          question: `Does this sentence claim the task or its work is complete, successful, passing, or finished? A negated outcome is not a claim. Sentence: "${statement}"`,
+          options: ['not a completion claim', 'completion claim'],
+          context: req.intent
+        });
+        const positive = answer.options.find((option) => option.label === 'completion claim');
+        const probability = positive?.probability ?? 0;
+        results.push({ statement, isClaim: answer.bestOption === 'completion claim', confidence: probability });
+      } catch {
+        // Leave an unanswered sentence out; the caller's closing check fails open.
+      }
+    }
+    return { results, latencyMs: Math.round(performance.now() - start) };
   }
 }
 

@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 
-import { DecisionBackend, GateRequest, GateResponse } from '../backend/types.js';
+import {
+  ClaimClassificationRequest,
+  ClaimClassificationResponse,
+  DecisionBackend,
+  GateRequest,
+  GateResponse
+} from '../backend/types.js';
 import { DecisionLedger } from './ledger.js';
 import { Calibrator } from './calibrate.js';
 
@@ -133,5 +139,33 @@ export class ReflexGateService {
 
   resetLatch(): void {
     this.latchedResults.clear();
+  }
+
+  /**
+   * Classify whether each candidate sentence claims the task is complete.
+   *
+   * No latch and no fail-closed verdict here: the caller decides what an
+   * unanswered sentence means (the closing check fails open), and a
+   * classification is per-turn data rather than a reusable gate answer. The
+   * backend call is still charged to the ledger, so the new judgment is
+   * auditable like every other System One request.
+   * @param req - candidate sentences plus the turn's intent.
+   * @returns one classification per sentence the backend could answer.
+   */
+  async classifyClaims(req: ClaimClassificationRequest): Promise<ClaimClassificationResponse> {
+    const result = await this.backend.classifyClaims(req);
+    this.ledger.record({
+      type: 'gate',
+      backend: this.backend.name,
+      latencyMs: result.latencyMs,
+      passed: false,
+      details: {
+        closingClaims: true,
+        submitted: req.statements.length,
+        classified: result.results.length,
+        claimed: result.results.filter((item) => item.isClaim).length
+      }
+    });
+    return result;
   }
 }

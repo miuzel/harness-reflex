@@ -174,6 +174,8 @@ export interface InterventionsDraft {
   pruneHeadChars: string;
   pruneTailChars: string;
   pruneJudgeMinChars: string;
+  claimMinConfidence: string;
+  closingEvidenceChars: string;
   intent: string;
 }
 
@@ -257,6 +259,8 @@ export const EMPTY_DRAFT: PanelDraft = {
     // Blank means "let the Host apply its own default"; the page never seeds a
     // value here, so an unrelated save cannot pin this field.
     pruneJudgeMinChars: '',
+    claimMinConfidence: '',
+    closingEvidenceChars: '',
     intent: ''
   },
   tools: { enabled: defaultToolSwitches() }
@@ -432,6 +436,8 @@ export function draftFromConfig(value: unknown): PanelDraft {
       pruneHeadChars: asText(interventions.pruneHeadChars) || EMPTY_DRAFT.interventions.pruneHeadChars,
       pruneTailChars: asText(interventions.pruneTailChars) || EMPTY_DRAFT.interventions.pruneTailChars,
       pruneJudgeMinChars: asText(interventions.pruneJudgeMinChars),
+      claimMinConfidence: asText(interventions.claimMinConfidence),
+      closingEvidenceChars: asText(interventions.closingEvidenceChars),
       intent: asText(interventions.intent)
     },
     tools: {
@@ -548,6 +554,16 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   for (const text of [draft.interventions.minConfidence, draft.interventions.pruneFloorRatio]) {
     const parsed = asNumber(text);
     if (parsed === undefined || parsed < 0 || parsed > 1) errors.push('errInterventionRatio');
+  }
+  // The two closing-check knobs are also blank-legal: blank keeps the Host
+  // default, while an authored value must stay inside its own range.
+  if (draft.interventions.claimMinConfidence.trim() !== '') {
+    const parsed = asNumber(draft.interventions.claimMinConfidence);
+    if (parsed === undefined || parsed < 0 || parsed > 1) errors.push('errClaimMinConfidence');
+  }
+  if (draft.interventions.closingEvidenceChars.trim() !== '') {
+    const parsed = asNumber(draft.interventions.closingEvidenceChars);
+    if (parsed === undefined || !Number.isInteger(parsed) || parsed < 200) errors.push('errClosingEvidenceChars');
   }
   return { errors: [...new Set(errors)], ok: errors.length === 0 };
 }
@@ -688,6 +704,12 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
         ...(count(draft.interventions.pruneJudgeMinChars) === undefined
           ? {}
           : { pruneJudgeMinChars: count(draft.interventions.pruneJudgeMinChars) }),
+        ...(count(draft.interventions.claimMinConfidence) === undefined
+          ? {}
+          : { claimMinConfidence: count(draft.interventions.claimMinConfidence) }),
+        ...(count(draft.interventions.closingEvidenceChars) === undefined
+          ? {}
+          : { closingEvidenceChars: count(draft.interventions.closingEvidenceChars) }),
         ...(present(draft.interventions.intent) === undefined ? {} : { intent: draft.interventions.intent.trim() })
       };
       return [{ path: [group], value: section }];

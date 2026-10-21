@@ -174,6 +174,18 @@ export interface ReflexInterventionsConfig {
    * and no judgment is spent. Must be at least `pruneThreshold`. Default `10000`.
    */
   pruneJudgeMinChars?: number;
+  /**
+   * Probability at/above which a sentence System One classified as a completion
+   * claim is submitted to verification. A deterministic floor on a semantic
+   * decision, never a word list. Default `0.5`.
+   */
+  claimMinConfidence?: number;
+  /**
+   * Character budget of the evidence handed to one closing judgment. Overflow
+   * is truncated by priority — diagnostic lines, then tail summaries, then the
+   * rest — and the dropped amount is reported. Minimum `200`, default `2400`.
+   */
+  closingEvidenceChars?: number;
   /** Lookup intent handed to the pruning judgment. */
   intent?: string;
 }
@@ -198,6 +210,10 @@ export interface ResolvedInterventionsConfig {
   pruneTailChars: number;
   /** At/above this character count pruning judges segments through System One. */
   pruneJudgeMinChars: number;
+  /** Confidence floor for a classified completion claim. */
+  claimMinConfidence: number;
+  /** Character budget of the closing evidence. */
+  closingEvidenceChars: number;
   intent: string;
 }
 
@@ -358,6 +374,17 @@ const InterventionsSchema = z
       .natural()
       .default(10000)
       .description('At or above this many characters, pruning judges the output segment by segment through System One.'),
+    claimMinConfidence: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.5)
+      .description('Probability at/above which a sentence classified as a completion claim is submitted to verification.'),
+    closingEvidenceChars: z
+      .natural()
+      .min(200)
+      .default(2400)
+      .description('Character budget of the evidence handed to one closing judgment; overflow is truncated by priority.'),
     intent: z.string().description('Lookup intent handed to the pruning judgment.')
   })
   .volatile();
@@ -525,7 +552,8 @@ export function resolveInterventionsConfig(
     [block.windowSize, 'windowSize', 6, 3],
     [block.pruneHeadChars, 'pruneHeadChars', 400, 0],
     [block.pruneTailChars, 'pruneTailChars', 400, 0],
-    [block.pruneJudgeMinChars, 'pruneJudgeMinChars', 10000, 0]
+    [block.pruneJudgeMinChars, 'pruneJudgeMinChars', 10000, 0],
+    [block.closingEvidenceChars, 'closingEvidenceChars', 2400, 200]
   ];
   const resolved: Record<string, number> = {};
   for (const [value, name, fallback, minimum] of counts) {
@@ -546,6 +574,12 @@ export function resolveInterventionsConfig(
   const pruneFloorRatio = block.pruneFloorRatio ?? 0.5;
   if (!Number.isFinite(pruneFloorRatio) || pruneFloorRatio < 0 || pruneFloorRatio > 1) {
     throw new Error(`interventions.pruneFloorRatio must be a number in [0, 1] (got "${String(block.pruneFloorRatio)}")`);
+  }
+  const claimMinConfidence = block.claimMinConfidence ?? 0.5;
+  if (!Number.isFinite(claimMinConfidence) || claimMinConfidence < 0 || claimMinConfidence > 1) {
+    throw new Error(
+      `interventions.claimMinConfidence must be a number in [0, 1] (got "${String(block.claimMinConfidence)}")`
+    );
   }
   const pruneJudgeMinChars = resolved.pruneJudgeMinChars!;
   if (pruneJudgeMinChars < pruneThreshold) {
@@ -572,6 +606,8 @@ export function resolveInterventionsConfig(
     pruneHeadChars: resolved.pruneHeadChars!,
     pruneTailChars: resolved.pruneTailChars!,
     pruneJudgeMinChars,
+    claimMinConfidence,
+    closingEvidenceChars: resolved.closingEvidenceChars!,
     intent: optionalText(block.intent) ?? 'extract diagnostics, relevant results and errors'
   };
 }

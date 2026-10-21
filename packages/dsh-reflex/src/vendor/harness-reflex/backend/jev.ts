@@ -3,6 +3,9 @@ import {
   ChoiceOption,
   ChoiceRequest,
   ChoiceResponse,
+  ClaimClassification,
+  ClaimClassificationRequest,
+  ClaimClassificationResponse,
   DecisionBackend,
   GateAssertion,
   GateRequest,
@@ -126,6 +129,13 @@ export const PRUNE_QUESTION_ID = 'prune';
 export const STAGNATION_QUESTION_ID = 'stagnation';
 /** Prefix of the per-assertion question ids of a {@link JevDecisionBackend.gate} call. */
 export const GATE_QUESTION_PREFIX = 'assertion-';
+/** Prefix of the per-sentence question ids of a {@link JevDecisionBackend.classifyClaims} call. */
+export const CLAIM_QUESTION_PREFIX = 'closing-claim-';
+/** Criterion pair of one claim question; index 1 ("claims completion") is the one read. */
+export const CLAIM_CRITERIA: readonly string[] = [
+  'not a completion claim: describes work, plans, questions, or an incomplete/unsuccessful state',
+  'completion claim: asserts that the task, work, build, or tests are complete, successful, passing, or finished'
+];
 
 /* -------------------------------------------------------------------------- */
 /* Domain vocabularies expressed as criteria                                   */
@@ -419,6 +429,42 @@ function buildStagnationInstructions(): string {
     'Classify the recent agent run in the STATE: choose the criterion that best describes the execution pattern.',
     'Judge the action history itself, not the quality of the tool output.'
   ].join('\n');
+}
+
+/** Sentences one closing classification may submit; the turn's tail, never its whole text. */
+export const MAX_CLAIM_SENTENCES = 3;
+
+/**
+ * Instruction block of one completion-claim question.
+ *
+ * The negation cases are spelled out because that is exactly where a word list
+ * fails: "not complete" contains "complete", and "没有通过" contains "通过".
+ */
+function buildClaimInstructions(statement: string, intent: string): string {
+  return [
+    'Decide whether the SENTENCE claims that the task or its work is complete, successful, passing, or finished.',
+    'A negated or qualified outcome is NOT a completion claim: "not complete", "not yet done", "failed", "没有通过", "尚未完成", "仍有失败".',
+    'A sentence that only describes plans, asks a question, or reports an error is not a completion claim either.',
+    ...(intent.trim().length > 0 ? [`TURN INTENT: ${intent}`] : []),
+    `SENTENCE: ${statement}`
+  ].join('\n');
+}
+
+/**
+ * Read one claim answer.
+ * @param statement - the sentence the question was asked about.
+ * @param answer - the gateway's score answer.
+ * @returns the classification, or `undefined` when the answer is unusable.
+ */
+function readClaimAnswer(
+  statement: string,
+  answer: SystemOneScoreAnswer | undefined
+): ClaimClassification | undefined {
+  const index = readScoreIndex(answer, CLAIM_CRITERIA.length);
+  if (index === undefined) return undefined;
+  const distribution = readDistribution(answer?.probabilities, ['0', '1']);
+  const confidence = distribution !== undefined ? round4(distribution.get('1') ?? 0) : index === 1 ? 1 : 0;
+  return { statement, isClaim: index === 1, confidence };
 }
 
 /** Instruction block of a route decision; renders the same facts the logits backend scores. */
@@ -1150,6 +1196,55 @@ export class JevDecisionBackend implements DecisionBackend {
         assertions,
         `Jev API call failed: ${errorMessage(err)}. Fail-closed escalation triggered.`
       );
+    }
+  }
+
+  /**
+   * Classify whether each candidate sentence claims the task is complete.
+   *
+   * One `score` question per sentence, all in a single request. The two criteria
+   * are ordered so index 1 is "claims completion"; the distribution over that
+   * index is the answer. A sentence without a usable answer is left out of the
+   * result rather than guessed, and the caller decides what an incomplete batch
+   * means (the closing check fails open).
+   * @param req - candidate sentences and the turn's intent.
+   * @returns the classified sentences plus the request latency.
+   */
+  async classifyClaims(req: ClaimClassificationRequest): Promise<ClaimClassificationResponse> {
+    const start = performance.now();
+    const statements = Array.isArray(req.statements) ? req.statements.slice(0, MAX_CLAIM_SENTENCES) : [];
+    if (statements.length === 0) return { results: [], latencyMs: elapsed(start) };
+
+    try {
+      const questions: Record<string, SystemOneQuestion> = {};
+      const stateStatements: Record<string, string> = {};
+      statements.forEach((statement, index) => {
+        const id = `${CLAIM_QUESTION_PREFIX}${String(index)}`;
+        questions[id] = {
+          type: 'score',
+          instructions: buildClaimInstructions(statement, req.intent),
+          criteria: [...CLAIM_CRITERIA]
+        };
+        stateStatements[id] = statement;
+      });
+
+      const data = await this.postSystemOne(questions, {
+        task: 'closing-claim',
+        intent: req.intent,
+        ...(req.context !== undefined && req.context.length > 0 ? { context: req.context } : {}),
+        statements: stateStatements
+      });
+
+      const results: ClaimClassification[] = [];
+      statements.forEach((statement, index) => {
+        const id = `${CLAIM_QUESTION_PREFIX}${String(index)}`;
+        const answer = data.answers?.[id] as SystemOneScoreAnswer | undefined;
+        const classified = readClaimAnswer(statement, answer);
+        if (classified !== undefined) results.push(classified);
+      });
+      return { results, latencyMs: elapsed(start) };
+    } catch (err) {
+      throw new Error(`[JevBackend.classifyClaims] Failed: ${errorMessage(err)}`);
     }
   }
 

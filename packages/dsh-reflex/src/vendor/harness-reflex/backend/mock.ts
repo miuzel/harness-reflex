@@ -2,6 +2,9 @@ import {
   DecisionBackend,
   ChoiceRequest,
   ChoiceResponse,
+  ClaimClassification,
+  ClaimClassificationRequest,
+  ClaimClassificationResponse,
   GateRequest,
   GateResponse,
   PruneRequest,
@@ -58,6 +61,30 @@ function hasFailureEvidence(evidence: string): boolean {
   );
   // An explicit error diagnostic is not a summary, even if its message starts with 0.
   return evidence.includes('error:') || /fail|\berrors?\b/.test(withoutCounters);
+}
+
+/** A negated or unfinished outcome, which is never a completion claim. */
+const MOCK_CLAIM_NEGATION =
+  /(not\s+(?:yet\s+)?(?:complete|completed|done|finished|passing|passed|successful|success)|isn'?t\s+(?:complete|done|finished)|still\s+(?:failing|fails|broken|running)|没有通过|未通过|尚未完成|尚未通过|还没完成|还没通过|并未完成|仍然失败|仍有失败|还有失败)/i;
+
+/** A completion assertion in English or Chinese. */
+const MOCK_CLAIM_WORD =
+  /(\b(?:pass|passed|passing|green|success|successful|succeed|succeeded|complete|completed|finished|done|verified|works)\b|全部通过|全部通过|所有测试通过|已完成|完成了|已通过|通过|成功|跑通|全绿|搞定)/i;
+
+/**
+ * Deterministic stand-in for the closing-claim classification.
+ *
+ * The mock exists to keep the offline path honest, not to be the semantic
+ * judge: it reads a negated outcome first and only then looks for a completion
+ * word, which is enough to cover the English/Chinese and negation cases the
+ * unit suite exercises. Production deployments use the Jev backend.
+ * @param statement - one candidate sentence.
+ * @returns whether it reads as a completion claim and with what certainty.
+ */
+function mockClaimClassification(statement: string): ClaimClassification {
+  if (MOCK_CLAIM_NEGATION.test(statement)) return { statement, isClaim: false, confidence: 0.96 };
+  if (MOCK_CLAIM_WORD.test(statement)) return { statement, isClaim: true, confidence: 0.92 };
+  return { statement, isClaim: false, confidence: 0.9 };
 }
 
 /**
@@ -321,6 +348,15 @@ export class MockDecisionBackend implements DecisionBackend {
     return {
       rankedCandidates: ranked,
       bestCandidate: ranked[0]?.name,
+      latencyMs: Math.round(performance.now() - start)
+    };
+  }
+
+  async classifyClaims(req: ClaimClassificationRequest): Promise<ClaimClassificationResponse> {
+    const start = performance.now();
+    const statements = Array.isArray(req.statements) ? req.statements : [];
+    return {
+      results: statements.map(mockClaimClassification),
       latencyMs: Math.round(performance.now() - start)
     };
   }

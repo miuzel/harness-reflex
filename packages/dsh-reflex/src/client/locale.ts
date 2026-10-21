@@ -87,6 +87,8 @@ export const zh = {
   labelPruneTailChars: '裁剪保留尾部字符数',
   labelPruneIntent: '裁剪判定意图',
   labelPruneJudgeMinChars: '逐段判定最小字符数',
+  labelClaimMinConfidence: '完成声明置信度门槛',
+  labelClosingEvidenceChars: '收尾证据字符预算',
 
   // (?) 就地提示：每条都写成「用途 / 格式 / 默认 / 留空或范围」四段，
   // field-guidance 测试会按段解析，并用 resolveConfig 实算的默认值对拍。
@@ -153,6 +155,10 @@ export const zh = {
     '用途：交给裁剪判定判断哪些内容值得保留的意图描述；格式：自然语言短句；默认：extract diagnostics, relevant results and errors；留空：按默认意图处理。',
   helpPruneJudgeMinChars:
     '用途：工具结果达到多少字符才启用逐段 System One 判定；格式：整数（字符数）；默认：10000；范围：不得小于 pruneThreshold，倒挂会被配置校验拒绝。',
+  helpClaimMinConfidence:
+    '用途：完成声明语义判定的置信度门槛，低于它的句子不会进入收尾验证；格式：0~1 的小数；默认：0.5；范围：0~1，留空则按 Host 默认 0.5。',
+  helpClosingEvidenceChars:
+    '用途：交给收尾判定的证据总字符预算，超出按「诊断行 > 尾摘要 > 其余」优先级截断并记录 truncatedChars；格式：整数（字符数）；默认：2400；范围：最小 200，留空则按 Host 默认。',
   helpCapability:
     '用途：控制「{name}」这一路自动干预是否执行；格式：off / observe / active / inherit；默认：inherit；范围：留空即继承主模式（当前 {mode}），显式三态会覆盖主模式。',
   helpToolSwitch:
@@ -262,6 +268,8 @@ export const zh = {
   errInterventionBudget: '预算与阈值必须是不小于各自下限的整数',
   errInterventionRatio: '该比例必须是 0 到 1 之间的数字',
   errPruneJudgeMinChars: '逐段判定最小字符数必须是不小于裁剪阈值的整数',
+  errClaimMinConfidence: '完成声明置信度门槛必须是 0 到 1 之间的数字',
+  errClosingEvidenceChars: '收尾证据字符预算必须是不小于 200 的整数',
 
   toneActive: '激活',
   toneInactive: '未激活',
@@ -379,6 +387,8 @@ export const en: Record<keyof typeof zh, string> = {
   labelPruneTailChars: 'Prune tail characters',
   labelPruneIntent: 'Prune judgment intent',
   labelPruneJudgeMinChars: 'Per-segment judge minimum characters',
+  labelClaimMinConfidence: 'Completion-claim confidence floor',
+  labelClosingEvidenceChars: 'Closing evidence character budget',
 
   // (?) guidance: each entry spells out use / format / default / blank-or-range.
   // The field-guidance test parses those segments and cross-checks the defaults
@@ -446,6 +456,10 @@ export const en: Record<keyof typeof zh, string> = {
     'Use: the intent description that tells the pruning judgment what is worth keeping; Format: a short natural-language phrase; Default: extract diagnostics, relevant results and errors; Blank: the default intent.',
   helpPruneJudgeMinChars:
     'Use: the result size that enables per-segment System One judging; Format: integer (characters); Default: 10000; Range: must not be smaller than pruneThreshold, and an inverted pair is rejected by config validation.',
+  helpClaimMinConfidence:
+    'Use: the confidence floor for the completion-claim semantic judgment, below which a sentence is not verified; Format: decimal in 0~1; Default: 0.5; Range: 0~1, blank keeps the Host default of 0.5.',
+  helpClosingEvidenceChars:
+    'Use: the character budget of the evidence handed to a closing judgment, truncated by priority diagnostic lines > tail summaries > rest with the dropped amount reported; Format: integer (characters); Default: 2400; Range: at least 200, blank keeps the Host default.',
   helpCapability:
     'Use: whether the "{name}" automatic intervention may run; Format: off / observe / active / inherit; Default: inherit; Range: blank inherits the master mode ({mode}), while an explicit state overrides it.',
   helpToolSwitch:
@@ -556,6 +570,8 @@ export const en: Record<keyof typeof zh, string> = {
   errInterventionBudget: 'Budgets and thresholds must be integers at or above their own minimum',
   errInterventionRatio: 'This ratio must be a number in [0, 1]',
   errPruneJudgeMinChars: 'The per-segment judge minimum must be an integer at least the prune threshold',
+  errClaimMinConfidence: 'The completion-claim confidence floor must be a number in [0, 1]',
+  errClosingEvidenceChars: 'The closing evidence budget must be an integer of at least 200',
 
   toneActive: 'live',
   toneInactive: 'not live',

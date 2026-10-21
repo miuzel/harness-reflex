@@ -112,12 +112,24 @@ const STEP_CHARS = 600;
 const MAX_STEPS = 12;
 /** Characters of assistant text retained per turn for the closing check. */
 const CLAIM_CHARS = 4000;
-/** Failing evidence lines retained per turn for the closing check. */
-const MAX_EVIDENCE = 6;
+/**
+ * Evidence entries retained per turn for the closing check.
+ *
+ * Entries are candidates, not conclusions: every observed result contributes its
+ * tail summary, and a failure-marker line is kept as a safety floor. The
+ * character budget (not this count) decides what the judgment reads.
+ */
+const MAX_EVIDENCE = 16;
 /** Characters of one evidence line. */
 const EVIDENCE_CHARS = 400;
-/** Completion claims submitted to one closing judgment. */
+/** Characters of one result's tail summary. */
+const EVIDENCE_TAIL_CHARS = 240;
+/** Characters of the "other" (non-diagnostic, non-tail) fallback per result. */
+const EVIDENCE_OTHER_CHARS = 120;
+/** Completion claim candidates submitted to one closing judgment. */
 const MAX_CLAIMS = 3;
+/** Minimum sentence length worth classifying as a claim candidate. */
+const MIN_CLAIM_CHARS = 8;
 /** Agent states retained before the least recently used is dropped. */
 const MAX_AGENTS = 64;
 /** Reductions memoized per activation, bounded by least recent use. */
@@ -149,10 +161,25 @@ const PRUNE_MIN_LINES = 4;
  */
 const MAX_RETAINED_CHARS = 100_000;
 
-/** Matches the completion claims a closing turn must be able to back with evidence. */
-const COMPLETION_CLAIM = /\b(pass|passed|passing|green|successful|succeed|succeeded|complete|completed|finished|done|verified|works)\b/i;
-/** Matches the failure markers that make a completion claim self-contradictory. */
-const FAILURE_MARKER = /(\berror\b|\berrors\b|\bfailed\b|\bfailure\b|\bfailures\b|\bfail\b|exit code [1-9]|\bnot ok\b|\bFAIL\b|\bexception\b|\btraceback\b)/i;
+/**
+ * Matches the failure markers that make a result a *candidate* for the closing
+ * evidence. A hit is a safety floor: the line is kept whatever the budget says.
+ * A miss is never a "failure-free" conclusion — the tail summary goes to System
+ * One, which decides what the result means.
+ */
+export const FAILURE_MARKER = /(\berror\b|\berrors\b|\bfailed\b|\bfailure\b|\bfailures\b|\bfail\b|exit code [1-9]|\bnot ok\b|\bFAIL\b|\bexception\b|\btraceback\b)/i;
+
+/**
+ * Prefilter for a failure *suspicion* — the deterministic trigger that makes a
+ * closing judgment worth buying. It is broader than {@link FAILURE_MARKER}
+ * because `{ok:false}`, a timeout, and a Chinese error must reach System One
+ * too; none of these decides anything by itself.
+ */
+const FAILURE_CUE = new RegExp(
+  `${FAILURE_MARKER.source}|\\bok\\b\\s*[:=]\\s*false|"ok"\\s*:\\s*false|\\btimed?\\s*out\\b|\\btimeout\\b|`
+    + '失败|错误|异常|超时|无法|未通过|仍有失败|还有失败|报错',
+  'i'
+);
 
 /** The action names one plan may carry. */
 export type InterventionAction =
@@ -262,6 +289,78 @@ export function isWaitQuery(exec: ToolExecution): boolean {
   return shape.handles.some((field) => typeof args[field] === 'string' && (args[field] as string).length > 0);
 }
 
+/** Field names that name a background handle a status query is about. */
+const POLL_HANDLE_FIELD = /(?:^|_)(?:job|task|run|process|pid|handle|call|query|poll|id)$/i;
+
+/**
+ * The argument shape that makes a *non-listed* repetition a wait suspect.
+ *
+ * The tool-name list is deliberately narrow (the Host's own job tools), but a
+ * run can wait through another backend's poll verb. A non-empty handle-shaped
+ * field is the cue that the repetition may be a status query; it only makes the
+ * call worth asking about — System One still decides whether it is a wait.
+ * @param exec - the call about to run.
+ * @returns a shape label, or `undefined` when the arguments carry no handle.
+ */
+export function pollShapeOf(exec: ToolExecution): string | undefined {
+  const args = structuredArguments(exec);
+  if (!args) return undefined;
+  for (const [key, value] of Object.entries(args)) {
+    if (!POLL_HANDLE_FIELD.test(key)) continue;
+    if (typeof value === 'string' && value.length > 0) return 'poll-handle';
+    if (typeof value === 'number' && Number.isFinite(value)) return 'poll-handle';
+  }
+  return undefined;
+}
+
+/** A compact, bounded rendering of one call's arguments. */
+function argumentShapeOf(exec: ToolExecution): string {
+  const args = structuredArguments(exec);
+  if (!args) return 'non-object';
+  const entries = Object.entries(args).map(([key, value]) => {
+    const rendered = value === null || typeof value !== 'object' ? clip(String(value), 60) : '…';
+    return `${key}=${rendered}`;
+  });
+  return entries.length > 0 ? entries.join(', ') : 'empty';
+}
+
+/**
+ * The context one wait question carries into the stagnation judgment.
+ *
+ * It is *context*, not a verdict: the tool name, the argument shape, and the
+ * repeat count let System One tell a sanctioned wait from a no-progress loop,
+ * and nothing here allows or refuses the call by itself.
+ */
+export function waitGoalOf(exec: ToolExecution, shape: string, repeats: number): string {
+  return [
+    `suspect: ${shape}`,
+    `tool: ${exec.name}`,
+    `argument-shape: ${argumentShapeOf(exec)}`,
+    `repeats: ${repeats}`,
+    'A repeated status/job query can be a legitimate wait for background work rather than a no-progress loop; decide from the action history and the polled outputs.'
+  ].join('; ');
+}
+
+/**
+ * Label each poll of one series with its place in it.
+ *
+ * The backend reasons about the run, not about string identity: two polls of the
+ * same job are successive observations, and telling them apart keeps a
+ * sanctioned wait from being read as the same action retried forever. Every
+ * other step is passed through untouched.
+ * @param steps - the window the question is about.
+ * @param signature - identity of the poll being proposed.
+ * @returns a copy with `[poll #n]` appended to each poll's input.
+ */
+export function annotateWaitHistory(steps: readonly ObservedStep[], signature: string): ObservedStep[] {
+  let poll = 0;
+  return steps.map((step) => {
+    if (step.signature !== signature) return step;
+    poll += 1;
+    return { ...step, input: clip(`${step.input} [poll #${poll}]`, STEP_CHARS) };
+  });
+}
+
 /** One step of one agent's detection window. */
 interface ObservedStep {
   /** `tool:argumentsDigest` — the identity a repetition is measured on. */
@@ -302,8 +401,10 @@ interface AgentState {
   steps: ObservedStep[];
   /** Assistant text of the current turn, for the closing check. */
   claims: string;
-  /** Failing evidence the current turn produced. */
-  evidence: string[];
+  /** Evidence candidates the current turn produced (see {@link EvidenceEntry}). */
+  evidence: EvidenceEntry[];
+  /** Whether any evidence candidate is a failure suspicion worth judging. */
+  evidenceSuspect: boolean;
   /** Interventions applied in the current turn. */
   interventions: number;
   judgmentsTurn: number;
@@ -313,6 +414,8 @@ interface AgentState {
   /** Identity of the window the cached verdict was about. */
   verdictKey: string;
   verdict?: StagnationCheckResponse;
+  /** Wait-suspect call identities already classified this turn. */
+  waited: Set<string>;
   /** Identities this turn already intervened on, so no action repeats itself. */
   applied: Set<string>;
   /** Call signatures already refused this turn. */
@@ -379,6 +482,14 @@ export interface InterventionReport {
    * scanning the whole log.
    */
   retained: { copies: number; locators: string[] };
+  /**
+   * Closing-evidence bytes kept vs. dropped by the character budget.
+   *
+   * Truncation is by priority (diagnostic lines, then tail summaries, then the
+   * rest); a diagnostic floor line is never dropped, so a nonzero `truncatedChars`
+   * describes tail/other material only.
+   */
+  evidence: { retainedChars: number; truncatedChars: number };
 }
 
 /** Dependencies of one intervention engine. */
@@ -389,7 +500,8 @@ export interface InterventionEngineOptions {
   pruneThreshold: number;
   stagnation: Pick<StagnationDetector, 'check'>;
   prune: Pick<ToolResultPruner, 'prune'>;
-  gate: Pick<ReflexGateService, 'verify'>;
+  /** Verification plus the closing-claim classification that precedes it. */
+  gate: Pick<ReflexGateService, 'verify' | 'classifyClaims'>;
   /** Names of this plugin's own tools: their output is already optimized. */
   ownTools?: readonly string[];
   /** Clock seam. */
@@ -543,6 +655,153 @@ export function failureOf(result: Readonly<ToolExecutionResult> | undefined, tex
   const status = structuredExitStatus((result as { value?: unknown }).value);
   if (status) return status.exitCode !== 0 || status.signal !== undefined;
   return exitMarkerFailure(text);
+}
+
+/**
+ * Priority of one closing-evidence candidate when the budget truncates.
+ *
+ * `diagnostic` lines are the safety floor: a FAILURE_MARKER hit is kept even
+ * past the budget. `tail` summaries carry the structured/status facts of every
+ * observed result (so `{ok:false}`, a timeout, or a Chinese error reaches System
+ * One). `other` is the head fallback, dropped first.
+ */
+export type EvidencePriority = 'diagnostic' | 'tail' | 'other';
+
+/** One candidate the closing judgment may read. */
+export interface EvidenceEntry {
+  /** Tool that produced the result. */
+  tool: string;
+  /** Bounded line or summary. */
+  text: string;
+  /** Truncation priority (lower is safer). */
+  priority: EvidencePriority;
+  /** Whether the result behind this entry is a failure suspicion. */
+  suspect: boolean;
+}
+
+/** The primitive structured facts one result exposes, for the tail summary. */
+function structuredFacts(
+  result: Readonly<ToolExecutionResult> | undefined
+): Record<string, string | number | boolean> {
+  const facts: Record<string, string | number | boolean> = {};
+  if (!result) return facts;
+  if (result.isError !== undefined) facts.isError = result.isError === true;
+  const status = structuredExitStatus((result as { value?: unknown }).value);
+  if (status) {
+    facts.exitCode = status.exitCode;
+    if (status.signal !== undefined) facts.signal = status.signal;
+  }
+  let value: unknown = (result as { value?: unknown }).value;
+  if (typeof value === 'string' && /^\s*[{[]/.test(value)) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      value = undefined;
+    }
+  }
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    for (const key of ['ok', 'status', 'timedOut', 'timeout', 'isError', 'exitCode', 'signal']) {
+      const field = record[key];
+      if (typeof field === 'string' || typeof field === 'number' || typeof field === 'boolean') facts[key] = field;
+    }
+  }
+  return facts;
+}
+
+/** Whether structured facts alone prove (or at least suspect) a failure. */
+function factsSuspectFailure(facts: Readonly<Record<string, string | number | boolean>>): boolean {
+  if (facts.isError === true) return true;
+  if (typeof facts.exitCode === 'number' && facts.exitCode !== 0) return true;
+  if (typeof facts.signal === 'string' && facts.signal.length > 0) return true;
+  if (facts.ok === false || facts.timedOut === true || facts.timeout === true) return true;
+  if (typeof facts.status === 'string' && /fail|error|timeout|timed_?out/i.test(facts.status)) return true;
+  return false;
+}
+
+/**
+ * Turn one observed result into closing-evidence candidates.
+ *
+ * The regex is a prefilter and a floor, never a conclusion: matching lines are
+ * kept whatever else happens, and a non-matching result still contributes its
+ * tail summary (with the structured facts) to System One. A result is a failure
+ * *suspicion* when a structured fact, a marker line, or a broader cue says so;
+ * what the result really means is decided by `gate.verify`.
+ *
+ * @param tool - tool name that produced the result.
+ * @param result - the execution-local result.
+ * @param text - the effective model-facing text.
+ * @returns bounded candidates, diagnostics first.
+ */
+export function evidenceOf(
+  tool: string,
+  result: Readonly<ToolExecutionResult> | undefined,
+  text: string
+): EvidenceEntry[] {
+  const entries: EvidenceEntry[] = [];
+  const lines = text.split(/\r?\n/);
+  const diagnostics = lines.filter((line) => FAILURE_MARKER.test(line));
+  for (const line of diagnostics) {
+    const clipped = clip(line.trim(), EVIDENCE_CHARS);
+    if (clipped.length > 0) entries.push({ tool, text: clipped, priority: 'diagnostic', suspect: true });
+  }
+  const facts = structuredFacts(result);
+  const factText = Object.keys(facts).length > 0 ? `{${JSON.stringify(facts)}} ` : '';
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const tail = clip(`${factText}${collapsed}`, EVIDENCE_TAIL_CHARS);
+  if (tail.length > 0) {
+    entries.push({
+      tool,
+      text: `${tool} tail: ${tail}`,
+      priority: 'tail',
+      suspect:
+        failureOf(result, text)
+        || diagnostics.length > 0
+        || factsSuspectFailure(facts)
+        || FAILURE_CUE.test(text)
+    });
+  }
+  if (diagnostics.length === 0) {
+    const head = clip(collapsed, EVIDENCE_OTHER_CHARS);
+    if (head.length > 0) {
+      entries.push({ tool, text: `${tool}: ${head}`, priority: 'other', suspect: FAILURE_CUE.test(text) });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Assemble the turn's evidence candidates into one budgeted string.
+ *
+ * Priority order is diagnostic → tail → other. A diagnostic line is the safety
+ * floor and is never dropped; everything else competes for the budget and the
+ * dropped characters are reported so the truncation is auditable.
+ *
+ * @param entries - candidates, oldest first.
+ * @param budget - character budget of the assembled text.
+ * @returns assembled text plus the kept/dropped character counts.
+ */
+export function assembleEvidence(
+  entries: readonly EvidenceEntry[],
+  budget: number
+): { text: string; retainedChars: number; truncatedChars: number } {
+  const lines: string[] = [];
+  let retained = 0;
+  let truncated = 0;
+  for (const priority of ['diagnostic', 'tail', 'other'] as const) {
+    for (const entry of entries) {
+      if (entry.priority !== priority) continue;
+      const size = entry.text.length + (lines.length > 0 ? 1 : 0);
+      const fits = priority === 'diagnostic' || retained + size <= budget;
+      if (!fits) {
+        truncated += size;
+        continue;
+      }
+      lines.push(entry.text);
+      retained += size;
+    }
+  }
+  return { text: lines.join('\n'), retainedChars: retained, truncatedChars: truncated };
 }
 
 /**
@@ -1070,7 +1329,7 @@ export class InterventionEngine {
   readonly #pruneThreshold: number;
   readonly #stagnation: Pick<StagnationDetector, 'check'>;
   readonly #prune: Pick<ToolResultPruner, 'prune'>;
-  readonly #gate: Pick<ReflexGateService, 'verify'>;
+  readonly #gate: Pick<ReflexGateService, 'verify' | 'classifyClaims'>;
   readonly #now: () => number;
   readonly #retain?: (session: unknown, request: PruneRetentionRequest) => PruneRetention | undefined;
   readonly #audit?: (record: InterventionAuditRecord, session: unknown) => void;
@@ -1084,6 +1343,7 @@ export class InterventionEngine {
   readonly #skips = new Map<string, number>();
   readonly #recent: InterventionAuditRecord[] = [];
   readonly #retained: string[] = [];
+  readonly #evidenceStats = { retainedChars: 0, truncatedChars: 0 };
   #retainedCopies = 0;
   #counter = 0;
 
@@ -1149,7 +1409,8 @@ export class InterventionEngine {
       },
       skips: Object.fromEntries([...this.#skips.entries()].sort()),
       recent: [...this.#recent],
-      retained: { copies: this.#retainedCopies, locators: [...this.#retained] }
+      retained: { copies: this.#retainedCopies, locators: [...this.#retained] },
+      evidence: { ...this.#evidenceStats }
     };
   }
 
@@ -1206,6 +1467,8 @@ export class InterventionEngine {
     this.#recent.length = 0;
     this.#retained.length = 0;
     this.#retainedCopies = 0;
+    this.#evidenceStats.retainedChars = 0;
+    this.#evidenceStats.truncatedChars = 0;
   }
 
   // ── hook entry points ──────────────────────────────────────────────────────
@@ -1231,16 +1494,9 @@ export class InterventionEngine {
     const capability = this.modeOf('stagnation');
     if (capability === 'off' || !this.config.enabled) return downstream;
     if (this.#ownTools.has(exec.name)) return downstream;
-    // A legitimate wait is never a stagnation episode: the same status/result
-    // query of the same background job is the sanctioned way to wait, so it is
-    // not judged, planned, refused, or booked against the turn's allowance —
-    // and observe measures exactly the same nothing that active would do.
-    if (isWaitQuery(exec)) {
-      this.#skip('wait-query');
-      return downstream;
-    }
     if (exec.signal?.aborted) return downstream;
 
+    let waitSuspected = false;
     const started = this.#now();
     try {
       const agentId = agentKeyOf(exec.agent);
@@ -1251,17 +1507,38 @@ export class InterventionEngine {
       // judgment has to see all three. The pending entry is local — it is not
       // committed to the agent's history, which the result records for real.
       const pending = this.#observed(state, exec, signature);
-      // Wait queries already in the window are dropped: they are not progress
-      // the run could be repeating, and keeping them would both hide a real loop
-      // that waits between its attempts and manufacture an oscillation out of
-      // two identical polls.
-      const window = progressSteps([...state.steps, pending]);
-      const suspicion = suspicionOf(window, {
+      const allWindow = [...state.steps, pending];
+      // Wait queries already in the window are dropped from the *progress*
+      // trigger: they are not progress the run could be repeating, and keeping
+      // them would both hide a real loop that waits between its attempts and
+      // manufacture an oscillation out of two identical polls.
+      const window = progressSteps(allWindow);
+      const waitShape = isWaitQuery(exec) ? 'wait-query' : pollShapeOf(exec);
+      // A wait-suspect call that this turn already classified is answered by
+      // that verdict, not re-asked; anything else is only worth a question when
+      // it actually repeats (the same threshold as any other repetition).
+      if (waitShape !== undefined && state.waited.has(signature)) {
+        this.#skip('wait-query');
+        return downstream;
+      }
+      const priorSame = allWindow.filter((step) => step.signature === signature).length - 1;
+      let suspicion = suspicionOf(window, {
         repeatThreshold: this.config.repeatThreshold,
         failureThreshold: this.config.failureThreshold,
         window: this.config.windowSize,
         signature
       });
+      if (waitShape !== undefined && priorSame + 1 >= this.config.repeatThreshold) {
+        // The tool list only decides that this repetition is worth asking
+        // about; it does not pass or refuse anything by itself.
+        suspicion = {
+          suspicious: true,
+          pattern: 'repetition',
+          note: `wait-suspect ${waitShape} repeated ${priorSame + 1}x`,
+          repeats: priorSame + 1
+        };
+        waitSuspected = true;
+      }
       if (!suspicion.suspicious || state.denied.has(signature)) return downstream;
       if (state.applied.has(`stagnation:${signature}`)) {
         this.#skip('duplicate-intervention');
@@ -1272,7 +1549,16 @@ export class InterventionEngine {
         return downstream;
       }
 
-      const verdict = await this.#judge(state, exec.signal, window);
+      // A wait question is judged on the polls themselves (each labelled with
+      // its place in the series, so the backend can read a wait rather than an
+      // exact repeat); every other question keeps the progress-only window.
+      const judgeSteps = waitSuspected ? annotateWaitHistory(allWindow, signature) : window;
+      const verdict = await this.#judge(
+        state,
+        exec.signal,
+        judgeSteps,
+        waitSuspected ? waitGoalOf(exec, waitShape ?? 'poll-shape', priorSame + 1) : undefined
+      );
       const judgment = this.#judgmentCharge(verdict, started, this.#now());
       // Denial is latched per signature whether or not it was applied: in observe
       // mode the refusal is what would have happened, and `denied` is what keeps
@@ -1280,7 +1566,10 @@ export class InterventionEngine {
       state.denied.add(signature);
       if (!verdict.useful) {
         this.#charge('stagnation', judgment);
-        this.#skip(verdict.skip ?? 'unconfirmed');
+        if (waitSuspected) state.waited.add(signature);
+        // A budget/abort skip keeps its own reason; only a real "not stuck"
+        // answer to a wait question is recorded as the wait outcome.
+        this.#skip(verdict.skip ?? (waitSuspected ? 'wait-query' : 'unconfirmed'));
         return downstream;
       }
 
@@ -1309,8 +1598,9 @@ export class InterventionEngine {
       return applied ? { kind: 'deny', reason: plan.feedback } : downstream;
     } catch {
       // FAIL-OPEN: a planning failure must never veto a call the rest of the
-      // waterfall already allowed.
-      this.#skip('planning-error');
+      // waterfall already allowed. A wait whose judge could not answer is
+      // reported with its own reason instead of the generic one.
+      this.#skip(waitSuspected ? 'wait-query-unavailable' : 'planning-error');
       return downstream;
     }
   }
@@ -1367,8 +1657,11 @@ export class InterventionEngine {
       this.#baseline.originalTokens += estimateTokens(text);
       if (failed) this.#baseline.failures += 1;
 
+      // Every result contributes evidence candidates: a failure-marker line is
+      // the safety floor, a tail summary carries the structured/status facts,
+      // and the closing judgment — not a regex — decides what they mean.
+      this.#rememberEvidence(state, exec.name, result, text, this.#errorOf(result));
       if (!failed) return await this.#pruneResult(exec, downstream, content, state, text, started);
-      this.#rememberEvidence(state, exec.name, this.#errorOf(result), text);
       return await this.#correctFailure(exec, result, downstream, state, signature, started);
     } catch {
       // FAIL-OPEN: the result is handed on exactly as the waterfall produced it.
@@ -1407,6 +1700,8 @@ export class InterventionEngine {
         state.verdict = undefined;
         state.claims = '';
         state.evidence = [];
+        state.evidenceSuspect = false;
+        state.waited.clear();
         state.applied.clear();
         state.denied.clear();
         state.refused.clear();
@@ -1419,10 +1714,12 @@ export class InterventionEngine {
 
       const last = state.steps[state.steps.length - 1];
       if (last === undefined) return downstream;
-      // A step entered right after a legitimate wait has nothing to correct: the
-      // run asked about a background job again, it did not repeat its work.
+      // A poll that already passed the semantic wait judgment has nothing to
+      // correct here: the run asked about a background job again, it did not
+      // repeat its work. A poll this turn never judged was not a repetition, so
+      // it is not a stagnation episode either.
       if (last.wait === true) {
-        this.#skip('wait-query');
+        this.#skip(state.waited.has(last.signature) ? 'wait-query' : 'wait-query-unjudged');
         return downstream;
       }
       const signature = last.signature;
@@ -1505,12 +1802,13 @@ export class InterventionEngine {
       const agentId = agentKeyOf(payload.agent);
       const state = this.#state(agentId, payload.agent);
       const claimsText = state.claims;
-      const evidence = state.evidence.join('\n');
-      // A closing check is only worth its judgment when the turn both claimed
-      // completion and produced a failure: two local, deterministic facts.
-      if (claimsText.length === 0 || evidence.length === 0) return;
-      const assertions = claimsOf(claimsText);
-      if (assertions.length === 0) return;
+      // Two deterministic facts decide whether a closing judgment is worth
+      // buying: the turn said something, and at least one result is a failure
+      // suspicion. Neither fact concludes *which* sentence claims completion —
+      // that is the System One question asked below.
+      if (claimsText.length === 0 || !state.evidenceSuspect) return;
+      const candidates = claimCandidates(claimsText);
+      if (candidates.length === 0) return;
       if (state.applied.has(`closing:turn:${payload.turn}`)) {
         this.#skip('duplicate-intervention');
         return;
@@ -1520,24 +1818,67 @@ export class InterventionEngine {
         return;
       }
       if (payload.signal?.aborted) return;
-      // The closing verdict is a judgment like any other: it is bought from the
-      // same turn and session budget as a stagnation check, so enabling three
-      // capabilities cannot triple what one turn is allowed to spend.
-      const skip = this.#spendJudgment(state);
-      if (skip) {
-        this.#skip(skip);
+
+      // Assemble what the judgment will read. Truncation is by priority and
+      // never removes a failure-marker line; the amount dropped is reported.
+      const assembled = assembleEvidence(state.evidence, this.config.closingEvidenceChars);
+      this.#evidenceStats.retainedChars += assembled.retainedChars;
+      this.#evidenceStats.truncatedChars += assembled.truncatedChars;
+      if (assembled.truncatedChars > 0) this.#skip('evidence-truncated');
+
+      // The closing classification is a judgment like any other: one request
+      // with at most MAX_CLAIMS scored questions, bought from the same turn and
+      // session budget as a stagnation check.
+      const classifySkip = this.#spendJudgment(state);
+      if (classifySkip) {
+        this.#skip(classifySkip);
+        return;
+      }
+      const classifyStarted = this.#now();
+      let classification: Awaited<ReturnType<ReflexGateService['classifyClaims']>>;
+      try {
+        classification = await this.#gate.classifyClaims({
+          statements: candidates,
+          intent: this.config.intent,
+          context: assembled.text.slice(0, 600)
+        });
+      } catch {
+        // FAIL-OPEN: an unavailable classifier must not become a model-visible
+        // objection, and it must never fall back to the retired word list.
+        this.#skip('closing-claim-unavailable');
+        return;
+      }
+      const claims = classification.results
+        .filter((item) => item.isClaim && item.confidence >= this.config.claimMinConfidence)
+        .map((item) => ({ statement: item.statement }));
+      const classifyTokens = candidates.reduce((sum, statement) => sum + estimateTokens(statement), 0);
+      const classificationCharge: JudgmentCharge = {
+        judgments: 1,
+        memoHits: 0,
+        localLatencyMs: Math.max(0, this.#now() - classifyStarted - classification.latencyMs),
+        remoteLatencyMs: classification.latencyMs,
+        judgeTokens: classifyTokens
+      };
+      if (claims.length === 0) {
+        this.#charge('closing', classificationCharge);
+        this.#skip('closing-no-claim');
         return;
       }
 
-      const verdict = await this.#gate.verify(assertions, evidence, {
+      // Classification and verification are one logical closing judgment: the
+      // classification decides *whether* anything is worth verifying, and both
+      // requests are charged (tokens and latency) against the one judgment the
+      // turn budget allowed.
+      const verdict = await this.#gate.verify(claims, assembled.text, {
         latchCacheKey: `reflex-closing:${agentId}:${payload.turn}`
       });
-      const judgeTokens = assertions.reduce((sum, item) => sum + estimateTokens(item.statement), estimateTokens(evidence));
+      const judgeTokens =
+        classifyTokens + claims.reduce((sum, item) => sum + estimateTokens(item.statement), estimateTokens(assembled.text));
       const judgment: JudgmentCharge = {
         judgments: 1,
         memoHits: 0,
-        localLatencyMs: Math.max(0, this.#now() - started - verdict.latencyMs),
-        remoteLatencyMs: verdict.latencyMs,
+        localLatencyMs: Math.max(0, this.#now() - started - verdict.latencyMs - classification.latencyMs),
+        remoteLatencyMs: classification.latencyMs + verdict.latencyMs,
         judgeTokens
       };
       // `escalate` is not a contradiction. It means the gate could not decide —
@@ -2001,7 +2342,8 @@ export class InterventionEngine {
   async #judge(
     state: AgentState,
     signal?: AbortSignal,
-    steps: readonly ObservedStep[] = state.steps
+    steps: readonly ObservedStep[] = state.steps,
+    goal?: string
   ): Promise<{
     useful: boolean;
     paid: boolean;
@@ -2012,13 +2354,14 @@ export class InterventionEngine {
     skip?: string;
     response: StagnationCheckResponse;
   }> {
-    // The question is the trailing window, so the answer is cached against it:
-    // the same episode is never judged twice, while a *different* episode in the
-    // same turn is a new question — and therefore subject to the turn's budget.
-    const key = steps
+    // The question is the trailing window plus the context it is asked in, so
+    // the answer is cached against both: the same episode is never judged twice,
+    // while a *different* episode or a different wait context in the same turn is
+    // a new question — and therefore subject to the turn's budget.
+    const key = `${goal ?? ''}\u0000${steps
       .slice(-Math.max(1, this.config.repeatThreshold))
       .map((step) => step.signature)
-      .join('|');
+      .join('|')}`;
     const cached = state.verdictTurn === state.turn && state.verdictKey === key ? state.verdict : undefined;
     if (cached) {
       return {
@@ -2052,7 +2395,7 @@ export class InterventionEngine {
       0
     );
     const started = this.#now();
-    const response = await this.#stagnation.check(undefined, history);
+    const response = await this.#stagnation.check(goal, history);
     const remoteLatencyMs = Number.isFinite(response.latencyMs) ? response.latencyMs : 0;
     state.verdict = response;
     state.verdictTurn = state.turn;
@@ -2282,12 +2625,14 @@ export class InterventionEngine {
       steps: [],
       claims: '',
       evidence: [],
+      evidenceSuspect: false,
       interventions: 0,
       judgmentsTurn: 0,
       judgmentsCount: 0,
       judgmentsSession: 0,
       verdictTurn: 0,
       verdictKey: '',
+      waited: new Set<string>(),
       applied: new Set<string>(),
       denied: new Set<string>(),
       refused: new Set<string>()
@@ -2327,12 +2672,34 @@ export class InterventionEngine {
     if (state.steps.length > MAX_STEPS) state.steps.shift();
   }
 
-  /** Retain one failing evidence line for the closing check. */
-  #rememberEvidence(state: AgentState, tool: string, error: string, text: string): void {
-    const line = clip(`${tool}: ${error.length > 0 ? error : text}`.replace(/\s+/g, ' ').trim(), EVIDENCE_CHARS);
-    if (line.length === 0) return;
-    state.evidence.push(line);
-    if (state.evidence.length > MAX_EVIDENCE) state.evidence.shift();
+  /**
+   * Retain one result's evidence candidates for the closing check.
+   *
+   * Called for every observed result, not only structurally failing ones: a
+   * `{ok:false}`, a timeout, or a Chinese error has no exit code to prove it,
+   * and the closing judgment must be able to see it. The regex only guarantees
+   * that its own hits survive; it never decides that the rest is benign.
+   * @param state - the agent's bookkeeping.
+   * @param tool - tool name that produced the result.
+   * @param result - the execution-local result.
+   * @param text - the effective model-facing text.
+   * @param error - the result's error message, when it has a distinct one.
+   */
+  #rememberEvidence(
+    state: AgentState,
+    tool: string,
+    result: Readonly<ToolExecutionResult>,
+    text: string,
+    error: string
+  ): void {
+    const haystack = error.length > 0 && !text.includes(error) ? `${text}\n${error}` : text;
+    const entries = evidenceOf(tool, result, haystack);
+    if (entries.length === 0) return;
+    state.evidence.push(...entries);
+    if (state.evidence.length > MAX_EVIDENCE) {
+      state.evidence.splice(0, state.evidence.length - MAX_EVIDENCE);
+    }
+    if (entries.some((entry) => entry.suspect)) state.evidenceSuspect = true;
   }
 
   /** The arguments of one call, as the text a judgment and a digest see. */
@@ -2623,29 +2990,29 @@ function reductionPercentage(originalChars: number, prunedChars: number): number
 }
 
 /**
- * The completion claims of one turn's assistant text.
+ * The *candidate* sentences of one turn's assistant text.
  *
- * Deterministic and local on purpose: the closing judgment is the most expensive
- * one in this module (it reads the turn's own claims against its failures), so
- * only sentences that actually claim completion are ever submitted, and a
- * sentence that already carries a failure marker is never one of them.
+ * Deterministic and semantic-free on purpose: splitting, de-duplication, the
+ * length floor, and the last-{@link MAX_CLAIMS} bound are all the local work
+ * this module may do. Whether a candidate really claims completion is System
+ * One's answer — an English word list would miss 中文「全部通过」 and read
+ * `not complete` as the opposite, so there is none here any more.
  *
  * @param text - the turn's assistant text.
- * @returns bounded, deduplicated claims.
+ * @returns bounded, deduplicated candidates in their original order.
  */
-function claimsOf(text: string): Array<{ statement: string; criteria?: string }> {
-  const assertions: Array<{ statement: string; criteria?: string }> = [];
+export function claimCandidates(text: string): string[] {
+  const candidates: string[] = [];
   const seen = new Set<string>();
   for (const raw of text.split(/(?<=[.!?。！？\n])/)) {
     const sentence = raw.replace(/\s+/g, ' ').trim();
-    if (sentence.length < 8 || !COMPLETION_CLAIM.test(sentence) || FAILURE_MARKER.test(sentence)) continue;
+    if (sentence.length < MIN_CLAIM_CHARS) continue;
     const statement = clip(sentence, 200);
     if (seen.has(statement)) continue;
     seen.add(statement);
-    assertions.push({ statement });
-    if (assertions.length >= MAX_CLAIMS) break;
+    candidates.push(statement);
   }
-  return assertions;
+  return candidates.length > MAX_CLAIMS ? candidates.slice(candidates.length - MAX_CLAIMS) : candidates;
 }
 
 // Re-exported so a Host attaching the session log does not have to import the

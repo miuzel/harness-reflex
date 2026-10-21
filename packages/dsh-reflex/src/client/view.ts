@@ -1093,6 +1093,8 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
             disabled,
             onChange: (value) => setInterventions({ pruneJudgeMinChars: value })
           }),
+          budgetField('claimMinConfidence'),
+          budgetField('closingEvidenceChars'),
           GuidedField({
             t,
             path: 'interventions.intent',

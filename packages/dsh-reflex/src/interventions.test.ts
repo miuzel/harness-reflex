@@ -17,14 +17,18 @@ import { createBackend } from './bridge.js';
 import { reflexToolNames } from './tools.js';
 import {
   applyPruneFloor,
+  assembleEvidence,
   countTrailingFailures,
   countTrailingRepeats,
   detectOscillation,
   digestOf,
   estimateTokens,
+  evidenceOf,
+  FAILURE_MARKER,
   failureOf,
   installInterventions,
   InterventionEngine,
+  pollShapeOf,
   pruneFloorPlan,
   pruneMarker,
   suspicionOf,
@@ -43,7 +47,7 @@ import {
   PRUNED_ORIGINAL_RECORD_TYPE
 } from './session-audit.js';
 import { createToolContext, fakeAgent, resultText } from './testing.js';
-import { ToolResultPruner } from './vendor/harness-reflex/index.js';
+import { JevDecisionBackend, MockDecisionBackend, ToolResultPruner } from './vendor/harness-reflex/index.js';
 import type { ActionStep, GateResponse, PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
 
 /**
@@ -93,13 +97,16 @@ function acceptOf(result: Readonly<ToolExecutionResult>): PostToolDecision {
 function stagnationStub(
   response: Partial<StagnationCheckResponse> = {},
   latencyMs = 0
-): { service: InterventionEngineOptions['stagnation']; calls: ActionStep[][] } {
+): { service: InterventionEngineOptions['stagnation']; calls: ActionStep[][]; goals: Array<string | undefined> } {
   const calls: ActionStep[][] = [];
+  const goals: Array<string | undefined> = [];
   return {
     calls,
+    goals,
     service: {
-      check: async (_goal: string | undefined, history?: ActionStep[]) => {
+      check: async (goal: string | undefined, history?: ActionStep[]) => {
         calls.push(history ?? []);
+        goals.push(goal);
         return {
           isStuck: true,
           patternType: 'repetition',
@@ -131,8 +138,20 @@ function pruneStub(candidate: (raw: string) => string, latencyMs = 0): Intervent
   } as InterventionEngineOptions['prune'];
 }
 
-/** A gate service returning one controlled verdict. */
-function gateStub(outcome: 'verified' | 'contradicted' | 'escalate', statements = 1): InterventionEngineOptions['gate'] {
+/** Default claim classifier of the gate stub: a positive completion word reads as a claim. */
+function defaultClaimOf(statement: string): { isClaim: boolean; confidence: number } {
+  return {
+    isClaim: /(pass|green|success|complete|finished|done|verified|通过|完成|成功)/i.test(statement),
+    confidence: 0.92
+  };
+}
+
+/** A gate service returning one controlled verdict and claim classifications. */
+function gateStub(
+  outcome: 'verified' | 'contradicted' | 'escalate',
+  statements = 1,
+  claimOf: (statement: string) => { isClaim: boolean; confidence: number } = defaultClaimOf
+): InterventionEngineOptions['gate'] {
   return {
     verify: async (assertions: readonly { statement: string }[]) =>
       ({
@@ -145,7 +164,11 @@ function gateStub(outcome: 'verified' | 'contradicted' | 'escalate', statements 
         })),
         needsEscalation: outcome === 'escalate',
         latencyMs: 0
-      }) satisfies GateResponse
+      }) satisfies GateResponse,
+    classifyClaims: async (request: { statements: string[] }) => ({
+      results: request.statements.map((statement) => ({ statement, ...claimOf(statement) })),
+      latencyMs: 0
+    })
   } as InterventionEngineOptions['gate'];
 }
 
@@ -2584,19 +2607,20 @@ test('the wait exemption is decided by tool identity and argument shape, never b
   assert.equal(isWaitQuery(execOf('job_list', [])), false, 'an array is not an argument object');
 });
 
-test('a repeated background-job poll is never denied, corrected, or booked — in either mode', async () => {
+test('a repeated background-job poll is judged as a wait by System One, not waved through by its name', async () => {
   const run = async (mode: 'observe' | 'active') => {
-    const stagnation = stagnationStub();
+    // System One's answer for this episode: the polls are a wait, not a loop.
+    const stagnation = stagnationStub({ isStuck: false, patternType: 'none', confidence: 0.9 });
     const engine = engineFor({ mode, capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
     const agent = fakeAgent({ id: `poll-${mode}` });
     const poll = (): ToolExecution => execOf('job_output', { job_id: 'job-42', wait: true }, agent);
     const running = resultOf('build still running');
+    const decisions: string[] = [];
     for (let index = 0; index < 5; index += 1) {
+      const decision = await engine.toolCall(poll(), async () => ({ kind: 'allow' }));
+      decisions.push((decision as { kind: string }).kind);
       await engine.toolResult(poll(), running, async () => acceptOf(running));
     }
-    // The sixth identical poll is proposed where an ordinary call would already
-    // be a repetition (five recorded plus one pending against a threshold of 3).
-    const decision = await engine.toolCall(poll(), async () => ({ kind: 'allow' }));
     const messages = [message('still waiting')];
     const step = (await engine.preStep(stepPayload(agent, 1, 6, messages), async () => ({
       kind: 'enter' as const,
@@ -2605,9 +2629,10 @@ test('a repeated background-job poll is never denied, corrected, or booked — i
     const report = engine.report()[mode];
     const state = engine.stateOf(`poll-${mode}`)!;
     return {
-      decision,
+      decisions,
       stepped: step.messages.length,
       judgments: stagnation.calls.length,
+      judged: stagnation.calls[0]?.map((item) => `${item.tool}:${item.input}`) ?? [],
       plans: report.plans,
       applied: report.applied,
       booked: state.interventions,
@@ -2619,16 +2644,22 @@ test('a repeated background-job poll is never denied, corrected, or booked — i
 
   const observed = await run('observe');
   const acted = await run('active');
-  assert.deepEqual(observed.decision, { kind: 'allow' }, 'the repeated poll is not refused');
+  assert.deepEqual(observed.decisions, ['allow', 'allow', 'allow', 'allow', 'allow'], 'every poll runs');
   assert.deepEqual(observed, acted, 'observe plans exactly the nothing active would do');
   assert.equal(observed.stepped, 1, 'no corrective context is attached after a wait');
-  assert.equal(observed.judgments, 0, 'no System 1 judgment is bought for a wait');
+  assert.equal(observed.judgments, 1, 'the repeated poll is asked about exactly once per turn');
+  assert.equal(observed.judged.length, 3, 'the judgment sees the three polls that make the repetition');
+  assert.ok(observed.judged.every((line) => line.startsWith('job_output:')), 'the question is about the polls');
+  assert.ok(
+    observed.judged.every((line) => line.includes('[poll #')),
+    'each poll is labelled with its place in the series, so a wait is not read as an exact retry'
+  );
   assert.equal(observed.plans, 0);
   assert.equal(observed.applied, 0);
   assert.equal(observed.booked, 0, 'and no intervention allowance is spent');
-  assert.equal(observed.judgmentsSession, 0, 'nor any judgment allowance');
+  assert.equal(observed.judgmentsSession, 1, 'the wait question was paid for like any other judgment');
   assert.equal(observed.steps, 5, 'the polls are still recorded, so the audit trail stays complete');
-  assert.ok(observed.waitSkips >= 1, 'the exemption is reported rather than silently dropped');
+  assert.ok(observed.waitSkips >= 1, 'the wait outcome is reported rather than silently dropped');
 });
 
 test('a real loop either side of a wait is still refused at the unchanged threshold', async () => {
@@ -2695,23 +2726,31 @@ test('off collects nothing, and the exemption never moves state or budget across
   );
 
   // A long wait of one agent leaves another agent's window and budget untouched.
-  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } });
+  const stagnation = stagnationStub({ isStuck: false, patternType: 'none', confidence: 0.9 });
+  const engine = engineFor(
+    { mode: 'active', capabilities: { stagnation: 'inherit' } },
+    { stagnation: stagnation.service }
+  );
   const poller = fakeAgent({ id: 'poller' });
-  const stranger = fakeAgent({ id: 'stranger' });
   const poll = execOf('job_output', { job_id: 'job-9', wait: true }, poller);
   for (let index = 0; index < 8; index += 1) {
+    await engine.toolCall(poll, async () => ({ kind: 'allow' }));
     await engine.toolResult(poll, ok, async () => acceptOf(ok));
   }
-  assert.equal(engine.stateOf('poller')!.interventions, 0, 'eight polls spend nothing');
-  assert.equal(engine.stateOf('poller')!.judgmentsSession, 0);
-  assert.equal(engine.stateOf('stranger'), undefined, 'and they created no state for anybody else');
+  assert.equal(engine.stateOf('poller')!.interventions, 0, 'eight legal waits book no intervention');
+  assert.equal(engine.stateOf('poller')!.judgmentsSession, 1, 'but the one wait question is paid for');
 
+  // Another agent never sees the poller's window or budget, and a genuine loop
+  // of its own is still refused by the ordinary (stuck-confirming) judgment.
+  assert.equal(engine.stateOf('stranger'), undefined, 'and they created no state for anybody else');
+  const loopEngine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } });
+  const stranger = fakeAgent({ id: 'stranger' });
   const strangerExec = execOf('bash', { command: 'ls' }, stranger);
-  await engine.toolResult(strangerExec, ok, async () => acceptOf(ok));
-  await engine.toolResult(strangerExec, ok, async () => acceptOf(ok));
-  const third = (await engine.toolCall(strangerExec, async () => ({ kind: 'allow' }))) as { kind: string };
+  await loopEngine.toolResult(strangerExec, ok, async () => acceptOf(ok));
+  await loopEngine.toolResult(strangerExec, ok, async () => acceptOf(ok));
+  const third = (await loopEngine.toolCall(strangerExec, async () => ({ kind: 'allow' }))) as { kind: string };
   assert.equal(third.kind, 'deny', 'a fresh agent still reaches its own threshold');
-  assert.equal(engine.stateOf('stranger')!.interventions, 1, 'and books its own plan');
+  assert.equal(loopEngine.stateOf('stranger')!.interventions, 1, 'and books its own plan');
 });
 
 // ── prune judging threshold: judgments are spent only on large payloads ─────
@@ -2800,4 +2839,306 @@ test('the configured judging threshold outranks the environment variable', async
     stub.restore();
     delete process.env.SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS;
   }
+});
+
+// ── System One decision for closing claims and failure evidence ─────────────
+
+/** A Jev gateway stub that answers every score question with one distribution. */
+function claimGatewayStub(
+  positive: Record<string, number>
+): { calls: { body: any }[]; restore: () => void } {
+  const original = globalThis.fetch;
+  const calls: { body: any }[] = [];
+  globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as any;
+    calls.push({ body });
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(body.questions ?? {})) {
+      const p = positive[id] ?? 0.9;
+      answers[id] = { type: 'score', score: p >= 0.5 ? 1 : 0, probabilities: { '0': 1 - p, '1': p } };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ model: 'jev-stub', answers }),
+      text: async () => ''
+    };
+  }) as unknown as typeof fetch;
+  return { calls, restore: () => (globalThis.fetch = original) };
+}
+
+test('the claim classifier sends one score question per candidate in a single request', async () => {
+  const stub = claimGatewayStub({ 'closing-claim-0': 0.97, 'closing-claim-1': 0.04 });
+  try {
+    const backend = new JevDecisionBackend({ apiKey: 'test-key', model: 'jev-stub', timeoutMs: 500 });
+    const response = await backend.classifyClaims({
+      statements: ['全部通过，测试全绿。', 'The task is not complete.'],
+      intent: 'finish the release'
+    });
+    assert.equal(stub.calls.length, 1, 'one request, not one per sentence');
+    const body = stub.calls[0]!.body;
+    assert.deepEqual(Object.keys(body.questions).sort(), ['closing-claim-0', 'closing-claim-1']);
+    assert.equal(body.questions['closing-claim-0'].type, 'score', 'each question is a score question');
+    assert.equal(body.state.statements['closing-claim-0'], '全部通过，测试全绿。', 'the sentence travels in the state');
+    assert.equal(body.state.intent, 'finish the release', 'the intent travels in the state');
+    assert.deepEqual(response.results, [
+      { statement: '全部通过，测试全绿。', isClaim: true, confidence: 0.97 },
+      { statement: 'The task is not complete.', isClaim: false, confidence: 0.04 }
+    ]);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('the mock semantic judge reads Chinese completion claims and negations', async () => {
+  const backend = new MockDecisionBackend();
+  const response = await backend.classifyClaims({
+    statements: ['全部通过，测试全绿。', '已完成，构建成功。', 'The task is not complete.', '没有通过，仍有失败。'],
+    intent: 'test'
+  });
+  assert.deepEqual(
+    response.results.map((item) => item.isClaim),
+    [true, true, false, false],
+    'Chinese claims count, negations do not'
+  );
+});
+
+/** A gate stub whose claim classification is the real mock semantic judge. */
+function semanticGate(
+  outcome: 'verified' | 'contradicted' | 'escalate' = 'contradicted'
+): { gate: InterventionEngineOptions['gate']; verifies: number; claims: string[][] } {
+  const backend = new MockDecisionBackend();
+  const verifiedBy = gateStub(outcome) as unknown as {
+    verify: (assertions: readonly { statement: string }[]) => Promise<GateResponse>;
+  };
+  let verifies = 0;
+  const claims: string[][] = [];
+  const gate = {
+    verify: async (assertions: readonly { statement: string }[]) => {
+      verifies += 1;
+      claims.push(assertions.map((item) => item.statement));
+      return verifiedBy.verify(assertions);
+    },
+    classifyClaims: (request: { statements: string[]; intent: string }) => backend.classifyClaims(request)
+  } as InterventionEngineOptions['gate'];
+  return {
+    gate,
+    get verifies() {
+      return verifies;
+    },
+    get claims() {
+      return claims;
+    }
+  } as unknown as { gate: InterventionEngineOptions['gate']; verifies: number; claims: string[][] };
+}
+
+test('a Chinese completion claim is classified and steered on, unlike the retired English-only word list', async () => {
+  const semantic = semanticGate('contradicted');
+  const engine = engineFor({ mode: 'active' }, { gate: semantic.gate });
+  const steered: UserMessage[] = [];
+  const agent = { ...fakeAgent({ id: 'closing-zh' }), steer: (m: UserMessage) => steered.push(m) };
+  engine.observeAssistantStream({
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: '全部通过，测试全绿。' } }
+  });
+  const failing = resultOf('{"ok":false}', false);
+  await engine.toolResult(execOf('bash', { command: 'npm test' }, agent), failing, async () => acceptOf(failing));
+  await engine.turnStopping({ agent, turn: 1 });
+  assert.equal(semantic.verifies, 1, 'the Chinese sentence reached gate.verify as a claim');
+  assert.deepEqual(semantic.claims[0], ['全部通过，测试全绿。']);
+  assert.equal(steered.length, 1, 'and the contradiction steers in active mode');
+});
+
+test('a negated sentence is not submitted as a completion claim', async () => {
+  const semantic = semanticGate('contradicted');
+  const engine = engineFor({ mode: 'active' }, { gate: semantic.gate });
+  const steered: UserMessage[] = [];
+  const agent = { ...fakeAgent({ id: 'closing-negated' }), steer: (m: UserMessage) => steered.push(m) };
+  engine.observeAssistantStream({
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: 'The task is not complete.' } }
+  });
+  const failing = resultOf('{"ok":false}', false);
+  await engine.toolResult(execOf('bash', { command: 'npm test' }, agent), failing, async () => acceptOf(failing));
+  await engine.turnStopping({ agent, turn: 1 });
+  assert.equal(semantic.verifies, 0, 'no assertion was submitted for verification');
+  assert.equal(steered.length, 0, 'and nothing steers');
+  assert.ok((engine.report().skips['closing-no-claim'] ?? 0) === 1, 'the no-claim outcome is reported');
+  assert.equal(engine.report().active.judgments, 1, 'the classification was still one judgment');
+});
+
+test('an unavailable classifier fails open instead of falling back to a word list', async () => {
+  const failingGate = {
+    verify: async () => {
+      throw new Error('should not be called');
+    },
+    classifyClaims: async () => {
+      throw new Error('System One down');
+    }
+  } as unknown as InterventionEngineOptions['gate'];
+  const engine = engineFor({ mode: 'active' }, { gate: failingGate });
+  const steered: UserMessage[] = [];
+  const agent = { ...fakeAgent({ id: 'closing-unavailable' }), steer: (m: UserMessage) => steered.push(m) };
+  engine.observeAssistantStream({
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: 'All tests passed.' } }
+  });
+  const failing = resultOf('{"ok":false}', false);
+  await engine.toolResult(execOf('bash', { command: 'npm test' }, agent), failing, async () => acceptOf(failing));
+  await engine.turnStopping({ agent, turn: 1 });
+  assert.equal(steered.length, 0, 'a backend failure is not an objection');
+  assert.equal(engine.report().skips['closing-claim-unavailable'], 1, 'the fail-open reason is recorded');
+});
+
+test('{ok:false}, a timeout, and a Chinese error become evidence without FAILURE_MARKER', () => {
+  const cases: Array<[string, Readonly<ToolExecutionResult>]> = [
+    ['{"ok":false}', resultOf('{"ok":false}')],
+    ['operation timed out after 30s', resultOf('operation timed out after 30s')],
+    ['连接失败：数据库不可达', resultOf('连接失败：数据库不可达')]
+  ];
+  for (const [text, result] of cases) {
+    const entries = evidenceOf('probe', result, text);
+    assert.ok(entries.some((entry) => entry.suspect), `${text} is a failure suspicion`);
+    assert.ok(
+      entries.some((entry) => entry.text.includes(text.slice(0, Math.min(12, text.length)))),
+      `${text} reaches the evidence text`
+    );
+    // None of these contains a FAILURE_MARKER word; the old regex would have dropped all three.
+    assert.equal(FAILURE_MARKER.test(text), false, `${text} does not match the old marker`);
+  }
+});
+
+test('the evidence budget keeps every marker line and reports what it truncated', () => {
+  const noisy = Array.from({ length: 30 }, (_, index) => `Error: diagnostic line ${index} ${'x'.repeat(180)}`);
+  const marker = resultOf(noisy.join('\n'), true);
+  const entries = evidenceOf('bash', marker, noisy.join('\n'));
+  const assembled = assembleEvidence(entries, 500);
+  for (const line of noisy) {
+    assert.ok(assembled.text.includes(`Error: diagnostic line ${line.split(' ')[3]}`), 'every marker line survives the budget');
+  }
+  assert.ok(assembled.truncatedChars > 0, 'the dropped tail material is counted');
+
+  const tails = Array.from({ length: 20 }, (_, index) => {
+    const text = `result ${index} ${'y'.repeat(200)}`;
+    return evidenceOf('bash', resultOf(text), text);
+  }).flat();
+  const clipped = assembleEvidence(tails, 300);
+  assert.ok(clipped.truncatedChars > 0, 'a tail-only overflow is reported');
+  assert.ok(clipped.retainedChars <= 300, 'the budget bounds the retained tail text');
+});
+
+// ── wait classification: the name list asks, System One decides ─────────────
+
+/** Drive one repeated poll through the loop and return the proposals' decisions. */
+async function pollTimes(
+  engine: InterventionEngine,
+  exec: () => ToolExecution,
+  result: Readonly<ToolExecutionResult>,
+  times: number
+): Promise<string[]> {
+  const decisions: string[] = [];
+  for (let index = 0; index < times; index += 1) {
+    const decision = await engine.toolCall(exec(), async () => ({ kind: 'allow' }));
+    decisions.push((decision as { kind: string }).kind);
+    await engine.toolResult(exec(), result, async () => acceptOf(result));
+  }
+  return decisions;
+}
+
+test('a polling tool outside the name list is not mis-blocked: System One reads it as a wait', async () => {
+  const stagnation = stagnationStub({ isStuck: false, patternType: 'none', confidence: 0.9 });
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
+  const agent = fakeAgent({ id: 'external-poller' });
+  const poll = (): ToolExecution => execOf('task_poll', { task_id: 'task-3' }, agent);
+  const running = resultOf('task is running');
+  const decisions = await pollTimes(engine, poll, running, 5);
+  assert.deepEqual(decisions, ['allow', 'allow', 'allow', 'allow', 'allow'], 'every poll of the external tool runs');
+  assert.equal(stagnation.calls.length, 1, 'the repeated shape is asked about, once');
+  assert.ok(
+    stagnation.calls[0]!.every((step) => step.tool === 'task_poll'),
+    'the question carries the poll history'
+  );
+  assert.ok((stagnation.goals[0] ?? '').includes('suspect: poll-handle'), 'the context names the suspect wait shape');
+  assert.ok((stagnation.goals[0] ?? '').includes('tool: task_poll'), 'the context names the tool');
+  assert.ok((stagnation.goals[0] ?? '').includes('argument-shape: task_id=task-3'), 'the context names the argument shape');
+  assert.equal(engine.report().active.plans, 0, 'a legal wait plans nothing');
+  assert.equal(engine.report().active.applied, 0);
+  assert.equal(engine.stateOf('external-poller')!.interventions, 0);
+  assert.ok((engine.report().skips['wait-query'] ?? 0) >= 1, 'the wait outcome is reported');
+});
+
+test('a listed job poll whose judge confirms stagnation is still refused', async () => {
+  const stagnation = stagnationStub({ isStuck: true, patternType: 'repetition', confidence: 0.9 });
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } }, { stagnation: stagnation.service });
+  const agent = fakeAgent({ id: 'stuck-poller' });
+  const poll = (): ToolExecution => execOf('job_output', { job_id: 'job-1', wait: true }, agent);
+  const running = resultOf('job still running');
+  const decisions = await pollTimes(engine, poll, running, 3);
+  assert.deepEqual(decisions, ['allow', 'allow', 'deny'], 'the third poll is refused when the judge confirms a loop');
+  assert.equal(engine.report().active.applied, 1);
+  assert.ok((stagnation.goals[0] ?? '').includes('suspect: wait-query'), 'the listed tool was asked about, not skipped');
+});
+
+test('a wait whose System One is unavailable fails open and records why', async () => {
+  const throwing = {
+    check: async () => {
+      throw new Error('System One down');
+    }
+  } as unknown as InterventionEngineOptions['stagnation'];
+  const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'inherit' } }, { stagnation: throwing });
+  const agent = fakeAgent({ id: 'wait-down' });
+  const poll = (): ToolExecution => execOf('job_output', { job_id: 'job-2', wait: true }, agent);
+  const running = resultOf('job still running');
+  const decisions = await pollTimes(engine, poll, running, 3);
+  assert.deepEqual(decisions, ['allow', 'allow', 'allow'], 'a backend failure never blocks a wait');
+  assert.equal(engine.report().skips['wait-query-unavailable'], 1, 'the fail-open reason is reported');
+  assert.equal(engine.report().active.applied, 0);
+});
+
+test('a bare wait flag without a job handle is still not a poll shape', () => {
+  assert.equal(pollShapeOf(execOf('job_output', { wait: true })), undefined, 'a wait flag names no job');
+  assert.equal(pollShapeOf(execOf('bash', { command: 'poll; sleep 1' })), undefined, 'a command is not a handle');
+  assert.equal(pollShapeOf(execOf('task_poll', { task_id: 'task-3' })), 'poll-handle');
+  assert.equal(pollShapeOf(execOf('rpc', '{"run_id":"run-9"}')), 'poll-handle', 'a stringified payload keeps its shape');
+});
+
+test('the closing knobs are authored config with defaults and range validation', () => {
+  const resolved = resolveConfig({ backend: 'mock' });
+  assert.equal(resolved.interventions.claimMinConfidence, 0.5, 'the claim floor defaults to 0.5');
+  assert.equal(resolved.interventions.closingEvidenceChars, 2400, 'the evidence budget defaults to 2400');
+  assert.throws(
+    () => resolveConfig({ backend: 'mock', interventions: { closingEvidenceChars: 199 } }),
+    /closingEvidenceChars/,
+    'a budget below 200 is rejected'
+  );
+  assert.throws(
+    () => resolveConfig({ backend: 'mock', interventions: { claimMinConfidence: 1.5 } }),
+    /claimMinConfidence/,
+    'a floor above 1 is rejected'
+  );
+});
+
+test('the configured claim floor and evidence budget drive the closing check', async () => {
+  const gate = gateStub('contradicted', 1, () => ({ isClaim: true, confidence: 0.4 }));
+  const engine = engineFor(
+    { mode: 'active', claimMinConfidence: 0.9, closingEvidenceChars: 240 },
+    { gate }
+  );
+  const steered: UserMessage[] = [];
+  const agent = { ...fakeAgent({ id: 'closing-configured' }), steer: (m: UserMessage) => steered.push(m) };
+  engine.observeAssistantStream({
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: '全部通过，测试全绿。' } }
+  });
+  for (let index = 0; index < 6; index += 1) {
+    const text = `{"ok":false} probe ${index} ${'z'.repeat(300)}`;
+    const result = resultOf(text);
+    await engine.toolResult(execOf('probe', { index }, agent), result, async () => acceptOf(result));
+  }
+  await engine.turnStopping({ agent, turn: 1 });
+  assert.equal(steered.length, 0, 'a claim below the configured floor is not verified');
+  assert.equal(engine.report().skips['closing-no-claim'], 1, 'the floor, not a word list, decided it');
+  assert.ok(engine.report().evidence.truncatedChars > 0, 'the configured budget truncated the evidence');
+  assert.ok((engine.report().skips['evidence-truncated'] ?? 0) >= 1, 'and the truncation is recorded');
 });

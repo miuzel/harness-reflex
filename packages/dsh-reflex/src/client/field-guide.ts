@@ -81,6 +81,16 @@ export const FIELD_GUIDE: Record<string, FieldGuide> = {
     helpKey: 'helpPruneJudgeMinChars',
     placeholder: '10000'
   },
+  'interventions.claimMinConfidence': {
+    labelKey: 'labelClaimMinConfidence',
+    helpKey: 'helpClaimMinConfidence',
+    placeholder: '0.5'
+  },
+  'interventions.closingEvidenceChars': {
+    labelKey: 'labelClosingEvidenceChars',
+    helpKey: 'helpClosingEvidenceChars',
+    placeholder: '2400'
+  },
 
   // Dynamic rows: the page substitutes the suffix / capability into the label
   // and fills the `{...}` holes in the explanation.

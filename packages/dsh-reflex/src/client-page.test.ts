@@ -1595,10 +1595,12 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
     const groupOf = (path: string): string => tabOfPath(path);
 
     const tabs = ['routing', 'effort', 'backend', 'interventions', 'tools'];
+    const renderedPaths = new Set<string>();
     for (const tab of tabs) {
       openTab(mounted.tree, tabLabels[tab] as string);
       const tree = await mounted.runtime.flush();
       const wrappers = elements(tree).filter((element) => typeof element.props['data-reflex-path'] === 'string');
+      for (const wrapper of wrappers) renderedPaths.add(String(wrapper.props['data-reflex-path']));
       const pathsInTab = uniquePaths.filter((path) => groupOf(path) === tab);
       assert.ok(pathsInTab.length > 0, `no schema field maps to the ${tab} tab`);
 
@@ -1664,6 +1666,15 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
         );
       }
     }
+    // Exact set equality in both directions: every schema leaf is editable on the
+    // page, and every editable field the page renders is a declared schema leaf.
+    // A new schema field that is not wired into the page fails the left-to-right
+    // direction; a page-only knob fails the right-to-left one.
+    assert.deepEqual(
+      [...renderedPaths].sort(),
+      [...uniquePaths].sort(),
+      `the panel's editable field set (${language}) differs from the schema leaf set`
+    );
     mounted.unmount();
   }
 
@@ -1699,6 +1710,29 @@ test('the constraint copy matches the Host rules and the judge field is cross-ch
   ) as Element;
   const judgeInput = elements(judgeWrapper).find((element) => element.type === 'input');
   assert.equal(String(judgeInput?.props.placeholder), '10000', 'the judge threshold placeholder is not 10000');
+
+  // The two closing knobs are real controls with their own default and examples.
+  const claimNote = note('interventions.claimMinConfidence');
+  assert.ok(claimNote.includes('0.5'), 'the claim floor default is missing');
+  const claimWrapper = elements(tree).find(
+    (element) => element.props['data-reflex-path'] === 'interventions.claimMinConfidence'
+  ) as Element;
+  assert.equal(
+    String(elements(claimWrapper).find((element) => element.type === 'input')?.props.placeholder),
+    '0.5',
+    'the claim floor placeholder is not 0.5'
+  );
+  const budgetNote = note('interventions.closingEvidenceChars');
+  assert.ok(budgetNote.includes('2400'), 'the evidence budget default is missing');
+  assert.ok(budgetNote.includes('截断'), 'the evidence budget does not describe truncation');
+  const budgetWrapper = elements(tree).find(
+    (element) => element.props['data-reflex-path'] === 'interventions.closingEvidenceChars'
+  ) as Element;
+  assert.equal(
+    String(elements(budgetWrapper).find((element) => element.type === 'input')?.props.placeholder),
+    '2400',
+    'the evidence budget placeholder is not 2400'
+  );
 
   openTab(tree, '推理强度');
   tree = await mounted.runtime.flush();
