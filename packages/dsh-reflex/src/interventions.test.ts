@@ -1225,38 +1225,139 @@ test('a CRLF payload keeps whole lines too, and never strands a carriage return'
   assert.ok(floored.text.length < original.length);
 });
 
-test('a payload with no line to keep is refused, never cut into a fragment', () => {
+test('a payload with no line to keep installs the candidate, never a fragment', () => {
   // One runaway line and no terminator at all: there is no whole line to keep, so
-  // there is no floor form — the original is handed back rather than chopped.
+  // there is no floor form. The candidate is still a real reduction, so it is
+  // installed as-is — never the whole payload, and never a half-line.
   const original = 'L'.repeat(1200);
-  const floored = applyPruneFloor(original, 'L'.repeat(80), {
+  const candidate = 'L'.repeat(80);
+  const floored = applyPruneFloor(original, candidate, {
     floorRatio: 0.5,
     headChars: 400,
     tailChars: 400,
     locator: locatorOf(original)
   });
   assert.equal(floored.floored, false, 'the floor refuses a payload it cannot align');
-  assert.equal(floored.text, original, 'the original is handed back whole');
-  assert.equal(floored.resultChars, original.length);
-  assert.equal(floored.omittedChars, 0, 'nothing was left out, so nothing was claimed');
+  assert.equal(floored.floorMissed, true, 'and says the promised share was not carried');
+  assert.equal(floored.text, candidate, 'the judged candidate is installed, not the original');
+  assert.equal(floored.resultChars, candidate.length);
+  assert.equal(floored.omittedChars, original.length - candidate.length, 'the omitted size is the real one');
   assert.equal(floored.text.includes('reflex prune'), false, 'and no marker was installed');
 });
 
-test('a first line longer than its budget is refused rather than trimmed', () => {
+test('a first line longer than its budget installs the candidate rather than a cut line', () => {
   // The head budget cannot pay for a whole first line, and the tail cannot reach the
-  // share without overlapping it: the form would have to cut a line, so it is refused.
+  // share without overlapping it: no floor form exists. The form is refused, but the
+  // candidate it could not widen is still installed whole.
   const original = `${'A'.repeat(600)}\n${Array.from({ length: 4 }, (_, index) => `tail line ${index}\n`).join('')}`;
-  const floored = applyPruneFloor(original, 'DIAGNOSTIC\n', {
+  const candidate = 'DIAGNOSTIC\n';
+  const floored = applyPruneFloor(original, candidate, {
     floorRatio: 0.5,
     headChars: 400,
     tailChars: 400,
     locator: locatorOf(original)
   });
   assert.equal(floored.floored, false);
-  assert.equal(floored.text, original);
-  assert.equal(floored.omittedChars, 0);
-  assert.equal(floored.text.includes('DIAGNOSTIC'), false, 'the refused form is the original, and nothing of the candidate');
+  assert.equal(floored.floorMissed, true);
+  assert.equal(floored.text, candidate);
+  assert.equal(floored.omittedChars, original.length - candidate.length);
   assert.equal(floored.text.includes('reflex prune'), false, 'nothing half-line was installed');
+});
+
+test('the minimal reproduction installs the candidate instead of throwing it away', () => {
+  // The supervisor's reproduction: 205 progress lines, and a judgment that already
+  // kept the first 50 and the last 50. The candidate is a real 48.8% reduction,
+  // but it is below the 50% floor target, and its lines overlap the head/tail the
+  // floor would compose — the growth loop walks the composed form up to the whole
+  // payload, and the refusal used to discard the candidate with it.
+  const rows = Array.from({ length: 205 }, (_, index) => `[===] progress ${String(index).padStart(3, '0')} ${'x'.repeat(52)}`);
+  const original = rows.join('\n');
+  const candidate = rows.slice(0, 50).concat(rows.slice(155)).join('\n');
+  assert.equal(original.length, 14759);
+  assert.equal(candidate.length, 7199);
+  assert.ok(candidate.length < Math.ceil(original.length * 0.5), 'the candidate is below the floor target');
+
+  const floored = applyPruneFloor(original, candidate, {
+    floorRatio: 0.5,
+    headChars: 400,
+    tailChars: 400,
+    locator: locatorOf(original)
+  });
+  assert.notEqual(floored.text, original, 'the whole payload is not reinstalled');
+  assert.equal(floored.text, candidate, 'the judged candidate is installed byte for byte');
+  assert.equal(floored.floored, false, 'no floor form was composed');
+  assert.equal(floored.floorMissed, true, 'and the promised share is honestly reported as missed');
+  assert.equal(floored.resultChars, candidate.length);
+  assert.equal(floored.omittedChars, original.length - candidate.length);
+  assert.equal(floored.text.includes('reflex prune'), false, 'the un-widened candidate carries no marker');
+});
+
+test('the real-machine shape installs its 6.6k candidate instead of reporting no-reduction', async () => {
+  // The audit of session-65bff8aa: 14534 characters, 205 lines, a balanced
+  // candidate of 6665 that already carried the original's head and tail. The
+  // floor could not widen it, and the whole 45.9% reduction was reported as
+  // "no-reduction" with candidateChars == originalChars.
+  const rows = Array.from(
+    { length: 205 },
+    (_, index) => `[===] progress ${String(index).padStart(3, '0')} ${'x'.repeat(index < 185 ? 51 : 50)}`
+  );
+  const original = rows.join('\n');
+  const candidate = rows.slice(0, 47).concat(rows.slice(158)).join('\n');
+  assert.equal(original.length, 14534);
+  assert.equal(candidate.length, 6653);
+  assert.ok(candidate.length < Math.ceil(original.length * 0.5), 'the candidate is below the floor target');
+  assert.ok(candidate.startsWith(rows[0]!), 'the candidate already carries the head the floor would compose');
+  assert.ok(candidate.endsWith(rows[204]!), 'and the tail');
+
+  const engine = engineFor({ mode: 'active' }, { prune: pruneStub(() => candidate) });
+  const result = resultOf(original);
+  const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+  const installed = installedText(decision as { content?: unknown });
+  assert.equal(installed.length, candidate.length, 'the candidate is the installed text');
+  assert.ok(installed.length < original.length, 'the payload really shrank');
+
+  const report = engine.report();
+  assert.equal(report.skips['no-reduction'], undefined, 'the run is no longer a no-reduction');
+  assert.equal(report.active.applied, 1);
+  const record = report.recent[0]!;
+  assert.equal(record.applied, true);
+  assert.equal(record.floorApplied, false);
+  assert.equal(record.floored, false);
+  assert.equal(record.floorMissed, true, 'the audit distinguishes a floor miss from no reduction');
+  assert.equal(record.originalTokens, estimateTokens(original));
+  assert.equal(record.candidateTokens, estimateTokens(candidate), 'the booked size is the installed size');
+  assert.equal(record.actualSavedTokens, estimateTokens(original) - estimateTokens(candidate));
+  assert.ok(record.actualSavedTokens > 0, 'a real saving is booked');
+});
+
+test('a candidate that is not smaller is still a real no-reduction, not a floor miss', async () => {
+  const options = { floorRatio: 0.5, headChars: 400, tailChars: 400, locator: locatorOf(LONG_RESULT) };
+  const same = applyPruneFloor(LONG_RESULT, LONG_RESULT, options);
+  assert.equal(same.text, LONG_RESULT, 'a candidate that is not smaller leaves the payload untouched');
+  assert.equal(same.floored, false);
+  assert.equal(same.floorMissed, false, 'nothing was installed, so nothing missed a floor');
+  assert.equal(same.resultChars, LONG_RESULT.length);
+  assert.equal(same.omittedChars, 0);
+
+  const larger = applyPruneFloor(LONG_RESULT, `${LONG_RESULT}${LONG_RESULT}`, options);
+  assert.equal(larger.text, LONG_RESULT, 'a growing candidate is refused outright');
+  assert.equal(larger.floorMissed, false);
+
+  // The engine keeps taking g-023's degradation path for a true no-reduction: the
+  // backend candidates are all non-smaller, so the payload stays and the skip is
+  // recorded without a floor miss.
+  const sink = auditSink();
+  const engine = engineFor({ mode: 'active' }, { prune: pruneStub((raw) => `${raw}${raw}`), audit: sink.audit });
+  const result = resultOf(LONG_RESULT);
+  const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+  assert.equal(installedText(decision as { content?: unknown }), LONG_RESULT);
+  assert.equal(engine.report().active.applied, 0);
+  assert.ok((engine.report().skips['no-reduction'] ?? 0) >= 1);
+  assert.equal(engine.report().active.actualSavedTokens, 0);
+  const skip = sink.records.find((record) => record.skip === 'no-reduction');
+  assert.ok(skip, 'the skip is audited');
+  assert.equal(skip.floored, false);
+  assert.equal(skip.floorMissed, false, 'a candidate that never shrank did not miss the floor');
 });
 
 test('the floor drops the candidate lines the kept context already shows, and keeps the unique ones', () => {
@@ -2000,7 +2101,7 @@ test('the engine never lets the service book the reduction it only measured', as
   );
 });
 
-test('an active reduction the engine refuses to install books nothing, whatever the service measured', async () => {
+test('an active reduction the floor cannot widen installs the candidate, not the whole payload', async () => {
   const ctx = await createToolContext();
   try {
     const runtime = applyReflex(ctx, { backend: 'mock', interventions: { mode: 'active' } });
@@ -2014,9 +2115,10 @@ test('an active reduction the engine refuses to install books nothing, whatever 
       async () => ({ kind: 'enter' as const, messages })
     );
     // A trace the service really reduces — one runaway progress line it drops whole —
-    // but whose aligned form would be bigger than the payload it replaces: taking that
-    // line whole, plus the marker, plus the tail, overshoots the original. The floor
-    // refuses rather than install a form that grew.
+    // but whose aligned floor form would be bigger than the payload it replaces:
+    // taking that line whole, plus the marker, plus the tail, overshoots the
+    // original. The floor is refused, and the judgment's own candidate is installed
+    // instead: dropping it would carry the whole payload for no reason.
     const payload = [
       `=] progress 0 [${'='.repeat(1200)}]`,
       'at /repo/src/file0.ts:1:1 warning unused variable',
@@ -2031,15 +2133,21 @@ test('an active reduction the engine refuses to install books nothing, whatever 
       async () => acceptOf(resultOf(payload))
     );
     const report = runtime.interventions!.report();
-    assert.equal(installedText(decision as { content?: unknown }), payload, 'the payload is handed on untouched');
-    assert.equal(report.active.applied, 0, 'nothing was installed');
-    assert.equal(report.active.actualSavedTokens, 0, 'so nothing was saved');
-    assert.equal(report.active.potentialSavedTokens, 0, 'and nothing was planned as a saving either');
-    assert.ok((report.skips['no-reduction'] ?? 0) >= 1, 'the refusal is a skip, not a saving');
+    const installed = installedText(decision as { content?: unknown });
+    assert.notEqual(installed, payload, 'the whole payload is not reinstalled');
+    assert.ok(installed.length < payload.length, 'the installed text is a real reduction');
+    assert.equal(installed.includes('=] progress 0'), false, 'the runaway line the judgment dropped stays dropped');
+    assert.equal(report.active.applied, 1, 'the candidate was installed');
+    assert.ok(report.active.actualSavedTokens > 0, 'and the saving is booked');
+    assert.equal(report.skips['no-reduction'], undefined, 'the run is not a no-reduction');
+    const record = report.recent[0]!;
+    assert.equal(record.floorApplied, false, 'no head/tail floor form was composed');
+    assert.equal(record.floorMissed, true, 'the audit says the share was missed, not that nothing shrank');
+    assert.equal(record.candidateTokens, Math.ceil(installed.length / 4), 'the booked size is the installed size');
     // The service was only asked to measure — it is told so before the floor decides —
-    // so a reduction the floor refuses to install never appears as a saving anywhere:
-    // the ledger keeps the measurement in `potentialTokensSaved`, and the columns above
-    // carry the zero this really was.
+    // so the hook's own ledger entry never books the reduction the engine installed:
+    // the measurement stays in `potentialTokensSaved`, and the intervention audit
+    // carries what was really replaced.
     const measured = runtime.ledger.getEntries().filter((entry) => entry.type === 'prune');
     assert.equal(measured.length, 1, 'the service was asked once');
     assert.equal(measured[0]!.shadow, true, 'the hook path asks for a measurement');

@@ -208,6 +208,8 @@ export interface InterventionPlan {
     repeats?: number;
     digest?: string;
     floorApplied?: boolean;
+    /** Whether the reduction was installed short of the floor's promised share. */
+    floorMissed?: boolean;
     turn?: number;
     step?: number;
     /** Which judging path produced the prune candidate. */
@@ -259,6 +261,10 @@ export interface InterventionSkipDetail {
   originalTokens?: number;
   /** Tokens of that candidate, when already known. */
   candidateTokens?: number;
+  /** Whether the installed text carried the floor form (`floored` in the audit). */
+  floored?: boolean;
+  /** Whether the installed reduction fell short of the floor's promised share. */
+  floorMissed?: boolean;
   /** Which judging path produced the candidate. */
   judgePath?: 'segmented' | 'local' | 'fallback';
   /** Segments handed to System One by the judgment. */
@@ -937,6 +943,16 @@ export function assembleEvidence(
 export interface PruneFloorPlan {
   /** Whether the floor form replaces the judged candidate. */
   floored: boolean;
+  /**
+   * Whether the installed reduction fell short of the floor's promised share.
+   *
+   * True exactly when the composition could not build a form that both carries
+   * `floorRatio` of the original and stays smaller than it, so the judged
+   * candidate itself was installed. It is what separates "nothing was reduced"
+   * from "the reduction was real, but it did not reach the floor's promise"; a
+   * plan that never needed the floor reports `false`.
+   */
+  floorMissed: boolean;
   /** Characters the installed text carries: modelled by the plan, real once composed. */
   resultChars: number;
   /** Characters the installed form does not carry. */
@@ -1014,6 +1030,7 @@ export function pruneFloorPlan(
   if (candidateChars >= target) {
     return {
       floored: false,
+      floorMissed: false,
       resultChars: candidateChars,
       omittedChars: originalChars - candidateChars,
       headChars: 0,
@@ -1036,6 +1053,7 @@ export function pruneFloorPlan(
   if (resultChars >= originalChars) return idleFloorPlan(originalChars);
   return {
     floored: true,
+    floorMissed: false,
     resultChars,
     omittedChars: originalChars - resultChars,
     headChars: split.head,
@@ -1063,7 +1081,7 @@ function splitContext(context: number, head: number, tail: number): { head: numb
 
 /** The plan of a reduction that is not happening. */
 function idleFloorPlan(originalChars: number): PruneFloorPlan {
-  return { floored: false, resultChars: originalChars, omittedChars: 0, headChars: 0, tailChars: 0, markerChars: 0 };
+  return { floored: false, floorMissed: false, resultChars: originalChars, omittedChars: 0, headChars: 0, tailChars: 0, markerChars: 0 };
 }
 
 /** The marker one floored reduction carries on each side of its candidate. */
@@ -1187,9 +1205,39 @@ function composeFloorLines(
   };
 }
 
-/** The plan of a reduction the composition refused: the original, untouched. */
-function refusedFloor(original: string): PruneFloorPlan & { text: string } {
-  return { ...idleFloorPlan(original.length), text: original };
+/**
+ * The plan of a floor the composition refused.
+ *
+ * A refusal is *not* a reason to throw the candidate away. The candidate is the
+ * reduction the judgment already produced, and a floor that cannot widen it
+ * without either breaking the share or growing past the original has simply
+ * missed the floor, not invalidated the reduction: installing the candidate is
+ * strictly better than carrying the whole payload. So the candidate is installed
+ * as-is, with `floored: false` (no head/tail form was built) and
+ * `floorMissed: true` (the promised share is not carried), and the sizes are
+ * booked against the text that is really installed.
+ *
+ * Only a candidate that is not actually smaller leaves the original untouched —
+ * that is a real "no reduction", and the caller's own degradation path owns it.
+ *
+ * @param original - the raw payload.
+ * @param candidate - the judged reduction the composition could not widen.
+ * @returns the text to install and the floor decision that says why.
+ */
+function refusedFloor(original: string, candidate: string): PruneFloorPlan & { text: string } {
+  if (candidate.length >= original.length) {
+    return { ...idleFloorPlan(original.length), text: original };
+  }
+  return {
+    floored: false,
+    floorMissed: true,
+    resultChars: candidate.length,
+    omittedChars: original.length - candidate.length,
+    headChars: 0,
+    tailChars: 0,
+    markerChars: 0,
+    text: candidate
+  };
 }
 
 /**
@@ -1211,8 +1259,11 @@ function refusedFloor(original: string): PruneFloorPlan & { text: string } {
  * kept context already shows verbatim is dropped as a duplicate. Alignment and
  * removal move the real size, so the decision's modelled size is replaced here by
  * the size the text really has: a form that would fall short of the promised
- * share, or that would not be smaller than the original at all, is refused and
- * the original returned rather than installed short or as half-lines.
+ * share, or that would not be smaller than the original at all, is refused. A
+ * refusal installs the judgment's own candidate with `floorMissed: true` rather
+ * than the original — the candidate is a real reduction, and dropping it would
+ * trade a smaller answer for the whole payload just because the floor form could
+ * not be built.
  *
  * @param original - the raw payload.
  * @param candidate - the judged reduction.
@@ -1241,7 +1292,7 @@ export function applyPruneFloor(
     headCount = 1;
   }
   let tailCount = alignedTailLines(lines, plan.tailChars);
-  if (headCount + tailCount > lines.length) return refusedFloor(original);
+  if (headCount + tailCount > lines.length) return refusedFloor(original, candidate);
   let composed = composeFloorLines(lines, headCount, tailCount, candidate, marker, secondMarker);
   // The share is a promise, and rounding to a boundary or dropping duplicates can
   // fall short of it: widen by whole lines until the form really carries the
@@ -1266,7 +1317,7 @@ export function applyPruneFloor(
     if (!grew) break;
   }
   if (composed.text.length >= original.length || composed.text.length < target) {
-    return refusedFloor(original);
+    return refusedFloor(original, candidate);
   }
   return {
     ...plan,
@@ -1379,6 +1430,8 @@ interface PruneMemo {
   tokensSaved: number;
   /** Whether the reduction was floored, so a memo hit reports the same plan. */
   floored: boolean;
+  /** Whether the reduction missed the floor's promised share, replayed on a hit. */
+  floorMissed?: boolean;
   /** Locator of the retained original, once a retention for this payload succeeded. */
   locator?: string;
   /**
@@ -2261,13 +2314,6 @@ export class InterventionEngine {
     // and a skip record quote. Recorded even when the candidate is not smaller,
     // because that is exactly the branch a real run cannot explain from its log.
     const diagnostics = pruneDiagnosticsOf(response);
-    const measured: InterventionSkipDetail = {
-      ...payloadDetail,
-      ...diagnostics,
-      originalTokens,
-      candidateTokens,
-      candidateChars: composed.text.length
-    };
     // A memo hit hands back a form that was composed for this payload already. It is
     // its own fixed point — it carries the share, so the plan of the same lengths
     // stays "not floored" and gives that text straight back — but its provenance is
@@ -2276,6 +2322,16 @@ export class InterventionEngine {
     // install as an unfloored one and flip the wording of the feedback with it.
     const reusedFromMemo = !needsCandidate && memo?.text !== undefined ? memo : undefined;
     const floorApplied = reusedFromMemo ? reusedFromMemo.floored : composed.floored;
+    const floorMissed = reusedFromMemo ? reusedFromMemo.floorMissed === true : composed.floorMissed;
+    const measured: InterventionSkipDetail = {
+      ...payloadDetail,
+      ...diagnostics,
+      originalTokens,
+      candidateTokens,
+      floored: floorApplied,
+      floorMissed,
+      candidateChars: composed.text.length
+    };
     const judged = !memo || needsCandidate;
     const judgment: JudgmentCharge = {
       judgments: judged ? 1 : 0,
@@ -2309,6 +2365,7 @@ export class InterventionEngine {
       detail: {
         digest,
         floorApplied,
+        floorMissed,
         confidence: response.reductionPercentage,
         turn: state.turn,
         step: state.step,
@@ -2334,6 +2391,7 @@ export class InterventionEngine {
           prunedChars: composed.text.length,
           tokensSaved: originalTokens - candidateTokens,
           floored: floorApplied,
+          floorMissed,
           diagnostics
         });
       }
@@ -2377,7 +2435,7 @@ export class InterventionEngine {
     // and provenance of that rebuild are what gets accounted for.
     const installed =
       retention.locator === locator
-        ? { ...composed, floored: floorApplied }
+        ? { ...composed, floored: floorApplied, floorMissed }
         : applyPruneFloor(text, response.processedOutput, {
             floorRatio: this.config.pruneFloorRatio,
             headChars: this.config.pruneHeadChars,
@@ -2393,6 +2451,8 @@ export class InterventionEngine {
         agent: exec.agent,
         detail: {
           ...measured,
+          floored: installed.floored,
+          floorMissed: installed.floorMissed,
           candidateChars: installed.text.length,
           candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
         },
@@ -2408,6 +2468,8 @@ export class InterventionEngine {
         agent: exec.agent,
         detail: {
           ...measured,
+          floored: installed.floored,
+          floorMissed: installed.floorMissed,
           candidateChars: installed.text.length,
           candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
         },
@@ -2420,6 +2482,7 @@ export class InterventionEngine {
     // saving recorded — against the text that is really about to enter the context.
     const installedTokens = Math.max(0, Math.ceil(installed.text.length / 4));
     plan.detail.floorApplied = installed.floored;
+    plan.detail.floorMissed = installed.floorMissed;
     plan.detail.candidateChars = installed.text.length;
     plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, installed.floored);
     // Booked only here: a candidate that was not smaller, a replacement that could
@@ -2452,6 +2515,7 @@ export class InterventionEngine {
       prunedChars: installed.text.length,
       tokensSaved: originalTokens - installedTokens,
       floored: installed.floored,
+      floorMissed: installed.floorMissed,
       locator: retention.locator,
       diagnostics
     });
@@ -2797,7 +2861,8 @@ export class InterventionEngine {
       ...(plan.detail.confidence === undefined ? {} : { confidence: plan.detail.confidence }),
       ...(plan.detail.repeats === undefined ? {} : { repeats: plan.detail.repeats }),
       ...(plan.detail.digest === undefined ? {} : { digest: plan.detail.digest }),
-      ...(plan.detail.floorApplied === undefined ? {} : { floorApplied: plan.detail.floorApplied }),
+      ...(plan.detail.floorApplied === undefined ? {} : { floorApplied: plan.detail.floorApplied, floored: plan.detail.floorApplied }),
+      ...(plan.detail.floorMissed === undefined ? {} : { floorMissed: plan.detail.floorMissed }),
       ...(judgment?.memoHits ? { memoHit: true } : {}),
       ...(originalLocator === undefined ? {} : { originalLocator }),
       ...(plan.detail.turn === undefined ? {} : { turn: plan.detail.turn }),
@@ -2893,6 +2958,8 @@ export class InterventionEngine {
         skip: reason,
         ...(context.state === undefined ? {} : { turn: context.state.turn, step: context.state.step }),
         ...(detail?.digest === undefined ? {} : { digest: detail.digest }),
+        ...(detail?.floored === undefined ? {} : { floored: detail.floored }),
+        ...(detail?.floorMissed === undefined ? {} : { floorMissed: detail.floorMissed }),
         ...(detail?.judgePath === undefined ? {} : { judgePath: detail.judgePath }),
         ...(detail?.judgedSegments === undefined ? {} : { judgedSegments: detail.judgedSegments }),
         ...(detail?.unjudgedSegments === undefined ? {} : { unjudgedSegments: detail.unjudgedSegments }),

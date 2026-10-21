@@ -128,6 +128,18 @@ export interface InterventionAuditRecord {
   repeats?: number;
   digest?: string;
   floorApplied?: boolean;
+  /** Whether the installed text carried the floor form; same value as `floorApplied`. */
+  floored?: boolean;
+  /**
+   * Whether the installed reduction fell short of the floor's promised share.
+   *
+   * Present when a prune decision composed a reduction: `true` means the floor
+   * form could not be built without growing past the original, so the judged
+   * candidate itself was installed. This is the field that separates "the
+   * reduction was real but did not carry `pruneFloorRatio`" from a real
+   * `no-reduction` skip, where nothing was installed at all.
+   */
+  floorMissed?: boolean;
   memoHit?: boolean;
   agentId?: string;
   turn?: number;
