@@ -149,6 +149,18 @@ export interface InterventionAuditRecord {
   unjudgedSegments?: number;
   /** Segments the candidate the engine composed from kept whole. */
   keptSegments?: number;
+  /** Characters of the aggressive-budget candidate the judgment built. */
+  aggressiveChars?: number;
+  /** Characters of the balanced-budget candidate the judgment built. */
+  balancedChars?: number;
+  /** Characters of the conservative-budget candidate the judgment built. */
+  conservativeChars?: number;
+  /** Segments System One really scored (`scores.size`); unreadable answers are absent. */
+  scoredSegments?: number;
+  /** Segments kept whole without a score: the unjudged safety margin. */
+  autoKeptSegments?: number;
+  /** Answers returned for a judged segment that carried no usable keep score. */
+  unparsedScoreAnswers?: number;
   /** Characters of the payload this decision was about. */
   originalChars?: number;
   /** Characters of the candidate the decision would have installed. */

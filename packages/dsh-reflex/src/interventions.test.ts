@@ -2784,6 +2784,38 @@ function segmentGatewayStub(keep = 0.9): { requests: any[]; restore: () => void 
   return { requests, restore: () => (globalThis.fetch = original) };
 }
 
+/**
+ * A segment-judging gateway whose answer is scripted per segment index.
+ *
+ * Returning `undefined` leaves that segment unanswered: the unjudged safety
+ * margin, which is exactly what a partial gateway response leaves behind.
+ */
+function scriptedSegmentGatewayStub(answerOf: (index: number) => unknown | undefined): {
+  requests: any[];
+  restore: () => void;
+} {
+  const requests: any[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as any;
+    requests.push(body);
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(body.questions ?? {})) {
+      const index = Number(id.slice('prune-seg-'.length));
+      const answer = answerOf(index);
+      if (answer !== undefined) answers[id] = answer;
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ model: 'jev-1.13.0', answers }),
+      text: async () => ''
+    };
+  }) as unknown as typeof fetch;
+  return { requests, restore: () => (globalThis.fetch = original) };
+}
+
 /** An active engine whose prune service is the real vendored backend over a stub gateway. */
 function jevEngineFor(
   pruneJudgeMinChars: number,
@@ -3207,6 +3239,12 @@ test('every abandoned prune plan leaves one skip record, in observe and active',
       judgedSegments: 7,
       unjudgedSegments: 2,
       keptSegments: 7,
+      aggressiveChars: raw.length,
+      balancedChars: raw.length,
+      conservativeChars: raw.length,
+      scoredSegments: 5,
+      autoKeptSegments: 2,
+      unparsedScoreAnswers: 1,
       fallbackReason: 'stub fallback'
     })
   };
@@ -3271,6 +3309,12 @@ test('every abandoned prune plan leaves one skip record, in observe and active',
         assert.equal(record.judgedSegments, 7);
         assert.equal(record.unjudgedSegments, 2);
         assert.equal(record.keptSegments, 7);
+        assert.equal(record.aggressiveChars, LONG_RESULT.length);
+        assert.equal(record.balancedChars, LONG_RESULT.length);
+        assert.equal(record.conservativeChars, LONG_RESULT.length);
+        assert.equal(record.scoredSegments, 5, 'the scored segment count is audited');
+        assert.equal(record.autoKeptSegments, 2, 'and the unjudged safety margin');
+        assert.equal(record.unparsedScoreAnswers, 1, 'and the unreadable answers');
         assert.equal(record.fallbackReason, 'stub fallback');
         assert.equal(record.originalChars, LONG_RESULT.length);
         assert.equal(record.candidateChars, LONG_RESULT.length);
@@ -3468,5 +3512,123 @@ test('the 14,533-character real-machine payload leaves its judge path and segmen
     assert.equal(record!.digest, digestOf(payload));
   } finally {
     stub.restore();
+  }
+});
+
+test('the three real-machine response shapes all produce a smaller candidate or an explicit refusal', async () => {
+  const payload = realMachinePayload();
+  assert.equal(payload.length, 14533);
+  const above = { type: 'score', score: 0.95, probabilities: { '0': 0.05, '1': 0.95 } };
+  const shapes: {
+    name: string;
+    answerOf: (index: number) => unknown | undefined;
+    path: 'segmented' | 'fallback';
+    check: (response: PruneResponse) => void;
+  }[] = [
+    {
+      name: 'all segments high-score',
+      answerOf: () => above,
+      path: 'segmented',
+      check: (response) => {
+        assert.equal(response.scoredSegments, response.judgedSegments);
+        assert.equal(response.autoKeptSegments, 0);
+        assert.equal(response.unparsedScoreAnswers, 0);
+        assert.ok((response.balancedChars ?? 0) < payload.length, 'the balanced candidate really was smaller');
+        assert.ok((response.aggressiveChars ?? 0) <= (response.balancedChars ?? 0));
+        assert.ok((response.conservativeChars ?? 0) >= (response.balancedChars ?? 0));
+        assert.ok((response.keptSegments ?? 0) > 0);
+      }
+    },
+    {
+      name: 'half the segments unanswered',
+      answerOf: (index) => (index % 2 === 0 ? above : undefined),
+      path: 'segmented',
+      check: (response) => {
+        assert.ok((response.scoredSegments ?? 0) > 0, 'some segments really scored');
+        assert.ok((response.autoKeptSegments ?? 0) > 0, 'the rest are the unjudged safety margin');
+        assert.equal(response.unparsedScoreAnswers, 0, 'a missing answer is not an unreadable one');
+        assert.equal(
+          (response.scoredSegments ?? 0) + (response.autoKeptSegments ?? 0),
+          response.judgedSegments,
+          'scored + auto-kept accounts for every judged segment'
+        );
+      }
+    },
+    {
+      name: 'distribution keys are not the criteria indexes',
+      answerOf: () => ({ type: 'score', probabilities: { omit: 0.1, keep: 0.9 } }),
+      path: 'fallback',
+      check: (response) => {
+        assert.equal(response.scoredSegments, 0, 'nothing was readable, so nothing was scored');
+        assert.equal(response.unparsedScoreAnswers, response.judgedSegments, 'every answer is reported unparsed');
+        assert.ok((response.autoKeptSegments ?? 0) >= (response.judgedSegments ?? 0), 'every segment is the safety margin');
+        assert.match(response.fallbackReason ?? '', /no usable segment score/);
+      }
+    }
+  ];
+
+  for (const shape of shapes) {
+    const stub = scriptedSegmentGatewayStub(shape.answerOf);
+    try {
+      const backend = new JevDecisionBackend({
+        apiKey: 'test-key',
+        model: 'jev-latest',
+        timeoutMs: 500,
+        pruneJudgeMinChars: 10000
+      });
+      const response = await backend.prune({ rawOutput: payload, intent: 'find the failure' });
+      assert.equal(stub.requests.length, 1, `${shape.name}: one batched judgment`);
+      assert.ok(response.prunedChars < response.originalChars, `${shape.name}: the candidate is smaller than the payload`);
+      assert.equal(response.originalChars, payload.length);
+      assert.equal(response.judgePath, shape.path);
+      shape.check(response);
+    } finally {
+      stub.restore();
+    }
+  }
+});
+
+test('the partial and high-score shapes install a reduction and audit every observation field', async () => {
+  const payload = realMachinePayload();
+  const above = { type: 'score', score: 0.95, probabilities: { '0': 0.05, '1': 0.95 } };
+  const shapes: { name: string; answerOf: (index: number) => unknown | undefined; autoKept: boolean }[] = [
+    { name: 'all segments high-score', answerOf: () => above, autoKept: false },
+    { name: 'half the segments unanswered', answerOf: (index) => (index % 2 === 0 ? above : undefined), autoKept: true }
+  ];
+
+  for (const shape of shapes) {
+    const stub = scriptedSegmentGatewayStub(shape.answerOf);
+    try {
+      const sink = auditSink();
+      const engine = jevEngineFor(10000, { audit: sink.audit });
+      const result = resultOf(payload);
+      const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () =>
+        acceptOf(result)
+      );
+      const installed = installedText(decision as { content?: unknown });
+      assert.ok(installed.length > 0, `${shape.name}: the model still gets a result`);
+      assert.ok(installed.length < payload.length, `${shape.name}: the payload shrank instead of returning untouched`);
+
+      const record = sink.records.find((candidate) => candidate.action === 'prune-result');
+      assert.ok(record, `${shape.name}: the installed plan is audited`);
+      assert.equal(record!.judgePath, 'segmented');
+      assert.equal(record!.originalChars, payload.length);
+      assert.equal(record!.candidateChars, installed.length);
+      assert.ok((record!.balancedChars ?? 0) > 0, `${shape.name}: the balanced size is audited`);
+      assert.ok((record!.aggressiveChars ?? 0) > 0, `${shape.name}: the aggressive size is audited`);
+      assert.ok(
+        (record!.conservativeChars ?? 0) >= (record!.balancedChars ?? 0),
+        `${shape.name}: the conservative size is audited`
+      );
+      assert.equal(record!.unparsedScoreAnswers, 0, `${shape.name}: the readable shapes report no unparsed answer`);
+      if (shape.autoKept) {
+        assert.ok((record!.autoKeptSegments ?? 0) > 0, `${shape.name}: the unjudged safety margin is audited`);
+      } else {
+        assert.equal(record!.autoKeptSegments, 0);
+        assert.equal(record!.scoredSegments, record!.judgedSegments);
+      }
+    } finally {
+      stub.restore();
+    }
   }
 });

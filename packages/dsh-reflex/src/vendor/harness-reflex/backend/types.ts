@@ -80,22 +80,76 @@ export interface PruneResponse {
   judgePath?: 'segmented' | 'local' | 'fallback';
   /** Why the segmented path fell back to the local candidates, when it did. */
   fallbackReason?: string;
-  /** How the returned text was reduced when the judging path degraded. */
-  compression?: 'segmented' | 'local' | 'template';
+  /**
+   * How the returned text was reduced when the judging path degraded.
+   *
+   * `none` means the judgment ran and every candidate it built — including the
+   * template compressor — was at least as large as the payload, so the original
+   * was returned untouched because nothing could reduce it.
+   */
+  compression?: 'segmented' | 'local' | 'template' | 'none';
   /** Segments handed to System One in one request (0 when the local path ran). */
   judgedSegments?: number;
   /** Segments beyond the per-request limit, kept deterministically instead. */
   unjudgedSegments?: number;
   /**
-   * Segments the composed candidate kept whole, out of all segments.
+   * Segments the composed scored candidate kept whole, out of all segments.
    *
-   * The engine's candidate is the "balanced" one, so this is the number of
-   * segments that survived the budget: it answers "did the judge keep too much
-   * to shrink anything" without re-deriving the selection. Absent on paths that
-   * did not select segments by score (local, fallback).
+   * The count belongs to the candidate that was installed; when no scored
+   * candidate reduced the payload it is the balanced candidate's count, which is
+   * what explains "the judge kept five segments and nothing shrank". It counts
+   * the segments kept without a score too, which is why
+   * {@link autoKeptSegments} is reported beside it. Absent on paths that never
+   * selected segments by score (local, or a judgment with no usable score).
    */
   keptSegments?: number;
+  /** Characters of the aggressive-budget candidate, before one is installed. */
+  aggressiveChars?: number;
+  /** Characters of the balanced-budget candidate, before one is installed. */
+  balancedChars?: number;
+  /** Characters of the conservative-budget candidate, before one is installed. */
+  conservativeChars?: number;
+  /**
+   * Segments System One really scored (`scores.size`).
+   *
+   * `judgedSegments` counts the questions sent; this counts the answers that
+   * were usable. A gap between the two is a judgment that could not be read.
+   */
+  scoredSegments?: number;
+  /**
+   * Segments kept whole because they carried no score.
+   *
+   * They are the unjudged safety margin (no answer, an unreadable answer, or a
+   * segment beyond the per-request limit), counted over the whole payload. When
+   * this is close to the segment count the candidate cannot shrink through the
+   * scored budgets, because almost nothing was judged.
+   */
+  autoKeptSegments?: number;
+  /** Answers returned for a judged segment that carried no usable keep score. */
+  unparsedScoreAnswers?: number;
 }
+
+/**
+ * Diagnostic fields of a prune response.
+ *
+ * Every path reports what it measured and omits the rest, so a reader can tell
+ * a field that was not measured from one that measured zero.
+ */
+export type PruneDiagnostics = Pick<
+  PruneResponse,
+  | 'judgePath'
+  | 'fallbackReason'
+  | 'compression'
+  | 'judgedSegments'
+  | 'unjudgedSegments'
+  | 'keptSegments'
+  | 'aggressiveChars'
+  | 'balancedChars'
+  | 'conservativeChars'
+  | 'scoredSegments'
+  | 'autoKeptSegments'
+  | 'unparsedScoreAnswers'
+>;
 
 /**
  * In-memory health of one System One backend.

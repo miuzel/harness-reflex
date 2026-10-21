@@ -8,14 +8,18 @@ import {
   JevDecisionBackend,
   STAGNATION_PATTERNS,
   STAGNATION_STUCK_FLOOR,
+  assemblePruneCandidate,
   buildPruneCandidates,
   buildScoredPruneCandidates,
   detectStagnationLocally,
   normalizeSystemOneEndpoint,
   pickLocalPruneCandidate,
+  pickScoredPruneCandidate,
+  readSegmentKeepScore,
   segmentPruneOutput,
   uniqueCriteriaKeys
 } from './jev.js';
+import type { PruneCandidate } from './jev.js';
 import type { ActionStep, RouteRequest } from './types.js';
 
 /**
@@ -687,6 +691,180 @@ test('prune skips the gateway when there is nothing to choose between', async ()
     assert.equal(result.processedOutput, short);
     assert.equal(result.reductionPercentage, 0);
     assert.equal(result.judgePath, 'local');
+  } finally {
+    stub.restore();
+  }
+});
+
+/**
+ * A payload of 205 long lines, none blank, where every line carries `word`.
+ *
+ * A diagnostic word forces every line to survive segment judging, and a word
+ * the INTENT names forces it too: either way the assembled candidate reproduces
+ * the payload byte for byte, which is the real-machine "judgment ran, nothing
+ * shrank" shape.
+ */
+function everyLineCarries(word: string, lineCount = 205, width = 70): string {
+  return Array.from({ length: lineCount }, (_, index) => {
+    const head = `${word} step ${String(index).padStart(3, '0')}: resolved module dependency`;
+    return `${head}${'x'.repeat(Math.max(0, width - head.length))}`;
+  }).join('\n');
+}
+
+test('the scored-candidate chooser never lets a non-shrinking balanced candidate hide a smaller budget', () => {
+  const raw = 'y'.repeat(1000);
+  const candidate = (id: PruneCandidate['id'], text: string, keptSegments: number): PruneCandidate => ({
+    id,
+    label: id,
+    text,
+    keptSegments
+  });
+
+  const aggressiveWins = pickScoredPruneCandidate(raw, [
+    candidate('aggressive', 'a'.repeat(250), 2),
+    candidate('balanced', raw, 5),
+    candidate('conservative', raw, 8)
+  ]);
+  assert.equal(aggressiveWins.candidate?.id, 'aggressive', 'the aggressive candidate is smaller and must be used');
+  assert.equal(aggressiveWins.text.length, 250);
+  assert.equal(aggressiveWins.reason, undefined);
+
+  const balancedFirst = pickScoredPruneCandidate(raw, [
+    candidate('aggressive', 'a'.repeat(250), 2),
+    candidate('balanced', 'b'.repeat(500), 5),
+    candidate('conservative', 'c'.repeat(700), 8)
+  ]);
+  assert.equal(balancedFirst.candidate?.id, 'balanced', 'the documented default is tried first');
+
+  const none = pickScoredPruneCandidate(raw, [
+    candidate('aggressive', raw, 2),
+    candidate('balanced', raw, 5),
+    candidate('conservative', raw, 8)
+  ]);
+  assert.equal(none.candidate, undefined, 'a candidate as large as the payload is never installed');
+  assert.equal(none.text, raw, 'the caller gets the payload back, not a silent no-op');
+  assert.match(none.reason ?? '', /no scored candidate is smaller/);
+});
+
+test('an unreadable distribution is counted, not scored as high', () => {
+  assert.equal(
+    readSegmentKeepScore({ type: 'score', probabilities: { omit: 0.1, keep: 0.9 } }),
+    undefined,
+    'distribution keys that are not the criteria indexes must not read as a score'
+  );
+});
+
+test('forced lines can make every scored candidate the size of the payload, so template compression runs instead', async () => {
+  const stub = stubFetch(replySegments(() => 0.5));
+  try {
+    const raw = everyLineCarries('results');
+    // The INTENT names "results", so every line is a forced line: segment
+    // selection cannot drop one, and all three budgets reproduce the payload.
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'results' });
+
+    const segments = segmentPruneOutput(raw, 'results');
+    const scores = new Map(segments.map((segment) => [segment.index, 0.5]));
+    for (const candidate of buildScoredPruneCandidates(raw, segments, scores)) {
+      assert.equal(candidate.text.length, raw.length, `${candidate.id} keeps every forced line`);
+    }
+
+    assert.equal(result.judgePath, 'fallback', 'a non-reducing judgment degrades instead of silently returning the payload');
+    assert.equal(result.compression, 'template');
+    assert.ok(result.prunedChars < result.originalChars, 'the template compressor reduced what the budgets could not');
+    assert.match(result.fallbackReason ?? '', /no scored candidate is smaller/);
+    assert.equal(result.aggressiveChars, raw.length);
+    assert.equal(result.balancedChars, raw.length);
+    assert.equal(result.conservativeChars, raw.length);
+    assert.equal(result.scoredSegments, segments.length, 'every judged segment really scored');
+    assert.equal(result.autoKeptSegments, 0, 'nothing was kept because it lacked a score');
+    assert.equal(result.unparsedScoreAnswers, 0);
+    assert.ok((result.keptSegments ?? 0) > 0, 'the kept-segment count still explains the non-reduction');
+    assert.ok(result.processedOutput.includes('similar lines omitted'), 'the template compression really ran');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('when neither a scored candidate nor template compression reduces, the response says compression none', async () => {
+  const stub = stubFetch(replySegments(() => 0.5));
+  try {
+    // Every line is a diagnostic line, so the template compressor must keep it
+    // verbatim too: this is the one payload shape nothing can shrink.
+    const raw = everyLineCarries('warn');
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'errors' });
+
+    assert.equal(result.processedOutput, raw, 'the payload is returned untouched');
+    assert.equal(result.prunedChars, result.originalChars);
+    assert.equal(result.compression, 'none', 'the refusal is explicit, never silent');
+    assert.match(result.fallbackReason ?? '', /template compression did not reduce it/);
+    assert.match(result.fallbackReason ?? '', /no scored candidate is smaller/);
+    assert.equal(result.balancedChars, raw.length);
+    assert.ok((result.keptSegments ?? 0) > 0, 'the kept count names how much the judge tried to keep');
+    assert.equal(result.judgePath, 'segmented', 'the judgment itself did run');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('segments with no answer are auto-kept and counted, and only selected segments are assembled', async () => {
+  // Answer the even segment indexes only: the odd ones carry no score and are
+  // kept whole as the unjudged safety margin.
+  const stub = stubFetch((call) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(call.body.questions ?? {})) {
+      const index = Number(id.slice('prune-seg-'.length));
+      if (index % 2 === 0) answers[id] = scoreAnswer(0.05);
+    }
+    return { json: envelope(answers) };
+  });
+  try {
+    const raw = blocksLog(8, 3, 200);
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'errors' });
+
+    const segments = segmentPruneOutput(raw, 'errors');
+    const scored = segments.filter((segment) => segment.index % 2 === 0);
+    const autoKept = segments.filter((segment) => segment.index % 2 === 1);
+    assert.equal(result.scoredSegments, scored.length);
+    assert.equal(result.autoKeptSegments, autoKept.length);
+    assert.equal(result.unparsedScoreAnswers, 0, 'a missing answer is not an unreadable one');
+
+    // The assembled text is exactly what the selection says: the auto-kept
+    // segments whole, the scored-and-dropped ones only via their forced lines.
+    const expectedSelection = new Set(autoKept.map((segment) => segment.index));
+    assert.equal(result.processedOutput, assemblePruneCandidate(raw, segments, expectedSelection));
+    assert.ok(result.processedOutput.length < raw.length, 'keeping half the segments must still reduce the payload');
+
+    // Blocks 1 and 7 are anchors; use the middle ones as the markers that
+    // distinguish "kept whole" from "dropped except its forced lines".
+    assert.ok(result.processedOutput.includes('block-01-line-1'), 'an auto-kept segment is kept whole');
+    assert.equal(result.processedOutput.includes('block-02-line-1'), false, 'a dropped scored segment is not carried back');
+    assert.equal(result.processedOutput.includes('block-04-line-1'), false, 'nor is the next one');
+    assert.ok((result.processedOutput.match(/segments omitted/g) ?? []).length > 0, 'dropped runs are marked, not hidden');
+    assert.ok((result.balancedChars ?? 0) > 0 && (result.balancedChars ?? 0) < raw.length);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('unreadable score answers are counted and send the payload down the degraded path', async () => {
+  const stub = stubFetch((call) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(call.body.questions ?? {})) {
+      // The real gateway shape that broke parsing: named keys, no weighted score.
+      answers[id] = { type: 'score', probabilities: { omit: 0.1, keep: 0.9 } };
+    }
+    return { json: envelope(answers) };
+  });
+  try {
+    const raw = progressLog(80, 135);
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'find the failure' });
+
+    assert.equal(result.scoredSegments, 0, 'no answer was readable');
+    assert.equal(result.unparsedScoreAnswers, result.judgedSegments, 'every answer is reported as unparsed');
+    assert.equal(result.autoKeptSegments, segmentPruneOutput(raw, 'find the failure').length, 'so every segment is auto-kept');
+    assert.equal(result.judgePath, 'fallback');
+    assert.ok(result.prunedChars < result.originalChars, 'the degraded path still shrinks the payload');
+    assert.match(result.fallbackReason ?? '', /no usable segment score/);
   } finally {
     stub.restore();
   }

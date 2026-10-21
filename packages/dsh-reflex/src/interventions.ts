@@ -218,6 +218,18 @@ export interface InterventionPlan {
     unjudgedSegments?: number;
     /** Segments the composed candidate kept whole. */
     keptSegments?: number;
+    /** Characters of the aggressive-budget candidate the judgment built. */
+    aggressiveChars?: number;
+    /** Characters of the balanced-budget candidate the judgment built. */
+    balancedChars?: number;
+    /** Characters of the conservative-budget candidate the judgment built. */
+    conservativeChars?: number;
+    /** Segments System One really scored, out of the judged ones. */
+    scoredSegments?: number;
+    /** Segments kept whole without a score (the unjudged safety margin). */
+    autoKeptSegments?: number;
+    /** Answers returned for a judged segment that carried no usable score. */
+    unparsedScoreAnswers?: number;
     /** Characters of the payload the plan was about. */
     originalChars?: number;
     /** Characters of the candidate the plan would install. */
@@ -255,6 +267,18 @@ export interface InterventionSkipDetail {
   unjudgedSegments?: number;
   /** Segments the candidate kept whole. */
   keptSegments?: number;
+  /** Characters of the aggressive-budget candidate the judgment built. */
+  aggressiveChars?: number;
+  /** Characters of the balanced-budget candidate the judgment built. */
+  balancedChars?: number;
+  /** Characters of the conservative-budget candidate the judgment built. */
+  conservativeChars?: number;
+  /** Segments System One really scored, out of the judged ones. */
+  scoredSegments?: number;
+  /** Segments kept whole without a score (the unjudged safety margin). */
+  autoKeptSegments?: number;
+  /** Answers returned for a judged segment that carried no usable score. */
+  unparsedScoreAnswers?: number;
   /** Why the segmented judge fell back to the local candidates. */
   fallbackReason?: string;
 }
@@ -625,6 +649,12 @@ function pruneDiagnosticsOf(response: PruneResponse): InterventionSkipDetail {
     ...(response.judgedSegments === undefined ? {} : { judgedSegments: response.judgedSegments }),
     ...(response.unjudgedSegments === undefined ? {} : { unjudgedSegments: response.unjudgedSegments }),
     ...(response.keptSegments === undefined ? {} : { keptSegments: response.keptSegments }),
+    ...(response.aggressiveChars === undefined ? {} : { aggressiveChars: response.aggressiveChars }),
+    ...(response.balancedChars === undefined ? {} : { balancedChars: response.balancedChars }),
+    ...(response.conservativeChars === undefined ? {} : { conservativeChars: response.conservativeChars }),
+    ...(response.scoredSegments === undefined ? {} : { scoredSegments: response.scoredSegments }),
+    ...(response.autoKeptSegments === undefined ? {} : { autoKeptSegments: response.autoKeptSegments }),
+    ...(response.unparsedScoreAnswers === undefined ? {} : { unparsedScoreAnswers: response.unparsedScoreAnswers }),
     ...(response.fallbackReason === undefined ? {} : { fallbackReason: response.fallbackReason })
   };
 }
@@ -1360,7 +1390,17 @@ interface PruneMemo {
    */
   diagnostics?: Pick<
     PruneResponse,
-    'judgePath' | 'judgedSegments' | 'unjudgedSegments' | 'keptSegments' | 'fallbackReason'
+    | 'judgePath'
+    | 'judgedSegments'
+    | 'unjudgedSegments'
+    | 'keptSegments'
+    | 'aggressiveChars'
+    | 'balancedChars'
+    | 'conservativeChars'
+    | 'scoredSegments'
+    | 'autoKeptSegments'
+    | 'unparsedScoreAnswers'
+    | 'fallbackReason'
   >;
 }
 
@@ -2766,6 +2806,12 @@ export class InterventionEngine {
       ...(plan.detail.judgedSegments === undefined ? {} : { judgedSegments: plan.detail.judgedSegments }),
       ...(plan.detail.unjudgedSegments === undefined ? {} : { unjudgedSegments: plan.detail.unjudgedSegments }),
       ...(plan.detail.keptSegments === undefined ? {} : { keptSegments: plan.detail.keptSegments }),
+      ...(plan.detail.aggressiveChars === undefined ? {} : { aggressiveChars: plan.detail.aggressiveChars }),
+      ...(plan.detail.balancedChars === undefined ? {} : { balancedChars: plan.detail.balancedChars }),
+      ...(plan.detail.conservativeChars === undefined ? {} : { conservativeChars: plan.detail.conservativeChars }),
+      ...(plan.detail.scoredSegments === undefined ? {} : { scoredSegments: plan.detail.scoredSegments }),
+      ...(plan.detail.autoKeptSegments === undefined ? {} : { autoKeptSegments: plan.detail.autoKeptSegments }),
+      ...(plan.detail.unparsedScoreAnswers === undefined ? {} : { unparsedScoreAnswers: plan.detail.unparsedScoreAnswers }),
       ...(plan.detail.originalChars === undefined ? {} : { originalChars: plan.detail.originalChars }),
       ...(plan.detail.candidateChars === undefined ? {} : { candidateChars: plan.detail.candidateChars }),
       ...(plan.detail.fallbackReason === undefined ? {} : { fallbackReason: plan.detail.fallbackReason })
@@ -2851,6 +2897,12 @@ export class InterventionEngine {
         ...(detail?.judgedSegments === undefined ? {} : { judgedSegments: detail.judgedSegments }),
         ...(detail?.unjudgedSegments === undefined ? {} : { unjudgedSegments: detail.unjudgedSegments }),
         ...(detail?.keptSegments === undefined ? {} : { keptSegments: detail.keptSegments }),
+        ...(detail?.aggressiveChars === undefined ? {} : { aggressiveChars: detail.aggressiveChars }),
+        ...(detail?.balancedChars === undefined ? {} : { balancedChars: detail.balancedChars }),
+        ...(detail?.conservativeChars === undefined ? {} : { conservativeChars: detail.conservativeChars }),
+        ...(detail?.scoredSegments === undefined ? {} : { scoredSegments: detail.scoredSegments }),
+        ...(detail?.autoKeptSegments === undefined ? {} : { autoKeptSegments: detail.autoKeptSegments }),
+        ...(detail?.unparsedScoreAnswers === undefined ? {} : { unparsedScoreAnswers: detail.unparsedScoreAnswers }),
         ...(detail?.originalChars === undefined ? {} : { originalChars: detail.originalChars }),
         ...(detail?.candidateChars === undefined ? {} : { candidateChars: detail.candidateChars }),
         ...(detail?.fallbackReason === undefined ? {} : { fallbackReason: detail.fallbackReason })

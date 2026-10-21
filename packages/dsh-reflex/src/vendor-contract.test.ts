@@ -163,3 +163,63 @@ test('both copies take the same judging path and produce the same reduction', as
     stub.restore();
   }
 });
+
+test('both copies report the same candidate sizes and score counts, including a degraded judgment', async () => {
+  const root = await loadRoot();
+  const above = { type: 'score', score: 0.95, probabilities: { '0': 0.05, '1': 0.95 } };
+  const shapes: { name: string; answerOf: (index: number) => unknown | undefined }[] = [
+    { name: 'all scored', answerOf: () => above },
+    { name: 'half unanswered', answerOf: (index) => (index % 2 === 0 ? above : undefined) },
+    { name: 'unreadable keys', answerOf: () => ({ type: 'score', probabilities: { omit: 0.1, keep: 0.9 } }) }
+  ];
+
+  for (const shape of shapes) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as any;
+      const answers: Record<string, unknown> = {};
+      for (const id of Object.keys(body.questions ?? {})) {
+        const index = Number(id.slice('prune-seg-'.length));
+        const answer = shape.answerOf(index);
+        if (answer !== undefined) answers[id] = answer;
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ model: 'jev-1.13.0', answers }),
+        text: async () => ''
+      };
+    }) as unknown as typeof fetch;
+    try {
+      const rootBackend = backendOf(root, 10000);
+      const vendorBackend = backendOf(vendor, 10000);
+      const [rootResult, vendorResult] = await Promise.all([
+        rootBackend.prune({ rawOutput: PROGRESS, intent: INTENT }),
+        vendorBackend.prune({ rawOutput: PROGRESS, intent: INTENT })
+      ]);
+
+      for (const key of [
+        'judgePath',
+        'compression',
+        'fallbackReason',
+        'prunedChars',
+        'reductionPercentage',
+        'judgedSegments',
+        'unjudgedSegments',
+        'keptSegments',
+        'aggressiveChars',
+        'balancedChars',
+        'conservativeChars',
+        'scoredSegments',
+        'autoKeptSegments',
+        'unparsedScoreAnswers'
+      ] as const) {
+        assert.deepEqual(rootResult[key], vendorResult[key], `${shape.name}: ${key} drifted between the copies`);
+      }
+      assert.equal(rootResult.processedOutput, vendorResult.processedOutput, `${shape.name}: the copies returned different text`);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+});

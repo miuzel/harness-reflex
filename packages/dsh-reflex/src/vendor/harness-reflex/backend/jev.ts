@@ -12,6 +12,7 @@ import {
   GateRequest,
   GateResponse,
   GateResultItem,
+  PruneDiagnostics,
   PruneRequest,
   PruneResponse,
   RouteCandidateItem,
@@ -1038,6 +1039,43 @@ export function buildScoredPruneCandidates(
   });
 }
 
+/** The scored candidate one segment judgment installs, and why it did. */
+export interface ScoredPrunePick {
+  /** The text the segmented path returns: a reducing candidate, or the raw output. */
+  text: string;
+  /** The candidate that reduced the payload; absent when none did. */
+  candidate?: PruneCandidate;
+  /** Why no scored candidate was used, when none was. */
+  reason?: string;
+}
+
+/**
+ * Pick the first scored candidate strictly smaller than the payload.
+ *
+ * The balanced budget is tried first because it is the documented default. A
+ * payload whose forced lines (anchors, diagnostics, intent matches) already
+ * reproduce it verbatim makes even the balanced candidate as large as the
+ * original; the tighter and then the wider budget are tried before giving up,
+ * so a smaller aggressive candidate is never thrown away by the balanced one.
+ * A candidate that does not reduce the payload is never returned as the text:
+ * the caller decides whether the template compressor can still reduce it.
+ * @param rawOutput - the original output the candidates were built from.
+ * @param candidates - the scored candidates, in any order.
+ * @returns the reducing text plus the candidate that produced it, or the raw
+ *   output plus the reason no candidate was usable.
+ */
+export function pickScoredPruneCandidate(
+  rawOutput: string,
+  candidates: readonly PruneCandidate[]
+): ScoredPrunePick {
+  const order: PruneCandidate['id'][] = ['balanced', 'aggressive', 'conservative'];
+  for (const id of order) {
+    const candidate = candidates.find((entry) => entry.id === id);
+    if (candidate !== undefined && candidate.text.length < rawOutput.length) return { text: candidate.text, candidate };
+  }
+  return { text: rawOutput, reason: 'no scored candidate is smaller than the payload' };
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Local fallbacks                                                             */
@@ -1529,22 +1567,68 @@ export class JevDecisionBackend implements DecisionBackend {
     const diagnostics = { judgedSegments: judged.length, unjudgedSegments };
 
     try {
-      const scores = await this.scoreSegments(judged, segments.length, intent);
+      const { scores, unparsedScoreAnswers } = await this.scoreSegments(judged, segments.length, intent);
+      // Every segment without a usable score is kept whole as the unjudged
+      // safety margin, so its share of the payload is the first number to read
+      // when a judgment "ran" but the candidate did not shrink.
+      const observation = {
+        ...diagnostics,
+        scoredSegments: scores.size,
+        autoKeptSegments: segments.length - scores.size,
+        unparsedScoreAnswers
+      };
       if (scores.size === 0) {
         const fallback = this.fallbackPruneText(raw, intent, req.maxTokens);
         return this.pruneResponse(raw, fallback.text, req.shadowMode, start, {
           judgePath: 'fallback',
           fallbackReason: 'System One returned no usable segment score',
           compression: fallback.compression,
-          ...diagnostics
+          ...observation
         });
       }
       const candidates = buildScoredPruneCandidates(raw, segments, scores, req.maxTokens);
-      const balanced = candidates.find((candidate) => candidate.id === 'balanced') ?? candidates[0];
-      const text = balanced !== undefined && balanced.text.length < raw.length ? balanced.text : raw;
-      return this.pruneResponse(raw, text, req.shadowMode, start, {
+      const charsOf = (id: PruneCandidate['id']): number =>
+        candidates.find((candidate) => candidate.id === id)?.text.length ?? raw.length;
+      const sizes = {
+        aggressiveChars: charsOf('aggressive'),
+        balancedChars: charsOf('balanced'),
+        conservativeChars: charsOf('conservative')
+      };
+      // The balanced candidate's selection answers "did the judge keep too much
+      // to shrink anything"; when another budget was installed, its own count is
+      // what survived, so report that one instead.
+      const balanced = candidates.find((candidate) => candidate.id === 'balanced');
+      const pick = pickScoredPruneCandidate(raw, candidates);
+      if (pick.candidate !== undefined) {
+        return this.pruneResponse(raw, pick.text, req.shadowMode, start, {
+          judgePath: 'segmented',
+          ...observation,
+          ...sizes,
+          keptSegments: pick.candidate.keptSegments
+        });
+      }
+      // The judgment kept as much as the payload: every dropped line was forced,
+      // or most segments carried no readable score and were kept whole. Template
+      // compression does not read scores, so it can still reduce what the scored
+      // budgets could not; only when it cannot either is the original returned,
+      // and then the response says so instead of failing silently.
+      const fallback = this.fallbackPruneText(raw, intent, req.maxTokens);
+      if (fallback.text.length < raw.length) {
+        return this.pruneResponse(raw, fallback.text, req.shadowMode, start, {
+          judgePath: 'fallback',
+          fallbackReason: pick.reason,
+          compression: fallback.compression,
+          ...observation,
+          ...sizes,
+          ...(balanced === undefined ? {} : { keptSegments: balanced.keptSegments })
+        });
+      }
+      return this.pruneResponse(raw, raw, req.shadowMode, start, {
         judgePath: 'segmented',
-        ...diagnostics,
+        fallbackReason: `${pick.reason ?? 'no candidate is smaller than the payload'}; template compression did not reduce it either`,
+        compression: 'none',
+        ...observation,
+        ...sizes,
         ...(balanced === undefined ? {} : { keptSegments: balanced.keptSegments })
       });
     } catch (err) {
@@ -1567,13 +1651,14 @@ export class JevDecisionBackend implements DecisionBackend {
    * @param judged - the segments selected for judging, in original order.
    * @param totalSegments - segment count of the whole output (for the prompt).
    * @param intent - what the caller is looking for.
-   * @returns keep score per segment index; segments without a usable answer are absent.
+   * @returns the keep score per segment index (segments without a usable answer
+   *   are absent) and how many answers were returned but could not be read.
    */
   private async scoreSegments(
     judged: readonly PruneSegment[],
     totalSegments: number,
     intent: string
-  ): Promise<Map<number, number>> {
+  ): Promise<{ scores: Map<number, number>; unparsedScoreAnswers: number }> {
     const questions: Record<string, SystemOneQuestion> = {};
     const stateSegments: Record<string, string> = {};
     for (const segment of judged) {
@@ -1595,12 +1680,20 @@ export class JevDecisionBackend implements DecisionBackend {
     });
 
     const scores = new Map<number, number>();
+    let unparsedScoreAnswers = 0;
     for (const segment of judged) {
       const id = `${PRUNE_SEGMENT_QUESTION_PREFIX}${String(segment.index)}`;
-      const score = readSegmentKeepScore(data.answers?.[id] as SystemOneScoreAnswer | undefined);
-      if (score !== undefined) scores.set(segment.index, score);
+      const answer = data.answers?.[id] as SystemOneScoreAnswer | undefined;
+      const score = readSegmentKeepScore(answer);
+      if (score !== undefined) {
+        scores.set(segment.index, score);
+      } else if (answer !== undefined && answer !== null) {
+        // An answer we cannot read is not a high score: it is counted, and the
+        // segment falls into the unjudged safety margin with no answer at all.
+        unparsedScoreAnswers += 1;
+      }
     }
-    return scores;
+    return { scores, unparsedScoreAnswers };
   }
 
   /** Shape one pruning as the shared prune response. */
@@ -1609,7 +1702,7 @@ export class JevDecisionBackend implements DecisionBackend {
     text: string,
     shadow: boolean | undefined,
     start: number,
-    meta?: Pick<PruneResponse, 'judgePath' | 'fallbackReason' | 'compression' | 'judgedSegments' | 'unjudgedSegments'>
+    meta?: PruneDiagnostics
   ): PruneResponse {
     const originalChars = raw.length;
     const prunedChars = text.length;
