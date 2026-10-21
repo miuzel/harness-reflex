@@ -1,9 +1,9 @@
-# Harness Reflex v0.1.0 发布记录（草稿）
+# Harness Reflex v0.1.0 发布记录
 
-> **状态：草稿**。发布日期、产物指纹、最终测试计数在发布树实测后填入；正文以本文件为唯一真源。
-> 基线：`integration/v0.1.0` @ `9235039` + 本次 0.1.0 改动，2026-10-21。
+> **状态：已发布**（2026-10-21）。正文以本文件为唯一真源；产物指纹见文末。
+> 基线：`main` @ `2d43a42`，tag `v0.1.0`。
 
-## v0.1.0 — 待定（发布日期由负责人确认）
+## v0.1.0 — 2026-10-21
 
 - **自动干预四能力落地**：`stagnation`、`prune`、`gate`、`closing` 可在**模型没有调用任何工具**时由宿主钩子介入；`off` / `observe` / `active` 三态，每个能力还可单独用 `off` / `observe` / `active` / `inherit` 覆盖。`observe` 只记账不执行，`active` 才会拒绝重复调用、改写超长结果、把失败改写为纠正反馈、在收尾时对证据冲突提出异议。后台作业等待（`job_output` / `job_list`）按结构化形态豁免，不会被误判为停滞。
 - **System One 逐段剪枝**：超过 `pruneJudgeMinChars`（默认 10 000 字符）的输出会按段交给 System One 判定取舍，而不是只做首尾截断；判定候选低于 `pruneFloorRatio`（默认 0.5）时用首尾上下文补足，并保留判定选中的中间诊断。原文先写入会话日志（`plugin:dsh-reflex/pruned-original`）再替换，替换文本带 `plugin:dsh-reflex/pruned-original#<digest>` 定位符，可用 `readPrunedOriginal()` 逐字节取回；保留失败则不替换、不虚报节省。
@@ -44,7 +44,18 @@ npm install ./harness-reflex-0.1.0.tgz
 ### 已知限制
 
 - 未加 scope 的 npm 包名 `dsh-reflex` 已被他人占用（`onesmash@0.3.0`），本版改用 `@miuzel/dsh-reflex`；scoped 名可用性与 `npm login` 仍由负责人在发布前复核。
-- 仓库尚未配置 remote、尚未创建公开仓库/tag；商店（awesome-dsh-plugin）未提交。
-- `active` 模式下的 14.5K 剪枝已由自动化测试覆盖，但本轮尚未在真实会话手工复验一次；发布前按清单 §5 补做。
+- 公开仓库与 tag 已创建：https://github.com/miuzel/harness-reflex/releases/tag/v0.1.0 ；商店（awesome-dsh-plugin）尚未提交。
+- `active` 模式下的 14.5K 剪枝已在真实会话手工验证过一次（14534 → 6766 字符，省 1942 tokens，定位符可见）。
 - 根 `README.md`、插件 `README.md`、`docs/dsh-plugin.md`、`USER_GUIDE.md` 及英文版已统一口径：
   MCP 8 工具 / DSH 5 个可开关（默认 4，`route` 关）/ 剪枝与停滞为自动干预 / 账本用 `/reflex-ledger`。
+
+## 产物指纹
+
+| 包 | 文件 | SHA256 |
+|---|---|---|
+| 插件 | `miuzel-dsh-reflex-0.1.0.tgz` | `7ad7d1efc5112b240cfb5fede2ec9e799879b340ac618ab64a91f930d461822e` |
+| 核心/MCP | `harness-reflex-0.1.0.tgz` | `9420cc31eacc408535b5d765237d40223edea8f8058ee5450bd5bb507a00d07f` |
+
+## 从 0.1.0-alpha.2 升级
+
+插件 npm 包名已改为 `@miuzel/dsh-reflex`。旧的 `dsh-reflex` 安装与新包是**两个不同插件**，配置不会自动迁移：安装新包后需要重新配置一次（System 1 后端与 API Key、干预模式、虚拟 Provider 候选池、工具开关）。
