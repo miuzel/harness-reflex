@@ -51,10 +51,12 @@ npm install ./harness-reflex-0.1.0.tgz
 
 ## 产物指纹
 
-| 包 | 文件 | SHA256 |
-|---|---|---|
-| 插件 | `dsh-harness-reflex-0.1.0.tgz` | `138a18fbc698ea9a06be43a3caf88b5658bfdade154a71ba279b66e78e66d553` |
-| 核心/MCP | `harness-reflex-0.1.0.tgz` | `2fba3b7e20a29f0b76ca085f5731d1f80dbacb6ea0ee71e3168197271f1e1a38` |
+| 包 | 文件 |
+|---|---|
+| 插件 | `dsh-harness-reflex-0.1.0.tgz` |
+| 核心/MCP | `harness-reflex-0.1.0.tgz` |
+
+以 `release/SHA256SUMS` 与 GitHub Release 附件说明里的 sha256 为准：文档本身随根包发布，把指纹写进文档会让每次回填都改变产物哈希（自指循环），因此这里不再写死数值。
 
 ## 从 0.1.0-alpha.2 升级
 
