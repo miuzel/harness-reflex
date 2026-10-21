@@ -64,11 +64,10 @@ export const zh = {
   labelEffortFallback: '兜底档位',
   labelEffortMinConfidence: '最小置信度',
   labelEffortEnabled: '启用自适应推理强度',
-  effortDisabledHint: '关闭后不再做自适应判定，也不再注入 reflex 档位；调用方显式选择的具体档位原样下发。',
+  effortDisabledHint: '关闭后不做自适应判定，也不注入 reflex 档位；调用方显式选择的具体档位原样下发。',
   effortUnset: '不干预',
   effortAdaptive: 'Reflex（自适应）',
-  effortHint:
-    '「不干预」完全不改写 reasoningEffort，行为与未安装该功能一致；「Reflex（自适应）」每轮按 System 1 判定；想固定思考深度，请在模型选择器里选择具体档位。',
+  effortHint: '留空＝不干预；选择 Reflex＝每轮自适应。',
   effortLatest: '最近一次自适应决策',
   effortNoDecision: '本次激活尚未产生自适应决策。',
   effortDecisions: '自适应决策数',
@@ -109,9 +108,9 @@ export const zh = {
   helpMaxTaskChars:
     '用途：交给 System One 判定的任务文本长度上限；格式：正整数（字符数）；默认：400；范围：必须大于 0，超长文本会先截断再判定。',
   helpEffortEnabled:
-    '用途：是否允许按轮自适应决定推理强度；格式：布尔开关；默认：开启；留空：未写时按开启处理，关闭后不再做自适应判定、也不再注入 reflex 档位。',
+    '用途：是否允许按轮自适应决定推理强度；格式：布尔开关；默认：开启；留空：未写时按开启处理，关闭后本层不生效，调用方显式选择的具体档位仍原样下发。',
   helpEffortSetting:
-    '用途：决定是否启用自适应推理强度；格式：留空或 Reflex（自适应，旧值 auto 等价）；默认：不干预；留空：插件完全不改写 reasoningEffort，行为与未安装该功能一致，模型选择器里由插件注入的「Reflex (Auto)」档位仍可主动选中；选择 Reflex：每轮按 System 1 判定并下发；范围：配置不再接受 off/minimal/low/medium/high/max，想固定思考深度请在模型选择器里选择具体档位。',
+    '用途：决定是否启用自适应推理强度；格式：留空或 Reflex（自适应）；默认：不干预；留空：插件完全不改写 reasoningEffort，行为与未安装该功能一致，模型选择器里由插件注入的「Reflex (Auto)」档位仍可主动选中；选择 Reflex：每轮按 System 1 判定并下发；范围：想固定思考深度请在模型选择器里选择具体档位，可选项取决于目标模型声明的档位集合（例如 minimal、max 仅在模型声明后可选）。',
   helpEffortFallback:
     '用途：System One 与线索分类器都没有证据时使用的兜底档位；格式：一个自适应档位；默认：medium；范围：必须是已提供的自适应档位之一，留空按默认处理。',
   helpEffortMinConfidence:
@@ -185,7 +184,7 @@ export const zh = {
     '按下述建议填好 5 项：choice、score、screen、gate 开启，route 关闭（即默认组合）。这只是预填，仍需点“保存”才写回；与默认一致时不产生写入。',
   toolAdviceExpose: '建议暴露',
   toolAdviceOptional: '按需开启',
-  toolsLedgerHint: '账本（调用数、时延、节省 token、门禁与停滞告警）已不再占用工具位：直接用 /reflex-ledger 命令，或看本面板的“账本”页。',
+  toolsLedgerHint: '账本（调用数、时延、节省 token、门禁与停滞告警）不占用工具位：直接用 /reflex-ledger 命令，或看本面板的“账本”页。',
 
   toolWhat_choice: '在若干候选之间做一次快速概率选择，直接返回概率分布，不消耗生成 token。',
   toolWhen_choice: '需要在多个方案、分类或是否二选一里挑一个，又不想花生成 token 推理时（选架构、选分类、选 yes/no）。',
@@ -400,8 +399,7 @@ export const en: Record<keyof typeof zh, string> = {
     'Off stops every adaptive decision and withdraws the injected reflex level; a concrete level the caller chose explicitly is still dispatched as written.',
   effortUnset: 'Leave untouched',
   effortAdaptive: 'Reflex (adaptive)',
-  effortHint:
-    '"Leave untouched" never rewrites reasoningEffort, so the request behaves exactly as if this feature were not installed; "Reflex (adaptive)" decides every turn through System 1; to fix the thinking depth, choose a concrete level in the model selector.',
+  effortHint: 'Blank = leave untouched; Reflex = adaptive every turn.',
   effortLatest: 'Latest adaptive decision',
   effortNoDecision: 'No adaptive decision yet in this activation.',
   effortDecisions: 'Adaptive decisions',
@@ -444,9 +442,9 @@ export const en: Record<keyof typeof zh, string> = {
   helpMaxTaskChars:
     'Use: the character budget of the task text handed to System One; Format: positive integer (characters); Default: 400; Range: must be greater than 0, and longer text is truncated before the decision.',
   helpEffortEnabled:
-    'Use: whether each turn may adapt its reasoning effort; Format: boolean switch; Default: on; Blank: treated as on when omitted, and off withdraws adaptive decisions and the injected reflex level.',
+    'Use: whether each turn may adapt its reasoning effort; Format: boolean switch; Default: on; Blank: treated as on when omitted, and off leaves this layer inactive while a concrete level the caller chose explicitly still passes through.',
   helpEffortSetting:
-    'Use: whether adaptive reasoning effort runs; Format: blank, or Reflex (adaptive, the legacy auto is equivalent); Default: leave untouched; Blank: the plugin never rewrites reasoningEffort and the request behaves exactly as if this feature were not installed, while the "Reflex (Auto)" level injected into the model selector can still be chosen; choosing Reflex decides every turn through System 1; Range: configuration no longer accepts off/minimal/low/medium/high/max — choose a concrete level in the model selector to fix the thinking depth.',
+    'Use: whether adaptive reasoning effort runs; Format: blank, or Reflex (adaptive); Default: leave untouched; Blank: the plugin never rewrites reasoningEffort and the request behaves exactly as if this feature were not installed, while the "Reflex (Auto)" level injected into the model selector can still be chosen; choosing Reflex decides every turn through System 1; Range: to fix the thinking depth, choose a concrete level in the model selector, and the offered levels follow the target model\'s declared set (minimal or max are offered only when the model declares them).',
   helpEffortFallback:
     'Use: the level used when System One and the cue classifier both lack evidence; Format: one adaptive level; Default: medium; Range: must be an offered adaptive level, and blank means the default.',
   helpEffortMinConfidence:
@@ -521,7 +519,7 @@ export const en: Record<keyof typeof zh, string> = {
   toolAdviceExpose: 'Suggested for the agent',
   toolAdviceOptional: 'Turn on when needed',
   toolsLedgerHint:
-    'The ledger (call counts, latency, tokens saved, gate and stagnation results) no longer takes a tool slot: use the /reflex-ledger command, or the Ledger page of this panel.',
+    'The ledger (call counts, latency, tokens saved, gate and stagnation results) does not take a tool slot: use the /reflex-ledger command, or the Ledger page of this panel.',
 
   toolWhat_choice: 'Makes one fast probabilistic choice among candidates and returns the distribution, spending no generation tokens.',
   toolWhen_choice: 'When one option has to be picked out of several approaches, categories or a yes/no, without spending generation tokens on it.',
@@ -650,7 +648,7 @@ export const en: Record<keyof typeof zh, string> = {
   guideTitle: 'Harness Reflex user guide',
   guideIntro:
     'This page embeds the repository document docs/USER_GUIDE.en.md: install and build, System 1 backends, the virtual provider pools, adaptive reasoning effort (reflex / auto), the settings panel, and the MCP ↔ DSH native tool mapping.',
-  guideHint: 'The document follows the DSH interface language (English / 中文). After editing the guide, re-run npm run build:all or this page keeps the previous revision.',
+  guideHint: 'The document follows the DSH interface language (English / 中文). After editing the guide, re-run npm run build:all or this page keeps the last build.',
   guideProvenance: 'Document {source} · revision {digest}',
   guideSource: GUIDE_SOURCES.en,
   guideRevision: GUIDE_DIGESTS.en.slice(0, 12),

@@ -6,7 +6,7 @@
 > settings panel under the **“Guide”** tab (it follows the DSH interface
 > language, Chinese or English).
 > Editing this file therefore requires re-running `npm run build:all`, otherwise
-> the panel keeps the previous revision (`npm run test:plugin` checks the
+> the panel keeps the last build (`npm run test:plugin` checks the
 > document digest and fails on drift).
 
 ---
@@ -156,7 +156,7 @@ that generates no tokens itself: when a request targets a virtual model such as
 `provider/model` from that virtual model's **physical candidate pool**, rewrites
 the request, lets it continue, and appends a `type: model-route` ledger entry.
 
-Configuration shape (YAML equivalent):
+Configuration shape (corresponding YAML):
 
 ```yaml
 routing:
@@ -230,13 +230,13 @@ with a specific message.
 
 ## 6. Adaptive reasoning effort (`reflex` / `auto`)
 
-With the effort policy set to `reflex` (alias `auto`), the plugin intercepts the
+With the effort policy set to `reflex` (`auto` means the same), the plugin intercepts the
 intent and context before each real API request, asks System 1 for the
 `reasoningEffort` this turn needs, and rewrites the outgoing parameter.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; unset = never intervene, the plugin never touches `reasoningEffort`; a concrete level is chosen in the model selector, not in configuration |
+| `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; unset = never intervene, the plugin never touches `reasoningEffort`; a concrete level is chosen in the model selector, and the offered levels follow what the target model declares |
 | `effort.fallback` | `medium` | Deterministic cue vote used when System 1 is unavailable or below the confidence floor |
 | `effort.minConfidence` | `0.55` | Decisions below this confidence go to the fallback instead |
 | `effort.enabled` | `true` | `false` turns the whole layer off: no judgment, no audit, no injected `reflex` level |
@@ -246,11 +246,11 @@ Configuration answers exactly one question: **should adaptive effort run at all?
 - **blank (the default) = never intervene**: the plugin never rewrites
   `reasoningEffort` and produces no decision or audit record, so the request
   behaves exactly as if this feature were not installed;
-- **`reflex` (alias `auto`) = adaptive**: every turn is decided by System 1;
-- **to fix the thinking depth**: choose a concrete level in the model selector.
-  Configuration no longer accepts
-  `off`/`minimal`/`low`/`medium`/`high`/`max`; writing one is rejected at startup
-  with the migration hint instead of being silently ignored.
+- **`reflex` (`auto` means the same) = adaptive**: every turn is decided by System 1;
+- **to fix the thinking depth**: choose a concrete level in the model selector; the
+  offered levels follow what the target model declares. Configuration only accepts
+  blank or `reflex` (`auto` means the same); any other value is rejected at startup
+  with a hint to pick the level in the model selector.
 
 **Behaviour contract.**
 
@@ -282,13 +282,13 @@ difference being that the policy is still written down). With it off:
 - **concrete levels pass through verbatim**: a `high`, `medium` and so on chosen
   explicitly by the caller on the request is not even aligned onto the routed
   model's vocabulary;
-- **the marker still cannot leak**: if an old session or a hand-built call still
+- **the marker still cannot leak**: if an existing session or a hand-built call still
   carries this plugin's marker, it is **deleted at the physical adapter
   boundary** rather than translated into a level, so the provider's own default
   applies and no plugin marker ever reaches a real provider.
 
 It defaults to `true` (omitted means `true`), so not writing this option behaves
-byte-identically to before.
+byte-identically to writing `true` explicitly.
 
 ---
 
@@ -516,7 +516,7 @@ difference to record).
 `tools: { enabled: { route: true } }`) is what registers `reflex_route`; the main
 flow does not depend on it.
 
-Three capabilities are **no longer tools** and therefore have no switch here:
+Three capabilities are **commands and hooks now** and therefore have no switch here:
 `prune` (result pruning) and `detect_stagnation` (stagnation detection) are driven
 directly by the intervention layer as `observe`/`active` take effect, and the
 ledger summary moved to the `/reflex-ledger` command. A line at the end of the
@@ -527,7 +527,7 @@ the next section.
 
 ## 9. MCP tools ↔ DSH native capabilities
 
-The two forms **no longer share one tool set**: the stdio MCP side still exposes
+The two forms **use different tool sets**: the stdio MCP side still exposes
 the **eight tools frozen since v0.1.0**, while the DSH plugin side registers
 **five switchable capabilities (four by default)** — the other three are carried
 by the automatic intervention layer and by one command instead of occupying the
@@ -579,7 +579,7 @@ Differences:
   "placeholder tool" and the model never sees a shell that fails on every call.
   With `tools.enabled` omitted the per-suffix default applies
   (`choice`/`score`/`screen`/`gate` on, `route` off); an unknown suffix (say
-  `teleport`, or one that is no longer a tool such as
+  `teleport`, or one that has become a command such as
   `prune`/`detect_stagnation`/`status_ledger`) or a non-boolean is rejected by the
   validator at install time instead of being ignored. Writing `false` for all five
   registers no tool at all (routing, reasoning effort and the intervention hooks
@@ -653,11 +653,11 @@ stdio MCP `tools/list` for real.
 | Reasoning effort never changes | The policy is unset (no intervention), or the caller chose a concrete `reasoningEffort` explicitly on the request |
 | System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page |
 | The in-panel guide is stale | `USER_GUIDE.md` changed without a rebuild; run `npm run build:all` |
-| A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`). `prune`/`detect_stagnation`/`status_ledger` are not tools any more and are refused by the validator |
+| A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`). `prune`/`detect_stagnation`/`status_ledger` are commands now and are refused by the validator |
 | `reflex_route` is missing from the default tool list | Expected: `route` is off by default; switch it on in the Tools page (or set `tools: { enabled: { route: true } }`) |
 | Looking for a `reflex_status_ledger` tool to read the ledger | The ledger is a command now: type `/reflex-ledger` (the stdio MCP side still has the tool of that name) |
-| The model selector still offers `reflex` after adaptive effort was switched off | That level was injected by the previous load; make sure the configuration is in effect and reload the plugin to revoke the injection |
-| Saving the configuration reports that only blank or reflex is supported | The old configuration still writes a concrete level; remove it (or use `reflex`). To fix the depth, choose a concrete level in the model selector |
+| The model selector still offers `reflex` after adaptive effort was switched off | That level came from a load that injected it; make sure the configuration is in effect and reload the plugin to revoke the injection |
+| Saving the configuration reports that only blank or reflex is supported | The configuration still writes a concrete level; remove it (or use `reflex`). To fix the depth, choose a concrete level in the model selector |
 | Saving Interventions grew the configuration with defaults | Expected: that group is written back whole, so the mode and every budget are saved as shown |
 
 ---

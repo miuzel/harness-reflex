@@ -903,14 +903,58 @@ test('the effort copy explains non-intervention and the injected adaptive level 
           ? ['不改写 reasoningEffort', '行为与未安装该功能一致', 'System 1', '模型选择器', '具体档位']
           : ['never rewrites reasoningEffort', 'as if this feature were not installed', 'System 1', 'model selector', 'concrete level'];
       for (const phrase of required) assert.ok(note.includes(phrase), `${language} help lacks "${phrase}": ${note}`);
-      // The on-page hint carries the same "nothing is rewritten" promise.
+      // The on-page hint is a one-line locator; the long explanation lives in (?).
+      const hint = String(mounted.dictionaries['dsh-reflex.panel']?.effortHint ?? '');
       assert.ok(
-        textOf(wrapper).includes(language === 'zh' ? '不改写' : 'never rewrites'),
-        `${language} hint does not mention that effort is not rewritten`
+        hint.includes(language === 'zh' ? '不干预' : 'leave untouched') &&
+          hint.includes(language === 'zh' ? '每轮' : 'every turn'),
+        `${language} hint no longer locates both policies: ${hint}`
       );
     } finally {
       mounted.unmount();
     }
+  }
+});
+
+test('settings copy and both guides carry no migration wording and the effort hint stays a locator', async () => {
+  const banned =
+    /旧|不再|等价|别名|迁移|legacy|previously|no longer|deprecated|backwards.compat|(?:^|[^a-z])alias(?:[^a-z]|$)|migration|any more|old (?:value|config|configuration|session|revision)|previous (?:revision|load)/i;
+
+  for (const language of ['zh', 'en'] as const) {
+    const { form } = settingsForm(AUTHORED);
+    const mounted = await mountPanel({ facts: facts(true), form, language });
+    try {
+      const copy = mounted.dictionaries['dsh-reflex.panel'] ?? {};
+      for (const [key, value] of Object.entries(copy)) {
+        const hit = banned.exec(value);
+        assert.equal(hit, null, `${language} copy "${key}" carries migration wording "${hit?.[0]}": ${value}`);
+      }
+
+      const hint = String(copy.effortHint ?? '');
+      const help = String(copy.helpEffortSetting ?? '');
+      assert.notEqual(hint, help, `${language} effort hint duplicates the (?) explanation`);
+      assert.equal(help.includes(hint), false, `${language} (?) explanation repeats the short hint verbatim`);
+      assert.ok(hint.length < 90, `${language} effort hint is not a one-line locator: ${hint}`);
+      assert.ok(hint.length * 2 < help.length, `${language} effort hint is nearly as long as the (?) explanation`);
+
+      // Criteria that must survive the cleanup, shared across hint + (?).
+      const surface = `${hint} ${help}`;
+      const points =
+        language === 'zh'
+          ? ['不干预', '每轮', 'System 1', '模型选择器', 'minimal', 'max']
+          : ['leave untouched', 'every turn', 'System 1', 'model selector', 'minimal', 'max'];
+      for (const point of points) {
+        assert.ok(surface.includes(point), `${language} effort copy lost the "${point}" requirement`);
+      }
+    } finally {
+      mounted.unmount();
+    }
+  }
+
+  for (const document of ['USER_GUIDE.md', 'docs/USER_GUIDE.en.md']) {
+    const text = readFileSync(fileURLToPath(new URL(`../../../${document}`, import.meta.url)), 'utf8');
+    const hit = banned.exec(text);
+    assert.equal(hit, null, `${document} carries migration wording "${hit?.[0]}"`);
   }
 });
 
@@ -1190,7 +1234,7 @@ test('the effort page can turn adaptive effort off, and writes it with its group
   assert.equal(checkboxOf(tree, '启用自适应推理强度').props.checked, true, 'adaptive effort does not start enabled');
   fire(checkboxOf(tree, '启用自适应推理强度'), 'onChange', { target: { checked: false } });
   tree = await mounted.runtime.flush();
-  assert.ok(textOf(tree).includes('不再做自适应判定'), 'the consequence of switching off is not explained');
+  assert.ok(textOf(tree).includes('不做自适应判定'), 'the consequence of switching off is not explained');
   fire(find(tree, 'button', '保存'), 'onClick');
   await mounted.runtime.flush();
 
