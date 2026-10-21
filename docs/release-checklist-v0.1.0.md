@@ -28,8 +28,8 @@ V=0.1.0
 - [x] 版本常量与测试引用同步（执行记录）：
 
   - `packages/dsh-reflex/src/panel-api.ts` → `REFLEX_PLUGIN_VERSION = '0.1.0'`
-  - `src/release-packaging.test.ts` 产物名改为按 manifest 版本动态生成（插件包为 `dsh-system-one-<version>.tgz`）
-  - `packages/dsh-reflex/package.json` → `name: dsh-system-one`、`cordis.patch.yml` 的 `name` 同步（`id` 不变）
+  - `src/release-packaging.test.ts` 产物名改为按 manifest 版本动态生成（插件包为 `dsh-harness-reflex-<version>.tgz`）
+  - `packages/dsh-reflex/package.json` → `name: dsh-harness-reflex`、`cordis.patch.yml` 的 `name` 同步（`id` 不变）
   - `USER_GUIDE.md`、`docs/USER_GUIDE.en.md`、`packages/dsh-reflex/README.md` 的当前版本声明
   - `package-lock.json`：`npm install --package-lock-only --ignore-scripts`
 
@@ -48,7 +48,7 @@ V=0.1.0
 - [ ] 包名/渠道现状复核（**负责人人工 gate**）：
 
   ```bash
-  npm view dsh-system-one version  # 期望 404（非 scoped 名可用）；若已存在则必须换名
+  npm view dsh-harness-reflex version  # 期望 404（非 scoped 名可用）；若已存在则必须换名
   npm view harness-reflex version      # 期望 404（根包名可用）
   npm whoami                           # 期望打印用户名；E401 即未登录
   ```
@@ -103,7 +103,7 @@ V=0.1.0
   mkdir -p tmp/release-archive
   cp -a release/harness-reflex-0.1.0-alpha.2.tgz release/dsh-reflex-0.1.0-alpha.2.tgz \
         release/SHA256SUMS tmp/release-archive/ 2>/dev/null || true
-  # 0.1.0 的插件产物名是 dsh-system-one-0.1.0.tgz
+  # 0.1.0 的插件产物名是 dsh-harness-reflex-0.1.0.tgz
   (cd tmp/release-archive && sha256sum -c SHA256SUMS 2>/dev/null || true)
   ```
 
@@ -134,7 +134,7 @@ V=0.1.0
   sha256sum release/*.tgz
   (cd release && sha256sum -c SHA256SUMS)
   tar -tzf release/harness-reflex-$V.tgz | wc -l
-  tar -tzf release/dsh-system-one-$V.tgz | wc -l
+  tar -tzf release/dsh-harness-reflex-$V.tgz | wc -l
   ```
 
   通过判据：`sha256sum -c` 两行 OK；把两个字节数、entry 数、sha256 抄进 release notes 与发布记录。**alpha.2 的旧指纹不得复用**。
@@ -151,10 +151,10 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 - [ ] 用 tarball 安装（同版本必须 `--force`）：
 
   ```bash
-  dsh plugin --profile web add --force "$PWD/release/dsh-system-one-$V.tgz"
+  dsh plugin --profile web add --force "$PWD/release/dsh-harness-reflex-$V.tgz"
   ```
 
-  通过判据：pnpm 安装成功；`dsh plugin` 输出 `+ dsh-system-one 0.1.0`（或等价的 file: 链接）。
+  通过判据：pnpm 安装成功；`dsh plugin` 输出 `+ dsh-harness-reflex 0.1.0`（或等价的 file: 链接）。
 
 - [ ] 组合树里出现插件：
 
@@ -246,7 +246,7 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
   ```bash
   git checkout main
   git merge --no-ff integration/v0.1.0
-  git tag -a v0.1.0 -m "harness-reflex / dsh-system-one v0.1.0"
+  git tag -a v0.1.0 -m "harness-reflex / dsh-harness-reflex v0.1.0"
   git push origin main && git push origin v0.1.0
   ```
 
@@ -265,7 +265,7 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 
   ```bash
   gh release create v0.1.0 -R miuzel/harness-reflex \
-    release/harness-reflex-0.1.0.tgz release/dsh-system-one-0.1.0.tgz release/SHA256SUMS \
+    release/harness-reflex-0.1.0.tgz release/dsh-harness-reflex-0.1.0.tgz release/SHA256SUMS \
     --title "v0.1.0" --notes-file docs/release-notes-v0.1.0.md
   diff <(gh release view v0.1.0 -R miuzel/harness-reflex --json body --jq .body) \
        docs/release-notes-v0.1.0.md
@@ -273,7 +273,16 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 
   通过判据：release 创建成功；正文与真源逐字一致（仅末尾换行归一化）。
 
-- [ ] registry（仅当 B4/B5 已关闭，**负责人 gate**）：`npm login` → `npm whoami` 打印用户名 → 发布 `harness-reflex` 与 `dsh-system-one` 的已验 tarball → `npm view <pkg> version` 与 `dist.integrity` 对账。未关闭则**明确记录“本版不发布到 registry”**，不得含糊。
+- [ ] registry（仅当 B4/B5 已关闭，**负责人 gate**）：`npm login` → `npm whoami` 打印用户名 → 发布两个已验 tarball（非 scoped，**不加 `--access public`**）：
+
+  ```bash
+  npm publish ./release/dsh-harness-reflex-0.1.0.tgz
+  npm publish ./release/harness-reflex-0.1.0.tgz
+  npm view dsh-harness-reflex version          # 期望 0.1.0
+  npm view dsh-harness-reflex dist.integrity   # 与 release/SHA256SUMS 对账
+  ```
+
+  通过判据：两条 `npm view` 与本地记录一致；若返回 `E403 Package name too similar`，按手册 §1.1 换名，不要重试。未关闭 B5 则**明确记录“本版不发布到 registry”**，不得含糊。
 
 - [ ] awesome-dsh-plugin PR：按手册 §9 提交 `data/plugins/miuzel__harness-reflex.yml` 与重生成的 README；通过判据：PR 模板清单全部勾选，CI（仓库年龄/commits）通过。
 

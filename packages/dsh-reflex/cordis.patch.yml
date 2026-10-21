@@ -1,4 +1,4 @@
 - insert:
     - id: dsh-reflex
-      name: 'dsh-system-one'
+      name: 'dsh-harness-reflex'
       config: {}

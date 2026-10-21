@@ -2584,7 +2584,7 @@ test('the reader the guide documents is an export of the package root, and retur
   assert.equal(existsSync(path.join(packageDir(), 'node_modules', '@deepseek-ai')), true, 'the package can resolve its host deps');
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(moduleRoot, { recursive: true });
-  symlinkSync(packageDir(), path.join(moduleRoot, 'dsh-system-one'), 'dir');
+  symlinkSync(packageDir(), path.join(moduleRoot, 'dsh-harness-reflex'), 'dir');
   for (const dependency of ['@deepseek-ai', 'zod']) {
     const from = path.join(packageDir(), 'node_modules', dependency);
     if (existsSync(from)) symlinkSync(from, path.join(moduleRoot, dependency), 'dir');
@@ -2592,7 +2592,7 @@ test('the reader the guide documents is an export of the package root, and retur
   const probePath = path.join(scratch, 'probe.mjs');
   writeFileSync(
     probePath,
-    "import * as mod from 'dsh-system-one';\n" +
+    "import * as mod from 'dsh-harness-reflex';\n" +
       'process.stdout.write(JSON.stringify({ reader: typeof mod.readPrunedOriginal,' +
       " locatorBuilder: typeof mod.pruneLocator, recordType: mod.PRUNED_ORIGINAL_RECORD_TYPE," +
       " tools: mod.reflexToolNames(mod.resolveConfig({ backend: 'mock' })) }));\n"

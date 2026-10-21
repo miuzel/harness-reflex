@@ -1,6 +1,6 @@
 # Harness Reflex 使用说明（v0.1.0）
 
-> 本文档是 **`dsh-system-one` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
+> 本文档是 **`dsh-harness-reflex` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
 > 同一份内容会内嵌进 `packages/dsh-reflex/client.js`，可在 DSH 设置面板的
 > **「使用说明 / Guide」** 标签页内直接阅读（跟随 DSH 界面语言中英切换）。
 > 因此修改本文档后必须重新执行 `npm run build:all`，否则面板里仍是上一次构建的副本
@@ -19,7 +19,7 @@ System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁
 | 形态 | 包 | 适用 Harness | 通信方式 |
 | --- | --- | --- | --- |
 | stdio MCP 服务器 | `harness-reflex` | Claude Code、Codex CLI、AGY | MCP JSON-RPC 子进程 |
-| DSH Host 插件 | `dsh-system-one` | DeepSeek Harness (`dsh`) | 进程内 `ctx.tools` / Cordis 钩子 |
+| DSH Host 插件 | `dsh-harness-reflex` | DeepSeek Harness (`dsh`) | 进程内 `ctx.tools` / Cordis 钩子 |
 
 MCP 面暴露 8 个工具；DSH 面只注册 5 个可开关工具（默认 4 个），剪枝/停滞/账本由自动干预与
 `/reflex-ledger` 命令承载。参数及校验边界以第 9 节和各表面实际工具定义为准。
@@ -35,7 +35,7 @@ MCP 面暴露 8 个工具；DSH 面只注册 5 个可开关工具（默认 4 个
 └───────────────┬──────────────────────────────────┬───────────────────┘
                 │ stdio MCP                        │ DSH Cordis 进程内
 ┌───────────────▼──────────────────┐  ┌────────────▼───────────────────┐
-│ harness-reflex 核心（dist/）      │  │ dsh-system-one 插件            │
+│ harness-reflex 核心（dist/）      │  │ dsh-harness-reflex 插件            │
 │  gate · prune · stagnation       │◄─┤  src/bridge.ts  ReflexRuntime  │
 │  route · screen · score          │  │  src/tools.ts   5 个可开关工具 │
 │  ledger · calibrate              │  │  src/router.ts  虚拟 Provider  │
@@ -83,7 +83,7 @@ node dist/cli/index.js setup all      # 或 claude | codex | agy
 
 # 3) 以 DSH 插件方式安装（进程内集成，推荐）
 #    发布 tarball：同版本重装必须 --force；开发期也可直接装目录
-dsh plugin --profile web add --force ./release/dsh-system-one-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
 ```
 
 `npm run build:all` 的每一步都是必需的：
@@ -323,7 +323,7 @@ interventions:
 取回就是拿同一条定位符读会话事件：
 
 ```ts
-import { readPrunedOriginal } from 'dsh-system-one';
+import { readPrunedOriginal } from 'dsh-harness-reflex';
 
 const record = readPrunedOriginal(session.ownEvents(), locator);
 record?.text;    // 逐字节原文
@@ -441,7 +441,7 @@ record?.digest;  // 与决策记录里的 digest 一致
 DSH 插件侧只注册 **5 个可开关的能力（默认 4 个）**——另外三项能力改由自动干预与一条
 命令承载，不占用模型的工具清单。
 
-| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 插件侧（`dsh-system-one`） | 主要参数 | 建议 |
+| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 插件侧（`dsh-harness-reflex`） | 主要参数 | 建议 |
 | --- | --- | --- | --- | --- |
 | 多选一分类 | `reflex_choice` | 工具 `reflex_choice` | `question`, `options[]`, 可选 `context` | 建议暴露 |
 | 连续评分 | `reflex_score` | 工具 `reflex_score` | `statement`, 可选 `criteria`, `context` | 建议暴露 |
@@ -519,7 +519,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | 产物 | 内容 |
 | --- | --- |
 | `harness-reflex-<version>.tgz` | 根包：`dist/`、`README.md`、`docs/`、`USER_GUIDE.md`、`experiments/` |
-| `dsh-system-one-<version>.tgz` | 插件 `dsh-system-one`（npm pack 命名）：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
+| `dsh-harness-reflex-<version>.tgz` | 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
 | `SHA256SUMS` | 上述两份 tarball 的 SHA-256 校验和 |
 | `release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
 | `RELEASE-<version>.md` | 发布说明：安装命令、核验清单、内容构成 |
@@ -553,7 +553,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 ## 13. 版本与兼容性
 
-- 版本：`harness-reflex` 与 `dsh-system-one` 同步发布，v0.1.0；
+- 版本：`harness-reflex` 与 `dsh-harness-reflex` 同步发布，v0.1.0；
 - Node：`>= 18`（根包 `engines`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
 - 插件以 `peerDependencies` 声明 Host 契约，运行时不重复打包 Host 模块；
 - stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷；

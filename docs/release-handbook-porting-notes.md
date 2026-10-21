@@ -23,16 +23,16 @@
 |---|---|---|
 | 包结构 | 单包（`dsh-graph`，host/client 合并） | **双包**：根 `harness-reflex`（core + stdio MCP + CLI）+ `packages/dsh-reflex`（DSH 插件 + 客户端面板） |
 | 打包入口 | `bash scripts/build.sh` + `dist/` + `pnpm pack/publish` | **`node scripts/release-pack.mjs`**（`npm run release:pack`），产物直接落 `release/*.tgz` |
-| 产物 | `dsh-graph-<v>.tgz` 单包 | `release/harness-reflex-<v>.tgz` + `release/dsh-system-one-<v>.tgz`（npm pack 命名）+ `SHA256SUMS` + `release-report.json` + `RELEASE-<v>.md` |
+| 产物 | `dsh-graph-<v>.tgz` 单包 | `release/harness-reflex-<v>.tgz` + `release/dsh-harness-reflex-<v>.tgz`（npm pack 命名）+ `SHA256SUMS` + `release-report.json` + `RELEASE-<v>.md` |
 | 自检 | 冻结验收脚本 / dist freshness 测试 | **27 项自检**（构建新鲜度 2、产物/版本 4、结构审计 10、内容断言 4、安装冒烟 7） |
 | 测试 | `scripts/run-tests.mjs` 等 | `npm test`（当前 113）、`npm run test:plugin`（当前 419）、`npm run test:mutation`（51/51） |
-| 安装 | `dsh plugin --profile web add dsh-graph` | `dsh plugin --profile <p> add --force <tarball>`；同版本必须 `--force`（插件包名 `dsh-system-one`） |
+| 安装 | `dsh plugin --profile web add dsh-graph` | `dsh plugin --profile <p> add --force <tarball>`；同版本必须 `--force`（插件包名 `dsh-harness-reflex`） |
 | 健康检查 | `/api/dsh-graph` | `/dsh-reflex/api/health`（插件身份）+ `/dsh-reflex/api/panel`（快照：`systemOne` / `interventions` / `tools` 等） |
 | 账本 | 看板/工具 | DSH 侧 `/reflex-ledger` 命令；MCP 侧 `reflex_status_ledger` 工具 |
 | 工具面 | 单套 14 工具 | **两套**：MCP 8 工具；DSH 5 个可开关（默认 4，`route` 关），无 `reflex_prune` |
 | 插件核心依赖 | 包内 `core/` 副本经 sync 脚本同步 | 插件 `dist/vendor/harness-reflex/**` 内联核心；tarball 安装**不依赖根包**（仅 zod/schemastery + Host peers） |
 | 版本同步 | 单包 version + 常量 + 文档 | 已完成：根包/插件 `package.json`、`REFLEX_PLUGIN_VERSION`、两份指南、插件 README、`src/release-packaging.test.ts`、`package-lock.json`、重建 `client.js` |
-| registry 现状 | 官方 registry 已发布过，仅登录态问题 | 根包名 `harness-reflex` 可用（404）；**插件名 `dsh-reflex` 已被他人占用（0.3.0）** → 本版改用 `dsh-system-one`；登录态待负责人处理；包名 `dsh-system-one` 已确认可用 |
+| registry 现状 | 官方 registry 已发布过，仅登录态问题 | 根包名 `harness-reflex` 可用（404）；**插件名 `dsh-reflex` 已被他人占用（0.3.0）** → 本版改用 `dsh-harness-reflex`；登录态待负责人处理；包名 `dsh-harness-reflex` 已确认可用 |
 | 推荐渠道 | 单包 registry 发布 | 0.1.0 两包都可发布到 npm；也可先走 **tarball / GitHub Release 直发**，registry 待负责人登录 |
 | 发布正文模板 | 平台门禁指向 `docs/platform-gate.md` | 本仓库无该文件；平台结论直接写进 notes（Linux/WSL2 实测、Windows/macOS 未验证） |
 | 商店前置 | 已有公开 repo / topic | 仓库尚未创建、无 remote/tag、无 awesome 条目；gh 已登录 `miuzel` |
@@ -70,14 +70,14 @@
 | 文件 | 需要处理的引用 |
 |---|---|
 | `package.json` | ✅ `"version": "0.1.0"` |
-| `packages/dsh-reflex/package.json` | ✅ `name: dsh-system-one`、`version: 0.1.0` |
+| `packages/dsh-reflex/package.json` | ✅ `name: dsh-harness-reflex`、`version: 0.1.0` |
 | `packages/dsh-reflex/src/panel-api.ts` | ✅ `REFLEX_PLUGIN_VERSION = '0.1.0'` |
 | `USER_GUIDE.md` | ✅ 标题、§13、安装命令、包名与工具面 |
 | `docs/USER_GUIDE.en.md` | ✅ 同中文版；已 `npm run build:all` 重新内嵌 |
 | `packages/dsh-reflex/README.md` | ✅ 包名、vendor 说明、安装命令 |
 | `src/release-packaging.test.ts` | ✅ 产物名按 manifest 版本动态生成 |
 | `package-lock.json` | ✅ `npm install` 重新生成，根版本 `0.1.0` |
-| `packages/dsh-reflex/client.js` | ✅ `npm run build:all` 重建（bundle id = `dsh-system-one`） |
+| `packages/dsh-reflex/client.js` | ✅ `npm run build:all` 重建（bundle id = `dsh-harness-reflex`） |
 | `docs/dsh-plugin.md` | ✅ 顶部现行口径 + 历史章节标注 + 版本/产物/路由更新 |
 
 > 不存在的文件：本仓库没有 `pnpm-lock.yaml`（根用 `package-lock.json`，插件无独立 lock）；没有 `CHANGELOG.md`；没有 `LICENSE` 文件（`package.json` 声明 MIT，发布前是否补 LICENSE 由负责人决定）。
@@ -89,7 +89,7 @@
 | 文件 | entries | 体积 |
 |---|---:|---:|
 | `harness-reflex-0.1.0.tgz` | 73 | 219 KiB |
-| `dsh-system-one-0.1.0.tgz` | 102 | 578 KiB |
+| `dsh-harness-reflex-0.1.0.tgz` | 102 | 578 KiB |
 
 根包 entry 数从 69 变为 73，是因为本次新增的 4 份 `docs/release-*.md` 会按 `files: ["docs/**/*.md"]` 进入根包；插件包不含这些文档，条目数不变。具体 sha256 见 `release/SHA256SUMS`。**不在文档里固化根包 hash**：文档本身在根包内，任何后续编辑都会改变它；0.1.0 以发布树实测为准。
 

@@ -54,7 +54,7 @@ test('the manifest publishes the browser half as a client module', () => {
   const pkg = manifest();
   const client = clientDeclaration();
 
-  assert.equal(pkg.name, 'dsh-system-one');
+  assert.equal(pkg.name, 'dsh-harness-reflex');
   assert.equal(client.platform, 'web');
   // The activation switch: without an exports map the package is not scanned at
   // all, and without this subpath the loader throws for a declared dsh.client.

@@ -52,7 +52,7 @@
    - 内置 `calibrate` 引擎，可基于历史标注集拟合单调映射曲线，计算 ECE 误差并输出校准配置；
    - 线上运行时自动修正过度自信的模型原始概率，杜绝盲目放行。
 
-4. **DSH Host 插件（进程内集成，`dsh-system-one`）**：
+4. **DSH Host 插件（进程内集成，`dsh-harness-reflex`）**：
    - 除 stdio MCP 之外，同一套 System One 能力还以 **DSH Cordis Host 插件**形式在 `dsh` 进程内注册：
      `packages/dsh-reflex/` 通过 `ctx.tools` 注册 **5 个可开关工具** `reflex_choice` / `reflex_score` /
      `reflex_route` / `reflex_screen` / `reflex_gate`，**默认开启前 4 个、`route` 默认关闭**。
@@ -103,10 +103,10 @@ node dist/cli/index.js setup agy
 
 ```bash
 # 从本仓库产物安装；同版本重装必须加 --force（pnpm 不会静默覆盖同版本）
-dsh plugin --profile web add --force ./release/dsh-system-one-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
 
-# 首次发布到 npm 后（包名 dsh-system-one）：
-dsh plugin --profile web add dsh-system-one@0.1.0
+# 首次发布到 npm 后（包名 dsh-harness-reflex）：
+dsh plugin --profile web add dsh-harness-reflex@0.1.0
 ```
 
 安装后重启 / 重载 `dsh`，设置页会出现「Reflex 决策运行时」面板；`/dsh-reflex/api/health`
@@ -175,7 +175,7 @@ npm run release          # 全量构建与测试通过后再打包（发布闸�
 | 产物 | 说明 |
 | --- | --- |
 | `release/harness-reflex-<version>.tgz` | 根包：核心运行时、CLI、stdio MCP、适配器、`dist/`（含类型与自包含 source map）、`USER_GUIDE.md`、`docs/` |
-| `release/dsh-system-one-<version>.tgz` | DSH Host 插件 `dsh-system-one`（npm pack 命名）：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
+| `release/dsh-harness-reflex-<version>.tgz` | DSH Host 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
 | `release/SHA256SUMS` | 两份 tarball 的 SHA-256 校验和 |
 | `release/release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
 | `release/RELEASE-<version>.md` | 发布说明：安装方式、核验清单、内容构成 |
