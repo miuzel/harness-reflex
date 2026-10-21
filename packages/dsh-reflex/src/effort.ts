@@ -779,23 +779,42 @@ export interface EffortInterceptorOptions {
 }
 
 /**
+ * The live deployment policy of one {@link EffortInterceptor}.
+ *
+ * The same shape the activation resolves at startup. A config-only settings
+ * save replaces this whole object (see {@link EffortInterceptor.updatePolicy}),
+ * so every read on the request path answers with the value currently in force
+ * without re-running the schema.
+ */
+export interface EffortPolicy {
+  /** Whether adaptive effort may decide anything. */
+  enabled: boolean;
+  /** The adaptive trigger marker; absent means no deployment-level policy. */
+  setting?: ReasoningEffortSetting;
+  /** Level used when neither System 1 nor the cue classifier has evidence. */
+  fallback: AdaptiveEffortLevel;
+  /** Minimum System 1 confidence for its answer to be trusted. */
+  minConfidence: number;
+}
+
+/**
  * Turns one request's marker into a rewritten reasoning effort.
  *
  * The interceptor is the whole policy in one place: it recognises the trigger,
  * asks System 1, falls back to cues, projects onto the route, audits, and
  * publishes. It never throws: a broken backend, a hostile option list, or a
  * failing ledger must not be able to veto an agent turn.
+ *
+ * The policy is mutable on purpose. The Cordis loader commits a config-only
+ * save into this activation's volatile references without remounting the
+ * plugin, so a restart is not available to rebuild this object; {@link updatePolicy}
+ * swaps the values and every consumer — the request interception, the model
+ * selector surface, the panel — reads the new ones on its next access.
  */
 export class EffortInterceptor {
-  readonly setting: ReasoningEffortSetting | undefined;
-  /**
-   * The deployment switch. When `false` this interceptor decides nothing: no
-   * System 1 round trip, no cue vote, no ledger entry, no status, and no rewrite
-   * — only the marker is cleared, because it is an intent no adapter accepts.
-   */
-  readonly enabled: boolean;
-  readonly fallback: AdaptiveEffortLevel;
-  readonly minConfidence: number;
+  #policy: EffortPolicy;
+  /** Bumped on every policy change, so an in-turn cached decision is not reused across it. */
+  #generation = 0;
 
   #decide: EffortDecider;
   #backendName: string;
@@ -807,15 +826,69 @@ export class EffortInterceptor {
    * @param options - deployment setting, System 1 seam, and audit sinks.
    */
   constructor(options: EffortInterceptorOptions) {
-    this.setting = options.setting;
-    this.enabled = options.enabled ?? true;
-    this.fallback = options.fallback ?? 'medium';
-    this.minConfidence = options.minConfidence ?? 0.3;
+    this.#policy = {
+      enabled: options.enabled ?? true,
+      ...(options.setting === undefined ? {} : { setting: options.setting }),
+      fallback: options.fallback ?? 'medium',
+      minConfidence: options.minConfidence ?? 0.3
+    };
     this.#decide = options.decide;
     this.#backendName = options.backendName;
     this.#ledger = options.ledger;
     this.#feed = options.feed;
     this.#now = options.now ?? (() => performance.now());
+  }
+
+  /** The policy currently in force. */
+  get policy(): Readonly<EffortPolicy> {
+    return this.#policy;
+  }
+
+  /** Monotonic version of the policy; equal across an unchanged request path. */
+  get generation(): number {
+    return this.#generation;
+  }
+
+  /** Deployment `reasoningEffort` marker; the deployment-level adaptive policy. */
+  get setting(): ReasoningEffortSetting | undefined {
+    return this.#policy.setting;
+  }
+
+  /**
+   * The deployment switch. When `false` this interceptor decides nothing: no
+   * System 1 round trip, no cue vote, no ledger entry, no status, and no rewrite
+   * — only the marker is cleared, because it is an intent no adapter accepts.
+   */
+  get enabled(): boolean {
+    return this.#policy.enabled;
+  }
+
+  /** Level used when no cue matches. */
+  get fallback(): AdaptiveEffortLevel {
+    return this.#policy.fallback;
+  }
+
+  /** Minimum System 1 confidence for its answer to be trusted. */
+  get minConfidence(): number {
+    return this.#policy.minConfidence;
+  }
+
+  /**
+   * Replace the live policy after a config-only save.
+   *
+   * O(1) and allocation-light: this is the whole hot-path contract of a live
+   * settings edit. The next request reads these fields directly; no schema is
+   * parsed on the request path.
+   * @param policy - the freshly resolved `effort` block.
+   */
+  updatePolicy(policy: EffortPolicy): void {
+    this.#policy = {
+      enabled: policy.enabled,
+      ...(policy.setting === undefined ? {} : { setting: policy.setting }),
+      fallback: policy.fallback,
+      minConfidence: policy.minConfidence
+    };
+    this.#generation += 1;
   }
 
   /** Whether this activation has an adaptive policy to apply at all. */

@@ -246,9 +246,9 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
 
     // A config-only settings save does not remount this plugin: the loader
     // commits the new values into the volatile references and dispatches this
-    // event to the owning fiber. Routing pools and the fallback are read per
-    // request, so re-resolving them here is what makes an edited member model or
-    // fallback effective on the next request instead of after a restart.
+    // event to the owning fiber. Re-resolving here makes the edited routing,
+    // effort and intervention policies effective on the next request/tool call
+    // instead of after a restart.
     const stopConfigWatch = ctx.on('loader/volatile-update', () => {
       if (runtime.disposed) return;
       runtime.refresh();
@@ -291,7 +291,13 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       // reports a locator. No verified retention, no reduction.
       retain: (session, request) => appendPrunedOriginal(session, request)
     });
-    runtime.attachInterventions(interventions.engine);
+    runtime.attachInterventions(
+      interventions.engine,
+      (next, pruneThreshold) => {
+        interventions.reconfigure(next, pruneThreshold);
+      },
+      () => interventions.listenerCount
+    );
     const unmountPanel = mountReflexPanel(ctx, runtime);
 
     const injectSettings = (ctx as { inject?: (deps: string[], cb: (scope: any) => void) => void }).inject;
@@ -309,7 +315,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       stopObserving();
       stopRouting();
       unregisterLedger();
-      for (const dispose of interventions.disposers.reverse()) dispose();
+      interventions.dispose();
       unmountPanel();
       for (const dispose of disposers.reverse()) dispose();
       runtime.dispose();
@@ -349,6 +355,9 @@ function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: numb
     effort: runtime.effort,
     route: routingActive(runtime.config),
     maxTaskChars,
+    // Live config, pulled once per step: identity comparison, no schema run
+    // unless the loader actually committed a change.
+    refreshConfig: () => runtime.refreshIfChanged(),
     warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
   });
   // A second activation of this plugin joins the process-wide route; its live

@@ -1596,9 +1596,17 @@ const EMPTY_VERDICT: StagnationCheckResponse = { isStuck: false, confidence: 0, 
  * conventional.
  */
 export class InterventionEngine {
-  /** Resolved `interventions` block. */
-  readonly config: ResolvedInterventionsConfig;
-  readonly #pruneThreshold: number;
+  /**
+   * Resolved `interventions` block currently in force.
+   *
+   * Mutable through {@link updatePolicy}: the loader commits a config-only save
+   * into the running activation, and every hook below reads this block per call,
+   * so a threshold change is effective on the very next tool call without
+   * rebuilding the engine (and without re-spending a schema run on the hot path).
+   */
+  #config: ResolvedInterventionsConfig;
+  /** Character count above which a result is a pruning candidate (live). */
+  #pruneThreshold: number;
   readonly #stagnation: Pick<StagnationDetector, 'check'>;
   readonly #prune: Pick<ToolResultPruner, 'prune'>;
   readonly #gate: Pick<ReflexGateService, 'verify' | 'classifyClaims'>;
@@ -1623,7 +1631,7 @@ export class InterventionEngine {
    * @param options - services, thresholds, clock, and audit sink.
    */
   constructor(options: InterventionEngineOptions) {
-    this.config = options.config;
+    this.#config = options.config;
     this.#pruneThreshold = options.pruneThreshold;
     this.#stagnation = options.stagnation;
     this.#prune = options.prune;
@@ -1639,6 +1647,30 @@ export class InterventionEngine {
       gate: emptyBucket(),
       closing: emptyBucket()
     };
+  }
+
+  /** The resolved intervention block currently in force. */
+  get config(): ResolvedInterventionsConfig {
+    return this.#config;
+  }
+
+  /**
+   * Replace the live policy.
+   *
+   * Called once per actual config commit (never per tool call). Detectors and
+   * per-turn state are deliberately *not* reset: a turn that is already running
+   * keeps its counters and latches, and only the values each hook reads change.
+   * @param config - the freshly resolved `interventions` block.
+   * @param pruneThreshold - the freshly resolved top-level prune threshold.
+   */
+  updatePolicy(config: ResolvedInterventionsConfig, pruneThreshold: number): void {
+    this.#config = config;
+    this.#pruneThreshold = pruneThreshold;
+    // The pruning service also carries a copy of the threshold (the explicit
+    // `prune` tool reads it directly). Keep it in step, otherwise lowering the
+    // threshold would still be shadowed by the activation-time value. Absent on
+    // the test seams that only implement `prune()`.
+    (this.#prune as { setMinCharsThreshold?: (value: number) => void }).setMinCharsThreshold?.(pruneThreshold);
   }
 
   /** Whether any capability may act at all. */
@@ -3380,12 +3412,28 @@ export class InterventionEngine {
   }
 }
 
-/** The installer's product: the detachers and the engine behind them. */
+/** The installer's product: the detachers, the engine behind them, and live reconfiguration. */
 export interface InterventionInstallation {
-  /** Detachers of every registered listener, in registration order. */
+  /** Detachers of every currently registered listener, in registration order. */
   disposers: Array<() => void>;
   /** The engine the listeners drive, for the panel and for tests. */
   engine: InterventionEngine;
+  /**
+   * Apply a freshly resolved intervention policy without a remount.
+   *
+   * Thresholds are swapped on the engine and the listener set is reconciled with
+   * the new effective modes: a capability turned `off` loses its hooks (zero
+   * listeners and zero per-call overhead), one turned back on gets them again.
+   * The engine's per-agent turn state is deliberately preserved, so a settings
+   * save in the middle of a turn does not restart that turn's counters.
+   * @param config - freshly resolved `interventions` block.
+   * @param pruneThreshold - freshly resolved top-level prune threshold.
+   */
+  reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number): void;
+  /** The number of listeners currently attached (0 when every capability is off). */
+  readonly listenerCount: number;
+  /** Detach every listener; idempotent. */
+  dispose(): void;
 }
 
 /**
@@ -3396,6 +3444,11 @@ export interface InterventionInstallation {
  * to remember to check. A Host missing one of these hooks is tolerated: the
  * registration is guarded, so a stripped-down embedder loses one capability
  * instead of failing to load.
+ *
+ * The set is reconciled at install *and* on every config-only save, because the
+ * loader commits the new volatile values into the running activation instead of
+ * remounting it: {@link InterventionInstallation.reconfigure} adds the hooks a
+ * newly enabled capability needs and removes those of a capability switched off.
  *
  * What is *not* per-capability is the turn frame. One turn has one lifecycle
  * whatever combination of capabilities is enabled: `agent/pre-step` opens it —
@@ -3408,51 +3461,119 @@ export interface InterventionInstallation {
  *
  * @param ctx - registrant context.
  * @param options - engine options, including the audit sink.
- * @returns the detachers and the engine.
+ * @returns the detachers, the engine, and the live reconfiguration seam.
  */
 export function installInterventions(ctx: Context, options: InterventionEngineOptions): InterventionInstallation {
   const engine = new InterventionEngine(options);
   const disposers: Array<() => void> = [];
-  if (!engine.enabled) return { disposers, engine };
+  /** Attached hook groups, keyed by the capability set they serve. */
+  const groups = new Map<'frame' | 'pipeline' | 'closing', Array<() => void>>();
+  let disposed = false;
 
-  const guard = (register: () => unknown): void => {
-    try {
-      const detach = register();
-      if (typeof detach === 'function') disposers.push(detach as unknown as () => void);
-    } catch {
-      // A Host without the hook simply does not get that intervention.
+  /**
+   * Register every hook of one group, tolerating a Host without that hook.
+   * @param group - the group to attach.
+   */
+  const attach = (group: 'frame' | 'pipeline' | 'closing'): void => {
+    if (groups.has(group)) return;
+    const detachers: Array<() => void> = [];
+    const guard = (register: () => unknown): void => {
+      try {
+        const detach = register();
+        if (typeof detach === 'function') {
+          const fn = detach as unknown as () => void;
+          detachers.push(fn);
+          disposers.push(fn);
+        }
+      } catch {
+        // A Host without the hook simply does not get that intervention.
+      }
+    };
+
+    if (group === 'frame') {
+      // ── the turn frame, shared by every capability that acts inside a turn ──
+      guard(() => ctx.on('agent/pre-step', (payload, next) => engine.preStep(payload, next)));
+      guard(() =>
+        ctx.on('agent/disposed', (payload) => {
+          engine.forget(agentKeyOf(payload));
+        })
+      );
+    } else if (group === 'pipeline') {
+      // ── the result pipeline: stagnation evidence, pruning, failure evidence ─
+      // Every capability reads this pipeline: stagnation needs the recorded
+      // calls, pruning needs the payloads, the gate needs the failures, and the
+      // closing check needs the failing evidence of the turn.
+      guard(() => ctx.on('tools/pre-execute', (exec, next) => engine.toolCall(exec, next)));
+      guard(() => ctx.on('tools/post-execute', (exec, result, next) => engine.toolResult(exec, result, next)));
+    } else {
+      // ── the closing check's own inputs and its turn boundary ────────────────
+      guard(() => ctx.on('agent/turn-stopping', (payload) => engine.turnStopping(payload)));
+      guard(() =>
+        ctx.on('agent/assistant-stream', (payload) => {
+          engine.observeAssistantStream(payload);
+        })
+      );
+    }
+    groups.set(group, detachers);
+  };
+
+  /**
+   * Detach one group and drop its entries from the public detacher list.
+   * @param group - the group to detach.
+   */
+  const detach = (group: 'frame' | 'pipeline' | 'closing'): void => {
+    const detachers = groups.get(group);
+    if (!detachers) return;
+    groups.delete(group);
+    for (const dispose of detachers.reverse()) {
+      dispose();
+      const index = disposers.lastIndexOf(dispose);
+      if (index >= 0) disposers.splice(index, 1);
     }
   };
 
-  // ── the turn frame, shared by every capability that acts inside a turn ─────
-  guard(() => ctx.on('agent/pre-step', (payload, next) => engine.preStep(payload, next)));
-  guard(() =>
-    ctx.on('agent/disposed', (payload) => {
-      engine.forget(agentKeyOf(payload));
-    })
-  );
+  /**
+   * Reconcile the attached listeners with the effective capability modes.
+   */
+  const sync = (): void => {
+    if (disposed) return;
+    const wanted = new Set<'frame' | 'pipeline' | 'closing'>();
+    if (engine.enabled) {
+      wanted.add('frame');
+      // The result pipeline feeds every capability; it is present whenever any
+      // of them is, exactly as it was before the live path existed.
+      wanted.add('pipeline');
+      if (engine.serves('closing')) wanted.add('closing');
+    }
+    for (const group of ['closing', 'pipeline', 'frame'] as const) {
+      if (!wanted.has(group)) detach(group);
+    }
+    for (const group of ['frame', 'pipeline', 'closing'] as const) {
+      if (wanted.has(group)) attach(group);
+    }
+  };
 
-  // ── the result pipeline: stagnation evidence, pruning, failure evidence ────
-  // Every capability reads this pipeline: stagnation needs the recorded calls,
-  // pruning needs the payloads, the gate needs the failures, and the closing check
-  // needs the failing evidence of the turn. Registering it for a subset would
-  // silently disable the capability that was left out of the list.
-  if (engine.serves('stagnation', 'prune', 'gate', 'closing')) {
-    guard(() => ctx.on('tools/pre-execute', (exec, next) => engine.toolCall(exec, next)));
-    guard(() => ctx.on('tools/post-execute', (exec, result, next) => engine.toolResult(exec, result, next)));
-  }
+  sync();
 
-  // ── the closing check's own inputs and its turn boundary ──────────────────
-  if (engine.serves('closing')) {
-    guard(() => ctx.on('agent/turn-stopping', (payload) => engine.turnStopping(payload)));
-    guard(() =>
-      ctx.on('agent/assistant-stream', (payload) => {
-        engine.observeAssistantStream(payload);
-      })
-    );
-  }
-
-  return { disposers, engine };
+  return {
+    disposers,
+    engine,
+    reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number): void {
+      if (disposed) return;
+      engine.updatePolicy(config, pruneThreshold);
+      sync();
+    },
+    get listenerCount(): number {
+      return disposers.length;
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      detach('closing');
+      detach('pipeline');
+      detach('frame');
+    }
+  };
 }
 
 /**

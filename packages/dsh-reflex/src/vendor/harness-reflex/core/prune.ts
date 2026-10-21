@@ -34,6 +34,18 @@ export class ToolResultPruner {
     this.minCharsThreshold = minCharsThreshold;
   }
 
+  /**
+   * Replace the activation-time size floor.
+   *
+   * The floor is a user setting, not a construction constant: a settings save
+   * that lowers it must let the very next result be considered, without
+   * rebuilding the service (which would drop its backend/ledger wiring).
+   * @param minCharsThreshold - new minimum payload size, in characters.
+   */
+  setMinCharsThreshold(minCharsThreshold: number): void {
+    this.minCharsThreshold = minCharsThreshold;
+  }
+
   async prune(output: string, options?: PruneOptions): Promise<PruneResponse> {
     const threshold = options?.minCharsThreshold ?? this.minCharsThreshold;
 

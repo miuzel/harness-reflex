@@ -66,6 +66,17 @@ export interface ModelRoutingOptions {
   route?: boolean;
   /** Task-text budget captured from `agent/pre-step` (characters). */
   maxTaskChars: number;
+  /**
+   * Pull the activation's live config, if the host commits config-only saves.
+   *
+   * Called once at the start of every `agent/pre-step`: the implementation
+   * compares the volatile snapshot identities and re-resolves only when the
+   * loader actually committed a change, so an unchanged step pays a handful of
+   * identity comparisons and no schema run. This is what makes an effort-only
+   * deployment (no route to refresh lazily) pick up a settings edit on its next
+   * step even if the event were missed.
+   */
+  refreshConfig?: () => unknown;
   /** Diagnostic sink for non-fatal degradation (never throws). */
   warn?: (message: string) => void;
 }
@@ -191,6 +202,15 @@ interface TurnDecision {
   effort?: string;
   /** The published status of that decision. */
   status?: ReflexEffortStatus;
+  /**
+   * Effort policy generation the decision was taken under.
+   *
+   * A config-only save can land mid-turn; a follow-up step may reuse the cached
+   * decision only when no policy change happened between them, otherwise the
+   * new `fallback`/`minConfidence`/switch would be shadowed by a decision the
+   * user already replaced.
+   */
+  generation?: number;
 }
 
 /**
@@ -274,6 +294,20 @@ function ownedVirtualProvider(llm: LlmRuntime, provider: string): boolean {
   return OWNED_ROUTES.get(routeScope(llm))?.has(provider) === true;
 }
 
+/**
+ * The live policy facts the adaptive-effort surface reads.
+ *
+ * Kept structural rather than tied to {@link EffortInterceptor}: the surface
+ * only needs the two values, and a caller that has them as getters gets the
+ * live behaviour for free.
+ */
+export interface AdaptiveEffortPolicySource {
+  /** Deployment `reasoningEffort` marker, or `undefined` when none is configured. */
+  readonly setting: string | undefined;
+  /** Deployment `effort.enabled` switch. */
+  readonly enabled: boolean;
+}
+
 /** What {@link installAdaptiveEffortSurface} installed. */
 export interface AdaptiveEffortSurface {
   /** Whether the deployment defaults virtual routes to the adaptive strategy. */
@@ -312,17 +346,20 @@ export interface AdaptiveEffortSurface {
  * The runtime is still wrapped rather than left alone, because a marker that
  * survives to `prepareCall` must never reach a physical provider.
  *
+ * The two policy facts are read through the live interceptor on every call
+ * rather than captured here, so a config-only save (the loader commits new
+ * volatile values without remounting the plugin) changes what the selector
+ * offers and what an unpinned virtual request inherits on the very next call.
+ *
  * @param ctx - plugin context (kept for API compatibility).
  * @param llm - the LLM runtime to extend.
- * @param setting - deployment `reasoningEffort`, the initial mode of the surface.
- * @param enabled - the deployment `effort.enabled` switch; defaults to `true`.
+ * @param policy - live effort policy (`setting` + `enabled`) of the activation.
  * @returns the installed surface, whose `dispose()` restores the runtime.
  */
 export function installAdaptiveEffortSurface(
   _ctx: Context,
   llm: LlmRuntime,
-  setting: string | undefined,
-  enabled = true
+  policy: AdaptiveEffortPolicySource
 ): AdaptiveEffortSurface {
   const runtime = llm as unknown as Record<string, unknown>;
   const originalResolveModelInfo = llm.resolveModelInfo.bind(llm);
@@ -344,7 +381,7 @@ export function installAdaptiveEffortSurface(
     const info = await originalResolveModelInfo(provider, model, signal);
     // The switch is off: the plugin's own effort option is revoked, so no
     // selector can offer a mode this activation will not honour.
-    if (!enabled) return info;
+    if (!policy.enabled) return info;
     const reasoning = (info as unknown as LlmResolvedModelInfoLike)?.reasoning;
     if (!reasoning || reasoning.efforts.length === 0) return info;
     const efforts = reasoning.efforts as readonly { id: unknown }[];
@@ -361,7 +398,7 @@ export function installAdaptiveEffortSurface(
   runtime.resolveCallConfig = async (config: LlmCallConfig, signal?: AbortSignal) => {
     const requested = config.reasoningEffort as unknown as string | undefined;
 
-    if (!enabled) {
+    if (!policy.enabled) {
       // Nothing is injected for an owned virtual route, and a marker is stripped
       // instead of accepted: the call resolves with the provider's own default,
       // which is the only "adaptive effort" a disabled deployment can have.
@@ -393,7 +430,7 @@ export function installAdaptiveEffortSurface(
     // physical request's intent from another session's model-selection event.
     // Virtual unpinned requests can inherit the deployment policy; physical
     // adaptive requests must carry their own explicit reflex/auto marker.
-    if (requested === undefined && isAdaptiveMarker(setting) &&
+    if (requested === undefined && isAdaptiveMarker(policy.setting) &&
         ownedVirtualProvider(llm, resolved.provider)) {
       return { ...resolved, reasoningEffort: ADAPTIVE_EFFORT_MARKER as LlmCallConfig['reasoningEffort'] };
     }
@@ -411,7 +448,7 @@ export function installAdaptiveEffortSurface(
     // bypass the `agent/request` interception (hand-built one-shot calls,
     // `prepareCall` consumers). With the switch off there is no policy to
     // resolve it *to*, so it is deleted and the provider default applies.
-    if (!enabled) {
+    if (!policy.enabled) {
       const cleared = { ...config } as LlmCallConfig;
       delete (cleared as { reasoningEffort?: unknown }).reasoningEffort;
       return originalPrepareCall(cleared, signal, configure as never);
@@ -436,7 +473,7 @@ export function installAdaptiveEffortSurface(
   let disposed = false;
   return {
     get adaptive() {
-      return enabled && isAdaptiveMarker(setting);
+      return policy.enabled && isAdaptiveMarker(policy.setting);
     },
     dispose: () => {
       if (disposed) return;
@@ -548,7 +585,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
   const rawProbe = (provider: string, model: string) =>
     rawResolveModelInfo(provider, model) as unknown as Promise<LlmResolvedModelInfoLike>;
 
-  const surface = installAdaptiveEffortSurface(ctx, llm, options.effort.setting, options.effort.enabled);
+  const surface = installAdaptiveEffortSurface(ctx, llm, options.effort);
 
   const scope = routeScope(llm);
   const owned = OWNED_ROUTES.get(scope) ?? new Map<string, OwnedRoute>();
@@ -674,6 +711,10 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
   disposers.push(
     ctx.on('agent/pre-step', async (payload, next) => {
       try {
+        // Cheap liveness: the host that commits config-only saves leaves the
+        // resolved config stale until someone asks. The check is a handful of
+        // identity comparisons and parses nothing unless the loader committed.
+        options.refreshConfig?.();
         ensureVirtualSwitchFilter(payload.agent, router, agentFilterDisposers, agentFilters);
         rememberStep(facts, payload.agent, captureTask(payload.messages, options.maxTaskChars), measureMessages(payload.messages));
       } catch {
@@ -715,7 +756,10 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         (payload.step ?? 1) > 1 &&
         remembered?.decided !== undefined &&
         remembered.decided.turn === payload.turn &&
-        remembered.stepHasText !== true;
+        remembered.stepHasText !== true &&
+        // A config-only save may replace the policy mid-turn; a decision taken
+        // under the previous policy is not this turn's answer any more.
+        remembered.decided.generation === options.effort.generation;
 
       if (isAdaptive && isFollowupStep && remembered?.decided) {
         const reuse = remembered.decided;
@@ -803,7 +847,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
 
       if (resolution.status) {
         reportEffort(ctx, payload.agent, resolution.status);
-        rememberDecision(facts, payload.agent, payload.turn, routed, resolution);
+        rememberDecision(facts, payload.agent, payload.turn, routed, resolution, options.effort.generation);
       }
       if (!resolution.changed && routed === config) return config;
 
@@ -909,13 +953,15 @@ function rememberStep(facts: Map<string, AgentRoutingFacts>, agent: Agent, text:
  * @param turn - the turn the decision belongs to.
  * @param routed - the call configuration the decision was taken for.
  * @param resolution - the effort resolution, carrying the status when decided.
+ * @param generation - effort policy version the decision was taken under.
  */
 function rememberDecision(
   facts: Map<string, AgentRoutingFacts>,
   agent: Agent,
   turn: number | undefined,
   routed: LlmCallConfig,
-  resolution: EffortResolution
+  resolution: EffortResolution,
+  generation: number
 ): void {
   const key = agentKey(agent);
   if (key === undefined) return;
@@ -925,7 +971,8 @@ function rememberDecision(
     provider: routed.provider,
     model: routed.model,
     ...(resolution.effort === undefined ? {} : { effort: resolution.effort }),
-    ...(status === undefined ? {} : { status })
+    ...(status === undefined ? {} : { status }),
+    generation
   };
   const previous = facts.get(key);
   facts.delete(key);

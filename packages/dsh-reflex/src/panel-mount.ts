@@ -114,7 +114,11 @@ export function panelFacts(
   const fallback = runtime.modelRouter.fallback;
 
   return {
-    config: runtime.config,
+    // `effectiveConfig` reports activation-time values for blocks whose live
+    // path is a separate slice, and the values currently in force for effort and
+    // interventions: a settings save changes those without a remount, so the
+    // startup snapshot would be exactly the stale value the panel must not show.
+    config: runtime.effectiveConfig,
     backendName: runtime.backendName,
     pools,
     routingFallback: fallback === undefined ? null : formatTargetName(fallback),

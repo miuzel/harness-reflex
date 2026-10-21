@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 340;
+const EXPECTED_TESTS = 405;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -77,7 +77,7 @@ const MUTATIONS = [
       '      stopObserving();',
       '      stopRouting();',
       '      unregisterLedger();',
-      '      for (const dispose of interventions.disposers.reverse()) dispose();',
+      '      interventions.dispose();',
       '      unmountPanel();',
       '      for (const dispose of disposers.reverse()) dispose();',
       '      runtime.dispose();',
@@ -93,6 +93,36 @@ const MUTATIONS = [
     // policy swap leaves the router on the activation-time pools and fallback.
     from: '    this.#modelRouter.updatePolicy({',
     to: '    if (false) this.#modelRouter.updatePolicy({'
+  },
+  {
+    name: 'effort-policy-frozen',
+    area: 'live effort policy',
+    file: 'src/bridge.ts',
+    // The effort switch/marker/fallback/confidence floor are committed without a
+    // remount; losing the policy swap keeps the activation-time values.
+    from: '    this.effort.updatePolicy({',
+    to: '    if (false) this.effort.updatePolicy({'
+  },
+  {
+    name: 'intervention-policy-frozen',
+    area: 'live intervention policy',
+    file: 'src/bridge.ts',
+    from: '    this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);',
+    to: '    if (false) this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);'
+  },
+  {
+    name: 'intervention-listeners-never-detached',
+    area: 'off is the absence of the intervention listeners',
+    file: 'src/interventions.ts',
+    from: [
+      '    const detachers = groups.get(group);',
+      '    if (!detachers) return;'
+    ].join('\n'),
+    to: [
+      '    const detachers = groups.get(group);',
+      '    if (!detachers) return;',
+      '    if (detachers.length >= 0) return;'
+    ].join('\n')
   },
   {
     name: 'no-root-argument-check',

@@ -25,7 +25,7 @@ import type {
   StagnationCheckResponse
 } from './vendor/harness-reflex/index.js';
 
-import type { ReflexConfig, ResolvedReflexConfig } from './config.js';
+import type { ReflexConfig, ResolvedInterventionsConfig, ResolvedReflexConfig } from './config.js';
 import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { InterventionEngine } from './interventions.js';
@@ -109,6 +109,22 @@ export class ReflexRuntime {
   /** Whether {@link #source} actually exposes volatile references. */
   readonly #watchable: boolean;
   #warn: (message: string) => void;
+  /**
+   * The intervention policy currently in force.
+   *
+   * Kept even when the engine is inert (`mode: off`), so the panel reports the
+   * authored block rather than the activation-time snapshot, and so turning a
+   * capability back on can install its listeners without a remount.
+   */
+  #interventionsConfig: ResolvedInterventionsConfig;
+  /** The prune threshold currently in force (top-level `pruneThreshold`). */
+  #pruneThreshold: number;
+  /** Applies a freshly resolved intervention policy to the installed listeners. */
+  #reconfigureInterventions?: (config: ResolvedInterventionsConfig, pruneThreshold: number) => void;
+  /** Reads how many intervention listeners are currently attached. */
+  #interventionListenerCount?: () => number;
+  /** Full schema resolutions performed by this activation (diagnostics/measurement). */
+  #configResolves = 0;
 
   /**
    * @param config - resolved plugin configuration.
@@ -137,6 +153,8 @@ export class ReflexRuntime {
     this.screenService = new ReflexScreenService(this.backend, this.ledger);
     this.#source = dependencies.configSource;
     this.#warn = dependencies.warn ?? (() => {});
+    this.#interventionsConfig = config.interventions;
+    this.#pruneThreshold = config.pruneThreshold;
     const initialMark = dependencies.configSource === undefined ? [] : volatileSnapshots(dependencies.configSource);
     this.#mark = initialMark;
     this.#watchable = initialMark.length > 0;
@@ -390,15 +408,66 @@ export class ReflexRuntime {
    * Set by the plugin lifecycle right after the listeners are installed, so the
    * panel and the tests read the same engine the hooks drive. Absent when every
    * capability is `off`: nothing is installed, and nothing is reported.
+   *
+   * The optional reconfiguration seam is what makes a config-only save live: the
+   * installer owns the listeners (which hooks exist depends on the capability
+   * modes), so swapping thresholds or turning a capability on/off has to go
+   * through it rather than through the engine alone.
    * @param engine - the engine behind this activation's listeners.
+   * @param reconfigure - applies a new resolved policy to the listeners.
+   * @param listenerCount - reads how many listeners are currently attached.
    */
-  attachInterventions(engine: InterventionEngine | undefined): void {
+  attachInterventions(
+    engine: InterventionEngine | undefined,
+    reconfigure?: (config: ResolvedInterventionsConfig, pruneThreshold: number) => void,
+    listenerCount?: () => number
+  ): void {
     this.#interventions = engine;
+    this.#reconfigureInterventions = reconfigure;
+    this.#interventionListenerCount = listenerCount;
+  }
+
+  /**
+   * How many intervention listeners this activation currently has attached.
+   *
+   * `0` is the honest answer of an `off` deployment: the capability is absent,
+   * not a listener that checks a flag on every hook.
+   */
+  get interventionListenerCount(): number {
+    return this.#interventionListenerCount?.() ?? 0;
   }
 
   /** The automatic-intervention engine, when this activation installed one. */
   get interventions(): InterventionEngine | undefined {
     return this.#interventions;
+  }
+
+  /**
+   * The configuration the panel and diagnostics must report: activation-time
+   * values for everything this slice does not live-apply, but the *currently
+   * effective* effort policy, intervention block and prune threshold.
+   *
+   * The panel promise is "show what is in force", not "show what was written at
+   * startup"; blocks outside this slice (tools, backend, route lifecycle) keep
+   * reporting their activation values until their own live path lands.
+   */
+  get effectiveConfig(): ResolvedReflexConfig {
+    return {
+      ...this.config,
+      effort: { ...this.effort.policy },
+      interventions: this.#interventionsConfig,
+      pruneThreshold: this.#pruneThreshold
+    };
+  }
+
+  /**
+   * Full schema resolutions this activation performed.
+   *
+   * Incremented only by {@link refresh}; the request/step/tool hot paths never
+   * resolve the schema, which is the measurement this counter makes provable.
+   */
+  get configResolveCount(): number {
+    return this.#configResolves;
   }
 
   /** Whether the owning plugin activation has been disposed. */
@@ -407,15 +476,22 @@ export class ReflexRuntime {
   }
 
   /**
-   * Re-read this activation's routing policy from its live config.
+   * Re-read this activation's live policy from its config.
    *
    * Called when the Host reports a config commit (`loader/volatile-update`) and
-   * lazily by the router before each decision. Only the routing policy is
-   * refreshable this way: the pools and the fallback are values the router reads
-   * per decision, so replacing them is enough to make an edit effective on the
-   * next request without a restart. Surfaces built once at activation (the
-   * registered tool set, the intervention listeners, the backend, the adaptive
-   * effort surface) need a real remount and are deliberately left alone here.
+   * lazily once per `agent/pre-step`. The schema runs here — once per actual
+   * commit — and nowhere on the request/tool hot paths.
+   *
+   * Applied without a remount:
+   * - routing pools and fallback (replaced in the router);
+   * - the whole adaptive-effort policy (switch, marker, fallback, confidence
+   *   floor), read live by the request interception and the selector surface;
+   * - the intervention thresholds and capability modes, with the listeners
+   *   added or removed according to the effective modes.
+   *
+   * Still activation-time (their own live path is a separate slice): the tool
+   * surface and prefix, the backend, the ledger sink and the virtual provider
+   * lifecycle.
    * @returns whether a new policy was applied.
    */
   refresh(): boolean {
@@ -425,14 +501,24 @@ export class ReflexRuntime {
       resolved = resolveConfig(this.#source as ReflexConfig);
     } catch (error) {
       this.#warn(
-        `dsh-reflex: the updated configuration cannot be applied to routing (${(error as Error).message}); keeping the previous pools and fallback`
+        `dsh-reflex: the updated configuration cannot be applied (${(error as Error).message}); keeping the previous live values`
       );
       return false;
     }
+    this.#configResolves += 1;
     this.#modelRouter.updatePolicy({
       models: resolved.routing.models,
       ...(resolved.routing.fallback ? { fallback: resolved.routing.fallback } : {})
     });
+    this.effort.updatePolicy({
+      enabled: resolved.effort.enabled,
+      ...(resolved.effort.setting === undefined ? {} : { setting: resolved.effort.setting }),
+      fallback: resolved.effort.fallback,
+      minConfidence: resolved.effort.minConfidence
+    });
+    this.#interventionsConfig = resolved.interventions;
+    this.#pruneThreshold = resolved.pruneThreshold;
+    this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);
     this.#mark = volatileSnapshots(this.#source);
     return true;
   }
