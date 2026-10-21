@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 405;
+const EXPECTED_TESTS = 412;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -47,8 +47,8 @@ const MUTATIONS = [
     name: 'drop-tool-at-registration',
     area: 'registers every enabled tool',
     file: 'src/index.ts',
-    from: 'defineReflexTools(runtime, resolved).map(',
-    to: 'defineReflexTools(runtime, resolved).slice(0, 3).map('
+    from: 'for (const definition of defineReflexTools(runtime, config)) {',
+    to: 'for (const definition of defineReflexTools(runtime, config).slice(0, 3)) {'
   },
   {
     name: 'route-default-drift',
@@ -70,7 +70,8 @@ const MUTATIONS = [
     file: 'src/index.ts',
     // The complete teardown, in its current order: stopping the observer is the
     // one step that survives, so the fault leaves routing, the ledger command,
-    // the intervention hooks, the panel and the runtime mounted after unload.
+    // the intervention hooks, the panel, the tool registrations and the runtime
+    // mounted after unload.
     from: [
       '    return () => {',
       '      stopConfigWatch();',
@@ -79,7 +80,7 @@ const MUTATIONS = [
       '      unregisterLedger();',
       '      interventions.dispose();',
       '      unmountPanel();',
-      '      for (const dispose of disposers.reverse()) dispose();',
+      '      tools.dispose();',
       '      runtime.dispose();',
       '    };'
     ].join('\n'),
@@ -109,6 +110,20 @@ const MUTATIONS = [
     file: 'src/bridge.ts',
     from: '    this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);',
     to: '    if (false) this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);'
+  },
+  {
+    name: 'tool-surface-frozen',
+    area: 'live tool switches and prefix',
+    file: 'src/bridge.ts',
+    from: '    this.#reconfigureTools?.(resolved);',
+    to: '    if (false) this.#reconfigureTools?.(resolved);'
+  },
+  {
+    name: 'tool-prefix-keeps-old-registrations',
+    area: 'a prefix edit leaves no orphaned tool',
+    file: 'src/index.ts',
+    from: '        if (wanted.has(name) && ctx.tools.get(name) !== undefined) continue;',
+    to: '        if (true) continue;'
   },
   {
     name: 'intervention-listeners-never-detached',

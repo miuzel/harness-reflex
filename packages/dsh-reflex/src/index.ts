@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 
-import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig } from './config.js';
+import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig, type ResolvedReflexConfig } from './config.js';
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
 import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
@@ -203,6 +203,101 @@ export type {
   VirtualModelRouterOptions
 } from './router.js';
 
+/** The registry reconciler of one activation. */
+interface ToolSurfaceInstallation {
+  /**
+   * Make the registry answer for exactly the tools `config` enables.
+   *
+   * Idempotent: when the enabled suffixes and the prefix are unchanged, no
+   * registration is touched. A prefix edit unregisters the old names *before*
+   * registering the new ones — the registry refuses a name that is already
+   * taken, and a caller still holding an old name then gets "unknown tool"
+   * instead of silently reaching an old body.
+   * @param config - the resolved configuration currently in force.
+   */
+  refresh(config: ResolvedReflexConfig): void;
+  /** Republish the surface from the names this activation really owns. */
+  publish(): void;
+  /** How many tools this activation currently owns. */
+  readonly registrationCount: number;
+  /** How many `tools.register` calls this activation has made in total. */
+  readonly registrationEvents: number;
+  /** Unregister every owned tool; idempotent. */
+  dispose(): void;
+}
+
+/**
+ * Register this activation's reflex tools, and keep the registry in step with
+ * config-only saves.
+ *
+ * The registry is process-wide, so it is not enough to resolve the config on
+ * every save: the *registrations* have to change with it. This installer owns
+ * those registrations (one disposer per currently-owned name) and reconciles
+ * them only when the effective surface actually differs, which is what keeps a
+ * same-value save from churning the registry.
+ * @param ctx - registrant context carrying `tools`.
+ * @param runtime - the activation's runtime, for the definitions and surface.
+ * @returns the reconciler and its diagnostics.
+ */
+function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSurfaceInstallation {
+  /** Unregister functions of the names this activation currently owns. */
+  const owned = new Map<string, () => void>();
+  let registrationEvents = 0;
+  let disposed = false;
+
+  const publish = (): void => {
+    // Vocabulary order, not registration order: the panel and the runtime
+    // surface must not reshuffle just because a tool was toggled later.
+    runtime.noteToolSurface(
+      reflexToolNames(runtime.effectiveConfig).filter((name) => owned.has(name) && ctx.tools.get(name) !== undefined)
+    );
+  };
+
+  return {
+    refresh(config: ResolvedReflexConfig): void {
+      if (disposed) return;
+      const desired = reflexToolNames(config);
+      const wanted = new Set(desired);
+      // Remove first: a duplicate registration throws, and a prefix rename has
+      // no name in common with the old surface. A name we still want but that
+      // the registry no longer answers for is dropped too, so a stray removal
+      // is repaired on the next commit instead of leaving a permanent hole.
+      for (const [name, unregister] of [...owned]) {
+        if (wanted.has(name) && ctx.tools.get(name) !== undefined) continue;
+        owned.delete(name);
+        unregister();
+      }
+      for (const definition of defineReflexTools(runtime, config)) {
+        if (owned.has(definition.name)) continue;
+        try {
+          owned.set(definition.name, ctx.tools.register(definition));
+          registrationEvents += 1;
+        } catch (error) {
+          // A foreign registration of the same name is not ours to take over:
+          // leave it absent and let the panel report the surface that is real.
+          ctx.logger?.('dsh-reflex')?.warn(
+            `dsh-reflex: tool "${definition.name}" could not be registered (${(error as Error).message})`
+          );
+        }
+      }
+      publish();
+    },
+    publish,
+    get registrationCount(): number {
+      return owned.size;
+    },
+    get registrationEvents(): number {
+      return registrationEvents;
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      for (const unregister of [...owned.values()].reverse()) unregister();
+      owned.clear();
+    }
+  };
+}
+
 /**
  * Cordis plugin entry point: register the reflex tool set for one activation.
  *
@@ -238,17 +333,27 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
   });
   installActualProjection(ctx);
-  const toolNames = reflexToolNames(resolved);
-  runtime.noteToolSurface(toolNames);
 
   ctx.effect(() => {
-    const disposers = defineReflexTools(runtime, resolved).map((definition) => ctx.tools.register(definition));
+    // The tool surface is owned by a reconciler rather than registered once:
+    // the loader commits `tools.enabled`/`toolPrefix` changes into the running
+    // activation without remounting it, and the registry is what the model
+    // actually sees. `refresh` is called once per actual commit and never on
+    // the step/tool hot path, so the tool schemas are still built once per
+    // change rather than once per call.
+    const tools = installReflexToolSurface(ctx, runtime);
+    runtime.attachToolSurface(
+      (next) => tools.refresh(next),
+      () => tools.registrationCount,
+      () => tools.registrationEvents
+    );
+    tools.refresh(resolved);
 
     // A config-only settings save does not remount this plugin: the loader
     // commits the new values into the volatile references and dispatches this
     // event to the owning fiber. Re-resolving here makes the edited routing,
-    // effort and intervention policies effective on the next request/tool call
-    // instead of after a restart.
+    // effort, intervention, and tool policies effective on the next
+    // request/tool call instead of after a restart.
     const stopConfigWatch = ctx.on('loader/volatile-update', () => {
       if (runtime.disposed) return;
       runtime.refresh();
@@ -258,7 +363,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     // every change instead of assumed static.
     const stopObserving = ctx.on('tools/change', () => {
       if (runtime.disposed) return;
-      runtime.noteToolSurface(toolNames.filter((toolName) => ctx.tools.get(toolName) !== undefined));
+      tools.publish();
     });
 
     const stopRouting = installRouting(ctx, runtime, resolved.routing.maxTaskChars);
@@ -294,7 +399,9 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     runtime.attachInterventions(
       interventions.engine,
       (next, pruneThreshold) => {
-        interventions.reconfigure(next, pruneThreshold);
+        // The prefix may have changed in the same commit: the engine's own-tool
+        // exemption must name the tools that are registered *now*.
+        interventions.reconfigure(next, pruneThreshold, reflexToolNames(runtime.effectiveConfig));
       },
       () => interventions.listenerCount
     );
@@ -317,7 +424,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       unregisterLedger();
       interventions.dispose();
       unmountPanel();
-      for (const dispose of disposers.reverse()) dispose();
+      tools.dispose();
       runtime.dispose();
     };
   }, 'reflex tools');

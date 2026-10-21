@@ -25,7 +25,7 @@ import type {
   StagnationCheckResponse
 } from './vendor/harness-reflex/index.js';
 
-import type { ReflexConfig, ResolvedInterventionsConfig, ResolvedReflexConfig } from './config.js';
+import type { ReflexConfig, ResolvedInterventionsConfig, ResolvedReflexConfig, ResolvedToolsConfig } from './config.js';
 import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { InterventionEngine } from './interventions.js';
@@ -119,10 +119,25 @@ export class ReflexRuntime {
   #interventionsConfig: ResolvedInterventionsConfig;
   /** The prune threshold currently in force (top-level `pruneThreshold`). */
   #pruneThreshold: number;
+  /**
+   * The per-tool switches and deployment prefix currently in force.
+   *
+   * Kept here rather than read from {@link config} because a config-only save
+   * never remounts the activation: the registry has to follow the committed
+   * values, and the panel has to report the same ones.
+   */
+  #toolsConfig: ResolvedToolsConfig;
+  #toolPrefix: string;
   /** Applies a freshly resolved intervention policy to the installed listeners. */
   #reconfigureInterventions?: (config: ResolvedInterventionsConfig, pruneThreshold: number) => void;
   /** Reads how many intervention listeners are currently attached. */
   #interventionListenerCount?: () => number;
+  /** Reconciles the registered tool set with a freshly resolved config. */
+  #reconfigureTools?: (config: ResolvedReflexConfig) => void;
+  /** Reads how many tools this activation currently has registered. */
+  #toolRegistrationCount?: () => number;
+  /** Reads how many `tools.register` calls this activation has made in total. */
+  #toolRegistrationEvents?: () => number;
   /** Full schema resolutions performed by this activation (diagnostics/measurement). */
   #configResolves = 0;
 
@@ -155,6 +170,8 @@ export class ReflexRuntime {
     this.#warn = dependencies.warn ?? (() => {});
     this.#interventionsConfig = config.interventions;
     this.#pruneThreshold = config.pruneThreshold;
+    this.#toolsConfig = config.tools;
+    this.#toolPrefix = config.toolPrefix;
     const initialMark = dependencies.configSource === undefined ? [] : volatileSnapshots(dependencies.configSource);
     this.#mark = initialMark;
     this.#watchable = initialMark.length > 0;
@@ -443,17 +460,57 @@ export class ReflexRuntime {
   }
 
   /**
-   * The configuration the panel and diagnostics must report: activation-time
-   * values for everything this slice does not live-apply, but the *currently
-   * effective* effort policy, intervention block and prune threshold.
+   * Attach the tool-surface reconciler of this activation.
+   *
+   * Set by the plugin lifecycle right after the tools are registered. The
+   * registry lives on the Host context, not on this runtime, so a config-only
+   * save has to call back out to the installer that owns the registrations. The
+   * seam is also what lets the tests prove idempotence: an unchanged save must
+   * not unregister and re-register anything.
+   * @param reconfigure - reconciles the registered set with a new resolved config.
+   * @param registrationCount - reads how many tools are currently registered.
+   * @param registrationEvents - reads how many registrations happened in total.
+   */
+  attachToolSurface(
+    reconfigure?: (config: ResolvedReflexConfig) => void,
+    registrationCount?: () => number,
+    registrationEvents?: () => number
+  ): void {
+    this.#reconfigureTools = reconfigure;
+    this.#toolRegistrationCount = registrationCount;
+    this.#toolRegistrationEvents = registrationEvents;
+  }
+
+  /** The number of reflex tools this activation currently has registered. */
+  get toolRegistrationCount(): number {
+    return this.#toolRegistrationCount?.() ?? 0;
+  }
+
+  /**
+   * How many `tools.register` calls this activation has made since it loaded.
+   *
+   * Monotonic on purpose: an idempotent save leaves it unchanged, which is the
+   * measurement a test can assert without spying on the registry.
+   */
+  get toolRegistrationEvents(): number {
+    return this.#toolRegistrationEvents?.() ?? 0;
+  }
+
+  /**
+   * The configuration the panel and diagnostics must report: the values
+   * currently in force for every block this slice has made live.
    *
    * The panel promise is "show what is in force", not "show what was written at
-   * startup"; blocks outside this slice (tools, backend, route lifecycle) keep
-   * reporting their activation values until their own live path lands.
+   * startup". `effort`, `interventions`, `pruneThreshold`, `tools` and
+   * `toolPrefix` are read from their live fields; blocks whose live path is a
+   * separate slice (backend, ledger sink, route lifecycle) keep reporting their
+   * activation values until that slice lands.
    */
   get effectiveConfig(): ResolvedReflexConfig {
     return {
       ...this.config,
+      toolPrefix: this.#toolPrefix,
+      tools: this.#toolsConfig,
       effort: { ...this.effort.policy },
       interventions: this.#interventionsConfig,
       pruneThreshold: this.#pruneThreshold
@@ -487,11 +544,14 @@ export class ReflexRuntime {
    * - the whole adaptive-effort policy (switch, marker, fallback, confidence
    *   floor), read live by the request interception and the selector surface;
    * - the intervention thresholds and capability modes, with the listeners
-   *   added or removed according to the effective modes.
+   *   added or removed according to the effective modes;
+   * - the per-tool switches and the deployment prefix, with the registry
+   *   reconciled by the installer through {@link attachToolSurface}. The
+   *   reconciler is idempotent: a commit that changes neither the enabled
+   *   suffixes nor the prefix unregisters and re-registers nothing.
    *
-   * Still activation-time (their own live path is a separate slice): the tool
-   * surface and prefix, the backend, the ledger sink and the virtual provider
-   * lifecycle.
+   * Still activation-time (their own live path is a separate slice): the
+   * backend, the ledger sink and the virtual provider lifecycle.
    * @returns whether a new policy was applied.
    */
   refresh(): boolean {
@@ -518,7 +578,13 @@ export class ReflexRuntime {
     });
     this.#interventionsConfig = resolved.interventions;
     this.#pruneThreshold = resolved.pruneThreshold;
+    // The tool block is applied before the intervention reconfigure so the
+    // callback can derive the renamed `ownTools` set from this runtime's live
+    // values rather than from the activation-time snapshot.
+    this.#toolsConfig = resolved.tools;
+    this.#toolPrefix = resolved.toolPrefix;
     this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);
+    this.#reconfigureTools?.(resolved);
     this.#mark = volatileSnapshots(this.#source);
     return true;
   }

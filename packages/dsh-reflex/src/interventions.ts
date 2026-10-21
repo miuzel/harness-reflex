@@ -1615,7 +1615,7 @@ export class InterventionEngine {
   readonly #audit?: (record: InterventionAuditRecord, session: unknown) => void;
 
   readonly #states = new Map<string, AgentState>();
-  readonly #ownTools: ReadonlySet<string>;
+  #ownTools: ReadonlySet<string>;
   readonly #memo = new Map<string, PruneMemo>();
   readonly #costs: { observe: InterventionCostBucket; active: InterventionCostBucket };
   readonly #byCapability: Record<InterventionCapability, InterventionCostBucket>;
@@ -1662,15 +1662,24 @@ export class InterventionEngine {
    * keeps its counters and latches, and only the values each hook reads change.
    * @param config - the freshly resolved `interventions` block.
    * @param pruneThreshold - the freshly resolved top-level prune threshold.
+   * @param ownTools - the live `reflex_*` names of this activation. A prefix
+   *   edit renames every tool, so a frozen set would stop recognising the
+   *   plugin's own output and start judging it as foreign work.
    */
-  updatePolicy(config: ResolvedInterventionsConfig, pruneThreshold: number): void {
+  updatePolicy(config: ResolvedInterventionsConfig, pruneThreshold: number, ownTools?: readonly string[]): void {
     this.#config = config;
     this.#pruneThreshold = pruneThreshold;
+    if (ownTools !== undefined) this.#ownTools = new Set(ownTools);
     // The pruning service also carries a copy of the threshold (the explicit
     // `prune` tool reads it directly). Keep it in step, otherwise lowering the
     // threshold would still be shadowed by the activation-time value. Absent on
     // the test seams that only implement `prune()`.
     (this.#prune as { setMinCharsThreshold?: (value: number) => void }).setMinCharsThreshold?.(pruneThreshold);
+  }
+
+  /** The tool names this activation treats as its own (live). */
+  get ownTools(): readonly string[] {
+    return [...this.#ownTools];
   }
 
   /** Whether any capability may act at all. */
@@ -3428,8 +3437,10 @@ export interface InterventionInstallation {
    * save in the middle of a turn does not restart that turn's counters.
    * @param config - freshly resolved `interventions` block.
    * @param pruneThreshold - freshly resolved top-level prune threshold.
+   * @param ownTools - freshly resolved `reflex_*` names, so a prefix rename
+   *   keeps the plugin's own output out of its own judgments.
    */
-  reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number): void;
+  reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number, ownTools?: readonly string[]): void;
   /** The number of listeners currently attached (0 when every capability is off). */
   readonly listenerCount: number;
   /** Detach every listener; idempotent. */
@@ -3558,9 +3569,9 @@ export function installInterventions(ctx: Context, options: InterventionEngineOp
   return {
     disposers,
     engine,
-    reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number): void {
+    reconfigure(config: ResolvedInterventionsConfig, pruneThreshold: number, ownTools?: readonly string[]): void {
       if (disposed) return;
-      engine.updatePolicy(config, pruneThreshold);
+      engine.updatePolicy(config, pruneThreshold, ownTools);
       sync();
     },
     get listenerCount(): number {
