@@ -57,6 +57,55 @@ export class DecisionLedger {
     return this.logPath;
   }
 
+  /**
+   * Move the JSONL sink to another file without losing the entries already seen.
+   *
+   * A config-only save can change `ledgerPath` while the activation keeps
+   * running. The migration strategy is merge-and-rewrite: entries already in the
+   * new file are merged into memory first (by id, so replaying the file cannot
+   * duplicate them), then every in-memory entry is written to the new file. The
+   * new sink therefore starts with the complete in-process history — including
+   * entries recorded before the switch — and the old file is simply no longer
+   * written to (there are no held file handles to release; every record opens,
+   * appends and closes).
+   * @param customPath - new JSONL file, or `null` for in-memory only.
+   * @returns whether the sink changed.
+   */
+  switchLogPath(customPath?: string | null): boolean {
+    const next = customPath === null ? null : customPath || path.join(process.cwd(), '.reflex', 'ledger.jsonl');
+    if (next === this.logPath) return false;
+    if (next) {
+      // Merge what the new file already holds, so switching between two
+      // populated sinks does not drop either side's history.
+      try {
+        if (fs.existsSync(next)) {
+          const known = new Set(this.entries.map((entry) => entry.id));
+          for (const line of fs.readFileSync(next, 'utf8').split('\n')) {
+            if (!line.trim()) continue;
+            const entry = JSON.parse(line) as LedgerEntry;
+            if (!known.has(entry.id)) {
+              this.entries.push(entry);
+              known.add(entry.id);
+            }
+          }
+        }
+      } catch {
+        // An unreadable target still becomes the sink; its old content is left alone.
+      }
+      try {
+        const dir = path.dirname(next);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        // Rewrite, not append: the new file must contain the full in-memory
+        // history exactly once, which the merge above has already deduplicated.
+        fs.writeFileSync(next, this.entries.map((entry) => JSON.stringify(entry)).join('\n') + (this.entries.length > 0 ? '\n' : ''), 'utf8');
+      } catch {
+        // non-fatal in restricted or readonly filesystems
+      }
+    }
+    this.logPath = next;
+    return true;
+  }
+
   static getInstance(): DecisionLedger {
     if (!DecisionLedger.instance) {
       DecisionLedger.instance = new DecisionLedger();

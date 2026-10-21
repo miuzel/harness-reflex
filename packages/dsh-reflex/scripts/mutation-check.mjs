@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 412;
+const EXPECTED_TESTS = 419;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -435,6 +435,34 @@ const MUTATIONS = [
     file: 'src/tools.ts',
     from: '  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] ?? REFLEX_TOOL_DEFAULT_ENABLED[suffix]);',
     to: '  return [...REFLEX_TOOL_SUFFIXES];'
+  },
+  {
+    name: 'backend-swap-frozen',
+    area: 'a backend/systemOne save swaps the transport',
+    file: 'src/bridge.ts',
+    from: '      this.#liveBackend.swap(createBackend(resolved));',
+    to: '      if (false) this.#liveBackend.swap(createBackend(resolved));'
+  },
+  {
+    name: 'ledger-sink-frozen',
+    area: 'a ledgerPath save moves the JSONL sink',
+    file: 'src/bridge.ts',
+    from: '    if (resolved.ledgerPath !== this.#ledgerPath) {',
+    to: '    if (false) {'
+  },
+  {
+    name: 'routing-lifecycle-frozen',
+    area: 'routing.enabled and the provider name reconcile live',
+    file: 'src/bridge.ts',
+    from: '    this.#reconfigureRouting?.(resolved.routing);',
+    to: '    if (false) this.#reconfigureRouting?.(resolved.routing);'
+  },
+  {
+    name: 'rename-route-frozen',
+    area: 'renaming the virtual provider withdraws the old name',
+    file: 'src/routing.ts',
+    from: '    if (router.virtualProvider !== policy.virtualProvider) renameRoute(policy.virtualProvider);',
+    to: '    if (false) renameRoute(policy.virtualProvider);'
   }
 ];
 

@@ -171,7 +171,8 @@ export interface ReflexInterventionsConfig {
   /**
    * Character count at/above which pruning judges the payload segment by
    * segment through System One. Below it the deterministic local candidates run
-   * and no judgment is spent. Must be at least `pruneThreshold`. Default `10000`.
+   * and no judgment is spent. Effective value is `max(this, pruneThreshold)`,
+   * so raising `pruneThreshold` alone never makes a save invalid. Default `10000`.
    */
   pruneJudgeMinChars?: number;
   /**
@@ -582,12 +583,13 @@ export function resolveInterventionsConfig(
       `interventions.claimMinConfidence must be a number in [0, 1] (got "${String(block.claimMinConfidence)}")`
     );
   }
-  const pruneJudgeMinChars = resolved.pruneJudgeMinChars!;
-  if (pruneJudgeMinChars < pruneThreshold) {
-    throw new Error(
-      `interventions.pruneJudgeMinChars must be >= pruneThreshold (${String(pruneThreshold)}) (got "${String(pruneJudgeMinChars)}")`
-    );
-  }
+  // The segment-judging floor is layered on the prune threshold: judging below
+  // the size at which pruning even runs is meaningless. Rather than refusing a
+  // save that raises `pruneThreshold` alone (the panel exposes it independently,
+  // and the user should not have to raise a second field to keep their edit),
+  // the effective floor is lifted to the prune threshold. The panel reports the
+  // lifted value, which is the one the runtime actually uses.
+  const pruneJudgeMinChars = Math.max(resolved.pruneJudgeMinChars!, pruneThreshold);
 
   return {
     mode,

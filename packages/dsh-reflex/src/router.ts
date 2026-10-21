@@ -339,7 +339,7 @@ export function buildCacheAffinityInstruction(facts: CacheAffinityFacts): string
  * pools, fallback, System One seam and ledger, and mutates nothing shared.
  */
 export class VirtualModelRouter {
-  readonly virtualProvider: string;
+  #virtualProvider: string;
 
   #models: ModelPools;
   #fallback?: PhysicalTarget;
@@ -356,7 +356,7 @@ export class VirtualModelRouter {
    * @param options - pools, fallback, decision seam, and audit sink.
    */
   constructor(options: VirtualModelRouterOptions) {
-    this.virtualProvider = options.virtualProvider;
+    this.#virtualProvider = options.virtualProvider;
     this.#models = options.models;
     this.#fallback = options.fallback;
     this.#refresh = options.refresh;
@@ -368,6 +368,29 @@ export class VirtualModelRouter {
       options.stickyMargin === undefined || !Number.isFinite(options.stickyMargin)
         ? DEFAULT_STICKY_MARGIN
         : Math.max(0, options.stickyMargin);
+  }
+
+  /**
+   * The virtual provider route currently in force.
+   *
+   * Live on purpose: a config-only save may rename the route without remounting
+   * the activation, and every listener/panel read has to see the new name.
+   * @returns the provider id this router currently owns.
+   */
+  get virtualProvider(): string {
+    return this.#virtualProvider;
+  }
+
+  /**
+   * Rename the virtual provider route.
+   *
+   * The router does not own the provider registration — the installer swaps the
+   * registered adapter — so renaming is a policy change here: after it, only the
+   * new name is recognised as this router's route.
+   * @param provider - the new virtual provider route id.
+   */
+  setVirtualProvider(provider: string): void {
+    this.#virtualProvider = provider;
   }
 
   /**
@@ -402,9 +425,10 @@ export class VirtualModelRouter {
    * the activation that owns this router.
    * @param policy - the new pools and fallback.
    */
-  updatePolicy(policy: { models: ModelPools; fallback?: PhysicalTarget }): void {
+  updatePolicy(policy: { models: ModelPools; fallback?: PhysicalTarget; backendName?: string }): void {
     this.#models = policy.models;
     this.#fallback = policy.fallback;
+    if (policy.backendName !== undefined) this.#backendName = policy.backendName;
   }
 
   /**

@@ -82,7 +82,7 @@ export function panelFacts(
               providers.map(async (p: any) => {
                 const pid = typeof p === 'string' ? p : (p?.id ?? p);
                 const pname = typeof p === 'string' ? p : (p?.name ?? pid);
-                if (pid === runtime.config.routing.virtualProvider) return null;
+                if (pid === effective.routing.virtualProvider) return null;
                 let models: any[] = [];
                 try {
                   models = (await llm.listModels?.(pid)) ?? [];
@@ -106,6 +106,10 @@ export function panelFacts(
 
   const modelCatalog = ctx ? catalogCache.get(ctx) : undefined;
 
+  // One read of the live projection: it also lazily applies a committed
+  // config-only save, so a poll right after the panel's own write already shows
+  // the new values instead of the previous activation snapshot.
+  const effective = runtime.effectiveConfig;
   const systemOneHealth = runtime.systemOneHealth();
   // `panelPools` and the fallback read the router, whose policy is live: the
   // loader commits a routing edit without remounting the plugin, so what the
@@ -114,21 +118,21 @@ export function panelFacts(
   const fallback = runtime.modelRouter.fallback;
 
   return {
-    // `effectiveConfig` reports activation-time values for blocks whose live
-    // path is a separate slice, and the values currently in force for effort and
-    // interventions: a settings save changes those without a remount, so the
-    // startup snapshot would be exactly the stale value the panel must not show.
-    config: runtime.effectiveConfig,
+    // `effectiveConfig` reports the values currently in force for every block a
+    // config-only save can change (effort, interventions, tools, backend,
+    // ledger sink, routing lifecycle): the startup snapshot would be exactly
+    // the stale value the panel must not show.
+    config: effective,
     backendName: runtime.backendName,
     pools,
     routingFallback: fallback === undefined ? null : formatTargetName(fallback),
-    routingActive: routingActive(runtime.config),
+    routingActive: routingActive(effective),
     // Copied, not aliased: the runtime republishes its surface on every
     // `tools/change`, and a snapshot must not follow it after the fact.
     toolSurface: [...runtime.toolSurface],
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
-    apiKeyPresent: resolveApiKey(runtime.config.systemOne, env) !== undefined,
+    apiKeyPresent: resolveApiKey(effective.systemOne, env) !== undefined,
     ...(systemOneHealth === undefined ? {} : { systemOneHealth }),
     ...(modelCatalog === undefined ? {} : { modelCatalog })
   };

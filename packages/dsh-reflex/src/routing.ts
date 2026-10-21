@@ -64,8 +64,19 @@ export interface ModelRoutingOptions {
    * registers a route or rewrites one. Defaults to `true`.
    */
   route?: boolean;
-  /** Task-text budget captured from `agent/pre-step` (characters). */
-  maxTaskChars: number;
+  /**
+   * Task-text budget captured from `agent/pre-step` (characters).
+   *
+   * A getter keeps the budget live: a config-only save may change
+   * `routing.maxTaskChars` between steps, and the next step must capture with
+   * the new value before the schema is re-resolved.
+   */
+  maxTaskChars: number | (() => number);
+  /**
+   * Read the live routing policy for the enable/disable and rename lifecycle.
+   * Omitted means the initial {@link route} decision is final.
+   */
+  liveRouting?: () => LiveRoutingPolicy;
   /**
    * Pull the activation's live config, if the host commits config-only saves.
    *
@@ -94,6 +105,18 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Routing policy facts the lifecycle reconciler reads. */
+export interface LiveRoutingPolicy {
+  /** Deployment `routing.enabled` switch. */
+  enabled: boolean;
+  /** Current virtual provider route id. */
+  virtualProvider: string;
+  /** Task capture budget in characters. */
+  maxTaskChars: number;
+  /** Pools that decide whether a route can be installed at all. */
+  models: import('./router.js').ModelPools;
+}
+
 /** What {@link installModelRouting} installed. */
 export interface ModelRoutingInstallation {
   /**
@@ -102,10 +125,18 @@ export interface ModelRoutingInstallation {
    * route through the owner's policy, so every path agrees on the pools.
    */
   router: VirtualModelRouter;
-  /** The adapter registered for the virtual route, when this call registered it. */
-  adapter?: ReflexVirtualAdapter;
+  /** The adapter registered for the virtual route, when this activation owns it (live). */
+  readonly adapter?: ReflexVirtualAdapter;
   /** Whether this call registered the virtual provider route itself. */
-  registered: boolean;
+  readonly registered: boolean;
+  /** How many `registerAdapter` calls this activation has made in total. */
+  readonly registrationEvents: number;
+  /**
+   * Apply a freshly resolved routing policy: register/unregister the route and
+   * rename the virtual provider to match. Idempotent; a same-value refresh
+   * touches no registration.
+   */
+  refresh(policy: LiveRoutingPolicy): void;
   /** Detach the listeners and release the route when this call owned it. */
   dispose: () => void;
 }
@@ -130,6 +161,8 @@ const NOOP = (): void => {};
  * an already-rewritten config and must agree with the inner one.
  */
 interface OwnedRoute {
+  /** Provider route this entry is registered under. */
+  provider: string;
   /** The registered adapter, shared by every owner. */
   adapter: ReflexVirtualAdapter;
   /** Live activations routing through this adapter. */
@@ -587,6 +620,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
 
   const surface = installAdaptiveEffortSurface(ctx, llm, options.effort);
 
+  let disposed = false;
   const scope = routeScope(llm);
   const owned = OWNED_ROUTES.get(scope) ?? new Map<string, OwnedRoute>();
   OWNED_ROUTES.set(scope, owned);
@@ -598,47 +632,28 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
    * must not steal the policy of the activation that does own the route.
    */
   let routes = false;
-  const existing = owned.get(options.router.virtualProvider);
   let adapter: ReflexVirtualAdapter | undefined;
   let router = options.router;
-  let release: (() => void) | undefined;
-  /** Whether this call created the provider registration (not merely joined it). */
+  /** The shared route entry this activation holds, when it holds one. */
+  let held: OwnedRoute | undefined;
+  /** Whether this activation created a provider registration (not merely joined). */
   let created = false;
+  /** `registerAdapter` calls made by this activation (diagnostics/idempotence). */
+  let registrationEvents = 0;
 
-  if (options.route === false || !router.hasPools) {
-    // Deliberately silent: a deployment that configured no pool asked for the
-    // tool surface only, and the effort layer may still be configured.
-  } else if (existing) {
-    // Join the live route and make this activation's policy the one in force.
-    // Adopting the shared router (rather than routing on a private copy) is what
-    // keeps every wrapping listener in agreement; updating its policy is what
-    // makes a reload whose new activation is created before the old one is
-    // disposed take effect. The owner count keeps the route registered until the
-    // last activation goes away.
-    existing.owners += 1;
-    router = existing.adapter.router;
-    router.updatePolicy({
-      models: options.router.models,
-      ...(options.router.fallback ? { fallback: options.router.fallback } : {})
-    });
-    routes = true;
-    release = () => {
-      existing.owners -= 1;
-      if (existing.owners > 0) return;
-      if (owned.get(router.virtualProvider) === existing) owned.delete(router.virtualProvider);
-      existing.handle();
-      try { (llm as any).emitAdaptersUpdated?.(); } catch {}
-    };
-    warn(
-      `dsh-reflex: virtual route "${router.virtualProvider}" is already registered in this process; this activation joins it with its own pool policy`
-    );
-  } else if (llm.listProviders().some((provider) => provider.id === router.virtualProvider)) {
-    warn(
-      `dsh-reflex: provider "${router.virtualProvider}" is already registered by another adapter; System 1 model routing stays off for this activation`
-    );
-  } else {
-    adapter = new ReflexVirtualAdapter({
-      provider: router.virtualProvider,
+  const readTaskBudget = (): number => {
+    const budget = typeof options.maxTaskChars === 'function' ? options.maxTaskChars() : options.maxTaskChars;
+    return Number.isFinite(budget) ? Math.max(1, budget) : 400;
+  };
+
+  const republish = (): void => {
+    try { (llm as any).emitAdaptersUpdated?.(); } catch {}
+  };
+
+  /** Build the adapter for one provider name; the router is shared. */
+  const buildAdapter = (provider: string): ReflexVirtualAdapter =>
+    new ReflexVirtualAdapter({
+      provider,
       router,
       dispatch: (dispatchOptions) => llm.stream(dispatchOptions),
       probeReasoning: createReasoningProbe(llm, rawProbe),
@@ -651,7 +666,41 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         }
       }
     });
-    let handle;
+
+  /**
+   * Register (or join) the route for the router's current provider name.
+   *
+   * Joining rather than colliding is what lets several activations share the
+   * process-wide route: the first registers, the rest increment the owner count
+   * and adopt the shared router, whose policy the newest activation replaces.
+   */
+  const registerRoute = (): void => {
+    if (routes || held) return;
+    const provider = router.virtualProvider;
+    const existing = owned.get(provider);
+    if (existing) {
+      existing.owners += 1;
+      router = existing.adapter.router;
+      router.updatePolicy({
+        models: options.router.models,
+        ...(options.router.fallback ? { fallback: options.router.fallback } : {})
+      });
+      held = existing;
+      routes = true;
+      warn(
+        `dsh-reflex: virtual route "${provider}" is already registered in this process; this activation joins it with its own pool policy`
+      );
+      republish();
+      return;
+    }
+    if (llm.listProviders().some((entry) => entry.id === provider)) {
+      warn(
+        `dsh-reflex: provider "${provider}" is already registered by another adapter; System 1 model routing stays off for this activation`
+      );
+      return;
+    }
+    const nextAdapter = buildAdapter(provider);
+    let handle: () => void;
     try {
       // Registered on the *root* context on purpose: the provider route is
       // process-wide, and provider registrations are disposed with the fiber
@@ -659,28 +708,113 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
       // disappear the moment this activation is released — even while another
       // activation is still routing through the same adapter. The release below
       // is what actually withdraws the route, once the last owner is gone.
-      handle = ctx.root.llm.registerAdapter([router.virtualProvider], adapter);
+      handle = ctx.root.llm.registerAdapter([provider], nextAdapter);
+      registrationEvents += 1;
     } catch (error) {
       warn(
-        `dsh-reflex: could not register the virtual provider "${router.virtualProvider}" (${(error as Error).message}); System 1 model routing stays off`
+        `dsh-reflex: could not register the virtual provider "${provider}" (${(error as Error).message}); System 1 model routing stays off`
       );
-      return { router, registered: false, dispose: NOOP };
+      return;
     }
-    const entry: OwnedRoute = { adapter, owners: 1, handle };
-    owned.set(router.virtualProvider, entry);
+    const entry: OwnedRoute = { provider, adapter: nextAdapter, owners: 1, handle };
+    owned.set(provider, entry);
+    held = entry;
+    adapter = nextAdapter;
     created = true;
     routes = true;
-    release = () => {
-      entry.owners -= 1;
-      if (entry.owners > 0) return;
-      if (owned.get(router.virtualProvider) === entry) owned.delete(router.virtualProvider);
-      entry.handle();
-      try { (llm as any).emitAdaptersUpdated?.(); } catch {}
-    };
-    try { (llm as any).emitAdaptersUpdated?.(); } catch {}
+    republish();
+  };
+
+  /**
+   * Release this activation's hold on the route.
+   *
+   * The provider registration is withdrawn only when the last owner goes away;
+   * until then the shared adapter and its router stay registered for the other
+   * activations.
+   */
+  const releaseRoute = (): void => {
+    const entry = held;
+    held = undefined;
+    routes = false;
+    adapter = undefined;
+    if (!entry) return;
+    entry.owners -= 1;
+    if (entry.owners > 0) return;
+    if (owned.get(entry.provider) === entry) owned.delete(entry.provider);
+    created = false;
+    entry.handle();
+    republish();
+  };
+
+  /**
+   * Rename the virtual provider route in place.
+   *
+   * A rename has to leave no orphan adapter: the new name is registered before
+   * the old one is withdrawn (registry names differ, so no duplicate), then the
+   * ownership entry moves to the new name. Every activation sharing this route
+   * shares the same router object, so mutating its provider name renames the
+   * route consistently for all of them; the owner count still decides when the
+   * registration is actually withdrawn.
+   */
+  const renameRoute = (provider: string): void => {
+    if (router.virtualProvider === provider) return;
+    const entry = held;
+    if (!entry) {
+      router.setVirtualProvider(provider);
+      return;
+    }
+    const oldProvider = entry.provider;
+    const nextAdapter = buildAdapter(provider);
+    let handle: () => void;
+    try {
+      handle = ctx.root.llm.registerAdapter([provider], nextAdapter);
+      registrationEvents += 1;
+    } catch (error) {
+      // Keep routing on the old name rather than leaving the activation with no
+      // route at all; the next commit retries.
+      warn(
+        `dsh-reflex: could not rename the virtual provider to "${provider}" (${(error as Error).message}); keeping "${oldProvider}"`
+      );
+      return;
+    }
+    router.setVirtualProvider(provider);
+    entry.handle();
+    if (owned.get(oldProvider) === entry) owned.delete(oldProvider);
+    entry.provider = provider;
+    entry.adapter = nextAdapter;
+    entry.handle = handle;
+    owned.set(provider, entry);
+    adapter = nextAdapter;
+    republish();
+  };
+
+  /**
+   * Reconcile the provider lifecycle with one resolved routing policy.
+   * @param policy - the policy currently in force.
+   */
+  const reconcile = (policy: LiveRoutingPolicy): void => {
+    if (disposed) return;
+    const canRoute = policy.enabled && Object.values(policy.models).some((pool) => pool.length > 0);
+    if (!canRoute) {
+      releaseRoute();
+      router.setVirtualProvider(policy.virtualProvider);
+      return;
+    }
+    if (!held) {
+      router.setVirtualProvider(policy.virtualProvider);
+      registerRoute();
+      return;
+    }
+    if (router.virtualProvider !== policy.virtualProvider) renameRoute(policy.virtualProvider);
+  };
+
+  if (options.route === false || !router.hasPools) {
+    // Deliberately silent: a deployment that configured no pool asked for the
+    // tool surface only, and the effort layer may still be configured.
+  } else {
+    registerRoute();
   }
 
-  const registered = created;
   const probe = createReasoningProbe(llm, rawProbe);
   const disposers: Array<() => void> = [];
   /** Detachers of the per-agent pseudo-switch filters installed lazily. */
@@ -716,7 +850,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         // identity comparisons and parses nothing unless the loader committed.
         options.refreshConfig?.();
         ensureVirtualSwitchFilter(payload.agent, router, agentFilterDisposers, agentFilters);
-        rememberStep(facts, payload.agent, captureTask(payload.messages, options.maxTaskChars), measureMessages(payload.messages));
+        rememberStep(facts, payload.agent, captureTask(payload.messages, readTaskBudget()), measureMessages(payload.messages));
       } catch {
         // Task capture is advisory: a malformed message must not veto the step.
       }
@@ -866,7 +1000,6 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
     }, { prepend: true })
   );
 
-  let disposed = false;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
@@ -875,10 +1008,27 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
     for (const detach of agentFilterDisposers.splice(0)) detach();
     facts.clear();
     surface.dispose();
-    release?.();
+    releaseRoute();
   };
 
-  return { router, adapter, registered, dispose };
+  return {
+    get router() {
+      return router;
+    },
+    get adapter() {
+      return adapter;
+    },
+    get registered() {
+      return created;
+    },
+    get registrationEvents() {
+      return registrationEvents;
+    },
+    refresh(policy: LiveRoutingPolicy): void {
+      reconcile(policy);
+    },
+    dispose
+  };
 }
 
 /**

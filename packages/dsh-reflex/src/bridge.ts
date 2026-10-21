@@ -25,7 +25,14 @@ import type {
   StagnationCheckResponse
 } from './vendor/harness-reflex/index.js';
 
-import type { ReflexConfig, ResolvedInterventionsConfig, ResolvedReflexConfig, ResolvedToolsConfig } from './config.js';
+import type {
+  ReflexConfig,
+  ResolvedInterventionsConfig,
+  ResolvedReflexConfig,
+  ResolvedRoutingConfig,
+  ResolvedSystemOneConfig,
+  ResolvedToolsConfig
+} from './config.js';
 import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { InterventionEngine } from './interventions.js';
@@ -54,6 +61,79 @@ export interface ReflexLedgerResult {
    * fact for the person reading the command, not context for the agent.
    */
   systemOneHealth?: BackendHealth;
+}
+
+/**
+ * A decision backend whose implementation can be swapped while services keep
+ * their reference to it.
+ *
+ * The five decision services are built once and close over their backend. A
+ * config-only save can change `backend`/`systemOne.*`, and rebuilding those
+ * services would drop their ledger/audit wiring; delegating through one stable
+ * object swaps the transport instead, so the next decision reaches the new
+ * endpoint/model while the services stay put. Health is the delegate's, so a
+ * freshly built backend starts at `available: true, consecutiveFailures: 0`.
+ */
+class LiveBackend {
+  #target: DecisionBackend;
+
+  constructor(target: DecisionBackend) {
+    this.#target = target;
+  }
+
+  /** Name of the backend implementation currently in force. */
+  get name(): string {
+    return this.#target.name;
+  }
+
+  /** Model id of the backend implementation currently in force. */
+  get model(): string {
+    return this.#target.model;
+  }
+
+  /** Replace the transport, releasing the previous one. */
+  swap(next: DecisionBackend): void {
+    const previous = this.#target;
+    this.#target = next;
+    const dispose = (previous as { dispose?: () => void }).dispose;
+    if (typeof dispose === 'function') {
+      try {
+        dispose.call(previous);
+      } catch {
+        // A backend that cannot release its transport must not veto the swap.
+      }
+    }
+  }
+
+  choice(request: Parameters<DecisionBackend['choice']>[0]): ReturnType<DecisionBackend['choice']> {
+    return this.#target.choice(request);
+  }
+
+  gate(request: Parameters<DecisionBackend['gate']>[0]): ReturnType<DecisionBackend['gate']> {
+    return this.#target.gate(request);
+  }
+
+  prune(request: Parameters<DecisionBackend['prune']>[0]): ReturnType<DecisionBackend['prune']> {
+    return this.#target.prune(request);
+  }
+
+  checkStagnation(request: Parameters<DecisionBackend['checkStagnation']>[0]): ReturnType<DecisionBackend['checkStagnation']> {
+    return this.#target.checkStagnation(request);
+  }
+
+  route(request: Parameters<DecisionBackend['route']>[0]): ReturnType<DecisionBackend['route']> {
+    return this.#target.route(request);
+  }
+
+  classifyClaims(request: Parameters<DecisionBackend['classifyClaims']>[0]): ReturnType<DecisionBackend['classifyClaims']> {
+    return this.#target.classifyClaims(request);
+  }
+
+  /** Health of the backend currently in force (absent for in-process backends). */
+  currentHealth(): BackendHealth | undefined {
+    const health = (this.#target as Partial<DecisionBackend>).health;
+    return typeof health === 'function' ? health.call(this.#target) : undefined;
+  }
 }
 
 /**
@@ -106,6 +186,8 @@ export class ReflexRuntime {
   readonly #source: unknown;
   /** Snapshot identities of {@link #source} at the last applied refresh. */
   #mark: unknown[] = [];
+  /** Re-entrancy guard: callbacks during one apply must not resolve again. */
+  #refreshing = false;
   /** Whether {@link #source} actually exposes volatile references. */
   readonly #watchable: boolean;
   #warn: (message: string) => void;
@@ -141,6 +223,29 @@ export class ReflexRuntime {
   /** Full schema resolutions performed by this activation (diagnostics/measurement). */
   #configResolves = 0;
 
+  /** The stable delegate all decision services dispatch through. */
+  readonly #liveBackend: LiveBackend;
+  /** Whether this runtime owns the backend and may rebuild it on a config save. */
+  readonly #backendSwappable: boolean;
+  /** Identity of the backend configuration currently in force. */
+  #backendSignature: string;
+  /** System One connection settings currently in force (panel/diagnostics). */
+  #systemOneConfig: ResolvedSystemOneConfig;
+  /** Backend selector currently in force (panel/diagnostics). */
+  #backendSelector: ResolvedReflexConfig['backend'];
+  /** Ledger sink currently in force. */
+  #ledgerPath?: string;
+  /** Routing policy currently in force (provider lifecycle is reconciled live). */
+  #routingConfig: ResolvedRoutingConfig;
+  /** Applies routing lifecycle changes (enable/disable, provider rename) live. */
+  #reconfigureRouting?: (routing: ResolvedRoutingConfig) => void;
+  /** Reads how many provider registrations this activation made in total. */
+  #routingRegistrationEvents?: () => number;
+  /** Backend rebuilds performed by this activation (diagnostics/measurement). */
+  #backendRebuilds = 0;
+  /** Ledger sink switches performed by this activation. */
+  #ledgerSwitches = 0;
+
   /**
    * @param config - resolved plugin configuration.
    * @param dependencies - test seams for the ledger, backend, and routing clock,
@@ -158,8 +263,17 @@ export class ReflexRuntime {
     } = {}
   ) {
     this.config = config;
-    this.backend = dependencies.backend ?? createBackend(config);
+    // One stable delegate: the services below close over it, and a config save
+    // swaps the transport inside it instead of rebuilding them.
+    this.#liveBackend = new LiveBackend(dependencies.backend ?? createBackend(config));
+    this.#backendSwappable = dependencies.backend === undefined;
+    this.#backendSignature = backendSignature(config);
+    this.backend = this.#liveBackend as unknown as DecisionBackend;
     this.ledger = dependencies.ledger ?? new DecisionLedger(config.ledgerPath ?? null);
+    this.#systemOneConfig = config.systemOne;
+    this.#backendSelector = config.backend;
+    this.#ledgerPath = config.ledgerPath;
+    this.#routingConfig = config.routing;
     this.calibrator = config.calibrationPath ? new Calibrator(config.calibrationPath) : new Calibrator();
     this.gateService = new ReflexGateService(this.backend, this.ledger, this.calibrator);
     this.pruneService = new ToolResultPruner(this.backend, this.ledger, config.pruneThreshold);
@@ -233,8 +347,7 @@ export class ReflexRuntime {
    * @returns a copy of the counters.
    */
   systemOneHealth(): BackendHealth | undefined {
-    const health = (this.backend as Partial<DecisionBackend>).health;
-    return typeof health === 'function' ? health.call(this.backend) : undefined;
+    return this.#liveBackend.currentHealth();
   }
 
   /**
@@ -481,6 +594,38 @@ export class ReflexRuntime {
     this.#toolRegistrationEvents = registrationEvents;
   }
 
+  /**
+   * Attach the routing-lifecycle reconciler of this activation.
+   *
+   * The provider registration lives on the LLM runtime, not on this runtime, so
+   * enabling/disabling the route or renaming the virtual provider on a
+   * config-only save has to call back out to the installer that owns it.
+   * @param reconfigure - applies the routing lifecycle of a freshly resolved config.
+   * @param registrationEvents - reads how many provider registrations happened.
+   */
+  attachRouting(
+    reconfigure?: (routing: ResolvedRoutingConfig) => void,
+    registrationEvents?: () => number
+  ): void {
+    this.#reconfigureRouting = reconfigure;
+    this.#routingRegistrationEvents = registrationEvents;
+  }
+
+  /** Provider registrations this activation made (monotonic; diagnostics). */
+  get routingRegistrationEvents(): number {
+    return this.#routingRegistrationEvents?.() ?? 0;
+  }
+
+  /** Backend rebuilds this activation performed (0 when a seam supplied one). */
+  get backendRebuilds(): number {
+    return this.#backendRebuilds;
+  }
+
+  /** Ledger sink switches this activation performed. */
+  get ledgerSwitches(): number {
+    return this.#ledgerSwitches;
+  }
+
   /** The number of reflex tools this activation currently has registered. */
   get toolRegistrationCount(): number {
     return this.#toolRegistrationCount?.() ?? 0;
@@ -507,10 +652,24 @@ export class ReflexRuntime {
    * activation values until that slice lands.
    */
   get effectiveConfig(): ResolvedReflexConfig {
+    const models = this.modelRouter.models;
+    const fallback = this.modelRouter.fallback;
     return {
       ...this.config,
+      backend: this.#backendSelector,
+      ledgerPath: this.#ledgerPath,
       toolPrefix: this.#toolPrefix,
       tools: this.#toolsConfig,
+      systemOne: this.#systemOneConfig,
+      routing: {
+        enabled: this.#routingConfig.enabled,
+        maxTaskChars: this.#routingConfig.maxTaskChars,
+        // The router is the live source of the provider name and the pools: a
+        // rename is applied there first, and every surface must agree with it.
+        virtualProvider: this.modelRouter.virtualProvider,
+        models,
+        ...(fallback === undefined ? {} : { fallback })
+      },
       effort: { ...this.effort.policy },
       interventions: this.#interventionsConfig,
       pruneThreshold: this.#pruneThreshold
@@ -548,45 +707,84 @@ export class ReflexRuntime {
    * - the per-tool switches and the deployment prefix, with the registry
    *   reconciled by the installer through {@link attachToolSurface}. The
    *   reconciler is idempotent: a commit that changes neither the enabled
-   *   suffixes nor the prefix unregisters and re-registers nothing.
-   *
-   * Still activation-time (their own live path is a separate slice): the
-   * backend, the ledger sink and the virtual provider lifecycle.
+   *   suffixes nor the prefix unregisters and re-registers nothing;
+   * - the decision backend and its connection settings, rebuilt only on a
+   *   transport-relevant change (health starts fresh on the new backend);
+   * - the ledger sink, migrated in place so no recorded entry is lost;
+   * - the routing lifecycle (enabled switch, virtual-provider rename) through
+   *   {@link attachRouting}, and the task budget read per step.
    * @returns whether a new policy was applied.
    */
   refresh(): boolean {
-    if (this.#source === undefined || this.#disposed) return false;
-    let resolved: ResolvedReflexConfig;
+    if (this.#source === undefined || this.#disposed || this.#refreshing) return false;
+    this.#refreshing = true;
     try {
-      resolved = resolveConfig(this.#source as ReflexConfig);
-    } catch (error) {
-      this.#warn(
-        `dsh-reflex: the updated configuration cannot be applied (${(error as Error).message}); keeping the previous live values`
-      );
-      return false;
+      let resolved: ResolvedReflexConfig;
+      try {
+        resolved = resolveConfig(this.#source as ReflexConfig);
+      } catch (error) {
+        this.#warn(
+          `dsh-reflex: the updated configuration cannot be applied (${(error as Error).message}); keeping the previous live values`
+        );
+        return false;
+      }
+      this.#configResolves += 1;
+
+      // Backend and connection: rebuild only when something that shapes the
+      // transport changed. A same-value commit touches nothing (idempotence), and
+      // the services keep dispatching through the same delegate.
+      const nextSignature = backendSignature(resolved);
+      if (this.#backendSwappable && nextSignature !== this.#backendSignature) {
+        this.#liveBackend.swap(createBackend(resolved));
+        this.#backendSignature = nextSignature;
+        this.#backendRebuilds += 1;
+      }
+      this.#systemOneConfig = resolved.systemOne;
+      this.#backendSelector = resolved.backend;
+
+      // Ledger sink: move the JSONL target in place, migrating the in-memory
+      // history into the new file so entries recorded before the switch survive.
+      if (resolved.ledgerPath !== this.#ledgerPath) {
+        const switched = (this.ledger as { switchLogPath?: (path?: string | null) => boolean }).switchLogPath?.(
+          resolved.ledgerPath ?? null
+        );
+        this.#ledgerPath = resolved.ledgerPath;
+        if (switched) this.#ledgerSwitches += 1;
+      }
+
+      // The prune threshold is read live by the direct prune seam as well as by
+      // the intervention engine's projection.
+      this.pruneService.setMinCharsThreshold(resolved.pruneThreshold);
+
+      this.#modelRouter.updatePolicy({
+        models: resolved.routing.models,
+        ...(resolved.routing.fallback ? { fallback: resolved.routing.fallback } : {})
+      });
+      this.#routingConfig = resolved.routing;
+      this.effort.updatePolicy({
+        enabled: resolved.effort.enabled,
+        ...(resolved.effort.setting === undefined ? {} : { setting: resolved.effort.setting }),
+        fallback: resolved.effort.fallback,
+        minConfidence: resolved.effort.minConfidence
+      });
+      this.#interventionsConfig = resolved.interventions;
+      this.#pruneThreshold = resolved.pruneThreshold;
+      // The tool block is applied before the intervention reconfigure so the
+      // callback can derive the renamed `ownTools` set from this runtime's live
+      // values rather than from the activation-time snapshot.
+      this.#toolsConfig = resolved.tools;
+      this.#toolPrefix = resolved.toolPrefix;
+      this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);
+      this.#reconfigureTools?.(resolved);
+      // Routing lifecycle last: enabling/disabling the route and renaming the
+      // provider may recreate the shared router, and the panel/tool surfaces read
+      // the routing block after the pools have been replaced.
+      this.#reconfigureRouting?.(resolved.routing);
+      this.#mark = volatileSnapshots(this.#source);
+      return true;
+    } finally {
+      this.#refreshing = false;
     }
-    this.#configResolves += 1;
-    this.#modelRouter.updatePolicy({
-      models: resolved.routing.models,
-      ...(resolved.routing.fallback ? { fallback: resolved.routing.fallback } : {})
-    });
-    this.effort.updatePolicy({
-      enabled: resolved.effort.enabled,
-      ...(resolved.effort.setting === undefined ? {} : { setting: resolved.effort.setting }),
-      fallback: resolved.effort.fallback,
-      minConfidence: resolved.effort.minConfidence
-    });
-    this.#interventionsConfig = resolved.interventions;
-    this.#pruneThreshold = resolved.pruneThreshold;
-    // The tool block is applied before the intervention reconfigure so the
-    // callback can derive the renamed `ownTools` set from this runtime's live
-    // values rather than from the activation-time snapshot.
-    this.#toolsConfig = resolved.tools;
-    this.#toolPrefix = resolved.toolPrefix;
-    this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);
-    this.#reconfigureTools?.(resolved);
-    this.#mark = volatileSnapshots(this.#source);
-    return true;
   }
 
   /**
@@ -598,7 +796,7 @@ export class ReflexRuntime {
    * @returns whether a new policy was applied.
    */
   refreshIfChanged(): boolean {
-    if (!this.#watchable || this.#source === undefined || this.#disposed) return false;
+    if (!this.#watchable || this.#source === undefined || this.#disposed || this.#refreshing) return false;
     const next = volatileSnapshots(this.#source);
     const previous = this.#mark;
     const unchanged =
@@ -616,6 +814,7 @@ export class ReflexRuntime {
     // exactly like the effort feed and the ledger.
     this.#interventions?.reset();
     this.#interventions = undefined;
+    this.#reconfigureRouting = undefined;
     this.effortStatusFeed.clear();
     this.ledger.clear();
   }
@@ -623,6 +822,28 @@ export class ReflexRuntime {
   #assertLive(): void {
     if (this.#disposed) throw new Error('reflex runtime has been disposed');
   }
+}
+
+/**
+ * Identity of the configuration that shapes the decision transport.
+ *
+ * A config-only save re-resolves the whole document; rebuilding the backend for
+ * a change that cannot affect it would reset health and drop the connection for
+ * no reason. This signature lets {@link ReflexRuntime.refresh} rebuild exactly
+ * when the transport's identity changed.
+ * @param config - resolved plugin configuration.
+ * @returns a stable string of the transport-relevant fields.
+ */
+function backendSignature(config: ResolvedReflexConfig): string {
+  const { backend, systemOne, interventions } = config;
+  return JSON.stringify([
+    backend,
+    systemOne.baseUrl ?? '',
+    systemOne.model ?? '',
+    systemOne.apiKeyEnv ?? '',
+    systemOne.timeoutMs ?? null,
+    interventions.pruneJudgeMinChars
+  ]);
 }
 
 /**

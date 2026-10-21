@@ -16,19 +16,22 @@ test('pruneJudgeMinChars defaults to 10000', () => {
   assert.equal(resolveInterventionsConfig(undefined).pruneJudgeMinChars, 10000);
 });
 
-test('pruneJudgeMinChars below pruneThreshold is refused', () => {
-  assert.throws(
-    () => resolveConfig({ backend: 'mock', pruneThreshold: 12000 }),
-    /pruneJudgeMinChars must be >= pruneThreshold/
-  );
-  assert.throws(
-    () =>
-      resolveConfig({
-        backend: 'mock',
-        pruneThreshold: 500,
-        interventions: { pruneJudgeMinChars: 400 }
-      }),
-    /pruneJudgeMinChars must be >= pruneThreshold/
+test('raising pruneThreshold alone lifts the segment-judging floor instead of refusing the save', () => {
+  // The panel exposes pruneThreshold and pruneJudgeMinChars independently. A
+  // threshold raised on its own must remain saveable; the effective judging
+  // floor is lifted to it, so the panel and runtime agree on what is in force.
+  const lifted = resolveConfig({ backend: 'mock', pruneThreshold: 12000 });
+  assert.equal(lifted.interventions.pruneJudgeMinChars, 12000);
+
+  const explicitLow = resolveConfig({
+    backend: 'mock',
+    pruneThreshold: 500,
+    interventions: { pruneJudgeMinChars: 400 }
+  });
+  assert.equal(explicitLow.interventions.pruneJudgeMinChars, 500, 'the floor never sits below the prune threshold');
+  assert.equal(
+    resolveInterventionsConfig({ pruneJudgeMinChars: 400 }, 500).pruneJudgeMinChars,
+    500
   );
 });
 

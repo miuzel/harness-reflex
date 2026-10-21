@@ -366,7 +366,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       tools.publish();
     });
 
-    const stopRouting = installRouting(ctx, runtime, resolved.routing.maxTaskChars);
+    const stopRouting = installRouting(ctx, runtime);
     // The ledger is an audit question a person asks, not a decision the model
     // makes, so it is a Host command instead of a tool: `/reflex-ledger` reads
     // the same runtime and never opens a turn.
@@ -446,10 +446,9 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
  * (tests, `applyReflex` callers) working without one.
  * @param ctx - registrant context.
  * @param runtime - the activation's runtime.
- * @param maxTaskChars - task-text budget captured from `agent/pre-step`.
  * @returns a disposer that releases the route and its listeners.
  */
-function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: number): () => void {
+function installRouting(ctx: Context, runtime: ReflexRuntime): () => void {
   const llm = (ctx as { llm?: LlmRuntime }).llm;
   if (!llm) {
     ctx.logger?.('dsh-reflex')?.warn('LLM service is unavailable; request interception stays off for this activation');
@@ -460,8 +459,20 @@ function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: numb
     llm,
     router: runtime.modelRouter,
     effort: runtime.effort,
-    route: routingActive(runtime.config),
-    maxTaskChars,
+    route: routingActive(runtime.effectiveConfig),
+    // Both are getters: a config-only save changes `maxTaskChars` and the router
+    // provider between steps, and the next step must see the new value without
+    // re-resolving the schema.
+    maxTaskChars: () => runtime.effectiveConfig.routing.maxTaskChars,
+    liveRouting: () => {
+      const routing = runtime.effectiveConfig.routing;
+      return {
+        enabled: routing.enabled,
+        virtualProvider: routing.virtualProvider,
+        maxTaskChars: routing.maxTaskChars,
+        models: routing.models
+      };
+    },
     // Live config, pulled once per step: identity comparison, no schema run
     // unless the loader actually committed a change.
     refreshConfig: () => runtime.refreshIfChanged(),
@@ -471,6 +482,16 @@ function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: numb
   // policy is then the shared router's, so the panel and the dispatch path of
   // this activation must both read that one.
   runtime.adoptModelRouter(installation.router);
+  // A config-only save can enable/disable the route or rename the virtual
+  // provider. The registration lives on the LLM runtime, so the runtime calls
+  // back here once per actual commit; the reconciler is idempotent.
+  runtime.attachRouting(
+    (routing) => {
+      installation.refresh(routing);
+      runtime.adoptModelRouter(installation.router);
+    },
+    () => installation.registrationEvents
+  );
 
   return () => installation.dispose();
 }

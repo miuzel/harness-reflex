@@ -795,6 +795,8 @@ export interface EffortPolicy {
   fallback: AdaptiveEffortLevel;
   /** Minimum System 1 confidence for its answer to be trusted. */
   minConfidence: number;
+  /** Backend name recorded in the ledger; follows a live backend swap. */
+  backendName?: string;
 }
 
 /**
@@ -888,6 +890,7 @@ export class EffortInterceptor {
       fallback: policy.fallback,
       minConfidence: policy.minConfidence
     };
+    if (policy.backendName !== undefined) this.#backendName = policy.backendName;
     this.#generation += 1;
   }
 
