@@ -349,7 +349,11 @@ description:
 - [ ] 仓库已打 `dsh-plugin` topic；
 - [ ] 建议附截图（`data/screenshots.json`）。
 
-**当前状态**：未提交。registry 发布不是上架的硬前提，但商店通常更偏好可 `npm install` 的包；若 B4 未解决，PR 需在描述中说明 tarball 安装方式，并接受维护者可能要求先解决包名问题。
+**当前状态（2026-10-22）**：已提交 PR #8539（awesome-dsh-plugin/awesome-dsh-plugin）。
+
+- 条目：`data/plugins/miuzel__harness-reflex--packages-dsh-reflex.yml`，`url` 指向 `tree/main/packages/dsh-reflex`，`name` 为 `miuzel/harness-reflex#dsh-reflex`，`category: tools`，附 `tarball` 指向 v0.1.0 Release 资产；
+- 本地 `check-submission.mjs` 仅剩**仓库年龄**未过（需 1 天，创建于 2026-10-21T15:16Z，约 2026-10-22T15:16Z 自动清除，无需重提）；
+- 教训：单仓多包时条目必须指向**声明 `dsh.bundle` 的子包目录**，文件名用 `<owner>__<repo>--packages-<dir>.yml`；指向仓库根会被判为"装了也没有行为"。registry 发布不是上架的硬前提，但商店通常更偏好可 `npm install` 的包；若 B4 未解决，PR 需在描述中说明 tarball 安装方式，并接受维护者可能要求先解决包名问题。
 
 ---
 
