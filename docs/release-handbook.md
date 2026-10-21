@@ -1,8 +1,9 @@
 # Harness Reflex 发布手册（0.1.0）
 
 > **适用范围**：本仓库 `harness-reflex`（根包）与 `packages/dsh-reflex`（DSH 宿主插件）的 0.1.0 发布。
-> **状态**：发布流程已按本仓库实际改写并完成事实核对；**0.1.0 尚未发布**，版本号变更、tag、registry/商店动作均未执行。
-> **事实基准**：分支 `integration/v0.1.0` @ `8758f43`，核对日期 2026-10-21；环境 Node `v26.7.0`、npm `12.0.2`、pnpm `12.3.4`、dsh `0.2.1-rc.2`。
+> **状态**：0.1.0 代码面已收口——两包版本 `0.1.0`、插件改名 `@miuzel/dsh-reflex`、文档统一口径、`release-pack` 27/27。
+> **0.1.0 尚未发布**：tag / npm publish / GitHub Release / 商店提交仍为**待负责人**的人工 gate。
+> **事实基准**：分支 `integration/v0.1.0` @ `9235039` + 本次 0.1.0 改动，核对日期 2026-10-21；环境 Node `v26.7.0`、npm `12.0.2`、pnpm `12.3.4`、dsh `0.2.1-rc.2`。
 > **移植来源**：`dsh-graph` 的 `docs/release-handbook.md`（388 行）。本手册沿用了它的**章节骨架与门禁思想**，但所有命令、产物、阻塞项均按本仓库重写；差异明细见 [`release-handbook-porting-notes.md`](release-handbook-porting-notes.md)。
 > **本手册不是发布许可**：文中所有“待负责人确认”项必须先关闭或明确豁免，才可进入第 4 节之后的发布动作。
 
@@ -12,7 +13,7 @@
 
 ```
 确认本手册与 0.1.0 清单
-  → 版本号 alpha.2 → 0.1.0（负责人执行，含文档/常量/测试引用）
+  → 版本号 alpha.2 → 0.1.0（已由本次执行完成）
   → 在 tag 的独立发布树构建 + 全套测试 + 打包 27 项核验
   → 记录 sha256，建 tag，推送仓库（负责人）
   → 发布渠道决策：tarball 直发（推荐）/ registry（当前被包名冲突阻塞）
@@ -25,8 +26,10 @@
 当前只完成了“流程与清单落纸”：
 
 - ✅ 打包链路、27 项自检、真机 tarball 安装链路已在本仓库实测；
-- ⏳ 版本号未变（仍是 `0.1.0-alpha.2`），tag/发布/商店均未执行；
-- ⛔ registry 发布另有**包名冲突**（见 B4），不是“登录一下就能发”。
+- ✅ 版本号已升到 `0.1.0`（两包 + 常量 + 测试/文档引用），插件包名为 `@miuzel/dsh-reflex`；
+- ✅ 文档口径已统一为「MCP 8 / DSH 5 可开关（默认 4）/ 自动干预 / `/reflex-ledger`」；
+- ⏳ tag / npm publish / GitHub Release / 商店均未执行（人工 gate，见 §5/§7）；
+- ⚠️ npm 发布仍需负责人解决**登录态**（B5）并复核 scoped 包是否已注册。
 
 ---
 
@@ -36,20 +39,20 @@
 
 | # | 阻塞 / 前置项 | 归属 | 状态 | 证据 / 待办 |
 |---|---|---|---|---|
-| B1 | 版本号仍是 `0.1.0-alpha.2`，未同步到 `0.1.0` | 负责人（发布动作） | ⏳ 待办 | 根 `package.json`、`packages/dsh-reflex/package.json`；同步范围见 §2 |
-| B2 | 打包与自检链路 | 本仓库 | ✅ **已具备** | `node scripts/release-pack.mjs` 实测 **27/27 checks passed**（2026-10-21，候选 alpha.2） |
-| B3 | 真机安装 / 启动 / 面板 | 本仓库 | ✅ **已具备（alpha.2）** | 隔离 `DSH_HOME` + tarball `dsh plugin add --force` 成功；web 启动后 `/dsh-reflex/api/health` 返回版本号；`/panel` 返回 `tools.active` 等字段。0.1.0 打包后需重跑一次 |
-| B4 | **npm 包名 `dsh-reflex` 已被占用** | 负责人决策 | ⛔ **registry 发布阻塞** | `npm view dsh-reflex` → `0.3.0`，维护者 `onesmash`，`time.modified=2026-10-20T02:00:46Z`，描述与本项目无关。根包名 `harness-reflex` 查询为 404（可用）。需决定：改名 / 改 scope（如 `@miuzel/dsh-reflex`）/ 0.1.0 只走 tarball |
-| B5 | npm 官方 registry 登录态 | 负责人（人工 gate） | ⚠️ **未登录** | `npm config get registry` = `https://registry.npmjs.org/`；`npm whoami` 返回 **E401**。`~/.npmrc` 里有 `_authToken`，但**不能据此认定已登录** |
+| B1 | 版本号同步到 `0.1.0` | 本次执行 | ✅ **已完成** | 根 `package.json`、`packages/dsh-reflex/package.json`、`panel-api.ts`、lock、测试/文档引用全部为 `0.1.0` |
+| B2 | 打包与自检链路 | 本仓库 | ✅ **已具备** | `node scripts/release-pack.mjs` 实测 **27/27 checks passed**（2026-10-21，0.1.0） |
+| B3 | 真机安装 / 启动 / 面板 | 本仓库 | ✅ **已具备（0.1.0）** | 隔离 `DSH_HOME` + tarball `dsh plugin --profile web add --force` 成功；`/dsh-reflex/api/health` 返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`；`/panel` 可读；`/reflex-ledger` 可执行 |
+| B4 | npm 包名 `dsh-reflex` 已被占用 → 改名 | 负责人复核 | ✅ **已决策并落地** | 插件包名改为 `@miuzel/dsh-reflex`；**发布前仍需负责人本机 `npm view @miuzel/dsh-reflex` 复核可用性**（scope 下是否已有同名包） |
+| B5 | npm 官方 registry 登录态 | 负责人（人工 gate） | ⚠️ **未登录** | `npm config get registry` = `https://registry.npmjs.org/`；`npm whoami` 返回 **E401**。发布前由负责人执行 `npm login` |
 | B6 | Git remote / tag / 公开仓库 | 负责人 | ⏳ 待办 | 当前 `git remote -v` 为空、`git tag -l` 为空；`gh` 已登录 `miuzel`，但 `miuzel/harness-reflex` 尚不存在（GraphQL Could not resolve） |
 | B7 | awesome-dsh-plugin / 商店收录 | 负责人（人工 gate） | ⏳ 待办 | `data/plugins/miuzel__harness-reflex.yml` 不存在（404）；仓库未建，不满足“仓库 ≥1 天、commits ≥10”的 CI 条件 |
 | B8 | `packages/dsh-reflex/client.js` 未入库 | 负责人决策 | ⏳ 待办 | 该文件由 `npm run build:all` 生成、被插件 `files` 白名单收录，但当前分支未跟踪；发布树必须先构建。是否入库由负责人决定 |
-| B9 | 既有文档的旧表述 | 负责人（可并入 0.1.0） | ⏳ 待确认 | 根 `README.md` 仍写“DSH 插件注入 8 个工具”；插件 `README.md` 写依赖 `harness-reflex ^0.1.0-alpha.2`（实际为 `dist/vendor` 内联，无运行时依赖）；`docs/dsh-plugin.md` §1/§2 的“8 工具”已被 §14 覆盖。**发布文档以 USER_GUIDE §9/§13 与 dsh-plugin §14 为准** |
+| B9 | 既有文档的旧表述 | 本次执行 | ✅ **已完成** | 根/插件 README、`docs/dsh-plugin.md`、`USER_GUIDE.md`、`docs/USER_GUIDE.en.md` 已统一为「MCP 8 / DSH 5（默认 4）/ 自动干预 / `/reflex-ledger`」，并更新 `@miuzel/dsh-reflex` 安装命令 |
 | B10 | 平台验证范围 | 本仓库 | ⚠️ 部分 | 本轮只在 Linux/WSL2 实测；原生 Windows / macOS **本版未验证**，发布正文必须如实标注 |
-| B11 | `src/release-packaging.test.ts` 固定了 alpha.2 文件名 | 负责人（版本同步时） | ⏳ 待办 | 第 175–176 行硬编码 `harness-reflex-0.1.0-alpha.2.tgz`；版本号变更后不改会红 |
+| B11 | `src/release-packaging.test.ts` 固定产物名 | 本次执行 | ✅ **已完成** | 已改为按 `root.version` / `plugin.version` 动态生成，scoped 包名使用 `miuzel-dsh-reflex-<version>.tgz` |
 | B12 | release notes 发布日期 | 负责人 | ⏳ 待办 | `docs/release-notes-v0.1.0.md` 日期为占位，发布时替换 |
 
-**结论**：0.1.0 可以走“**本地/附件 tarball 直发**”路径，当前无硬阻塞；**不能**直接走 npm registry 发布 `dsh-reflex`，除非先解决 B4 与 B5。
+**结论**：0.1.0 可以走“**本地/附件 tarball 直发**”路径，当前无硬阻塞；也可以走 npm registry 发布 `harness-reflex` 与 `@miuzel/dsh-reflex`，前提是负责人先关闭 B5（登录）并复核 scoped 包名（B4）。
 
 ---
 
@@ -57,32 +60,32 @@
 
 ### 2.1 当前元数据（核对自仓库）
 
-| 项 | 根包 `harness-reflex` | 插件包 `dsh-reflex` |
+| 项 | 根包 `harness-reflex` | 插件包 `@miuzel/dsh-reflex` |
 |---|---|---|
-| 版本 | `0.1.0-alpha.2` | `0.1.0-alpha.2` |
+| 版本 | `0.1.0` | `0.1.0` |
 | 入口 | `dist/index.js`；`bin.harness-reflex = dist/cli/index.js` | `dist/index.js`；Cordis `apply(ctx, config)` |
 | 对外声明 | `exports`（`.` / `./mcp` / `./core/*`） | `exports`（`.` / `./testing` / `./client` / `./cordis.patch.yml` / `./locale/*.json`） |
 | DSH 元数据 | — | `dsh.bundle.patch = ./cordis.patch.yml`；`dsh.client.platform = web`，`external = ['react']` |
-| 运行时依赖 | 无（`dependencies` 为空） | `@deepseek-ai/schemastery ~3.18.5-alpha.2`、`zod ^4.0.0`；Host 模块走 `peerDependencies` |
+| 运行时依赖 | 无（`dependencies` 为空） | `@deepseek-ai/schemastery ~3.18.5-alpha.2`、`zod ^4.0.0`；Host 模块走 `peerDependencies`；核心 vendored 进 `dist/vendor/harness-reflex` |
 | 引擎 | `node >= 18` | `dsh < 0.2.2` |
-| 包名可用性 | npm 查询 404（可用） | npm 已有他人 `dsh-reflex@0.3.0`（**不可直接发**） |
+| 包名可用性 | npm 查询 404（可用） | scoped 名 `@miuzel/dsh-reflex`；未加 scope 的 `dsh-reflex` 已有他人 `0.3.0`（**不可用**） |
 
 插件包**不依赖根包的运行时安装**：`dist/vendor/harness-reflex/**` 已内联核心（打包核验的 102 个 entry 可见）。因此两个 tarball 可独立安装；插件仍需要 DSH Host 提供 `@deepseek-ai/*`。
 
-### 2.2 0.1.0 版本同步涉及的文件（仅描述，本次不改）
+### 2.2 0.1.0 版本同步（本次已执行）
 
-| 文件 | 当前引用 | 处理 |
+| 文件 | 处理 | 状态 |
 |---|---|---|
-| `package.json` | 1 处 `version` | 改为 `0.1.0` |
-| `packages/dsh-reflex/package.json` | 1 处 `version` | 改为 `0.1.0` |
-| `packages/dsh-reflex/src/panel-api.ts` | `REFLEX_PLUGIN_VERSION = '0.1.0-alpha.2'` | 改常量；有测试与 `package.json` 对账 |
-| `USER_GUIDE.md` | 标题、§13 等 3 处 | 改当前版本描述 |
-| `docs/USER_GUIDE.en.md` | 3 处 | 同上（会嵌入 `client.js`） |
-| `packages/dsh-reflex/README.md` | 2 处 | 改当前版本声明；顺带修正“依赖根包”的旧说法 |
-| `src/release-packaging.test.ts` | 2 处固定 alpha.2 文件名 | 改为新版本；否则测试红 |
-| `package-lock.json` | 当前根 `version` 写的是 `0.1.0`（与 package.json 已不一致） | 版本同步时用 `npm install --package-lock-only --ignore-scripts` 重新生成 |
-| `packages/dsh-reflex/client.js` | 构建产物含版本字符串 | 重新 `npm run build:all`，不手工改 |
-| `docs/dsh-plugin.md` | 8 处历史版本引用 | 只改“当前版本”声明；历史章节保留原样，不重写历史 |
+| `package.json` | `version` → `0.1.0` | ✅ |
+| `packages/dsh-reflex/package.json` | `name` → `@miuzel/dsh-reflex`；`version` → `0.1.0` | ✅ |
+| `packages/dsh-reflex/src/panel-api.ts` | `REFLEX_PLUGIN_VERSION = '0.1.0'` | ✅ |
+| `packages/dsh-reflex/cordis.patch.yml` | `name` → `'@miuzel/dsh-reflex'`（`id` 保持 `dsh-reflex`） | ✅ |
+| `packages/dsh-reflex/src/client-bundle.ts` | `CLIENT_BUNDLE_ID` 从 `package.json.name` 派生（DSH loader 按包名注册） | ✅ |
+| `USER_GUIDE.md` / `docs/USER_GUIDE.en.md` | 版本、包名、工具面、安装命令、路由 | ✅ |
+| `packages/dsh-reflex/README.md` / 根 `README.md` / `docs/dsh-plugin.md` | 同上 | ✅ |
+| `src/release-packaging.test.ts` | 按 manifest 版本/ scoped 名断言产物 | ✅ |
+| `package-lock.json` | `npm install` 重新生成，根版本 `0.1.0` | ✅ |
+| `packages/dsh-reflex/client.js` | `npm run build:all` 重建（bundle id = `@miuzel/dsh-reflex`） | ✅ |
 
 注意：**不要用 `npm version` 一步到位**——它会自动创建 commit/tag，而 tag 属于负责人 gate。建议 `npm pkg set version=0.1.0`。
 
@@ -112,7 +115,7 @@ npm run release                          # test:all + test:mutation + release:pa
 | 产物 | 说明 |
 |---|---|
 | `release/harness-reflex-<version>.tgz` | 根包：核心运行时、CLI、stdio MCP server、适配器、`dist/`、README、USER_GUIDE、`docs/`、`experiments/` 源码 |
-| `release/dsh-reflex-<version>.tgz` | DSH 插件：`dist/`、内联核心 `dist/vendor/**`、`client.js`、`cordis.patch.yml`、`locale/` |
+| `release/miuzel-dsh-reflex-<version>.tgz` | DSH 插件 `@miuzel/dsh-reflex`（scoped 包命名）：`dist/`、内联核心 `dist/vendor/**`、`client.js`、`cordis.patch.yml`、`locale/` |
 | `release/SHA256SUMS` | 两个 tarball 的 SHA-256 |
 | `release/release-report.json` | 逐项核验记录（含 entry 列表、sha256、冒烟结果） |
 | `release/RELEASE-<version>.md` | 由脚本生成的发布说明（机器产物，不是 release notes 真源） |
@@ -129,16 +132,16 @@ npm run release                          # test:all + test:mutation + release:pa
 
 `--skip-install` 只用于结构审计排障，**发布候选必须跑完整 27 项**。
 
-### 3.4 本次实测记录（0.1.0-alpha.2，非 0.1.0）
+### 3.4 本次实测记录（0.1.0）
 
 | 文件 | entry 数 | 体积 |
 |---|---:|---:|
-| `harness-reflex-0.1.0-alpha.2.tgz` | 73 | 218 KiB |
-| `dsh-reflex-0.1.0-alpha.2.tgz` | 102 | 577 KiB |
+| `harness-reflex-0.1.0.tgz` | 73 | 219 KiB |
+| `miuzel-dsh-reflex-0.1.0.tgz` | 102 | 578 KiB |
 
-（2026-10-21 在 `8758f43` 构建；根包已包含本次新增的发布文档。）具体 sha256 由 `release-pack.mjs` 写入 `release/SHA256SUMS` 与 `release/release-report.json`。
+（2026-10-21 在 `integration/v0.1.0` + 本次 0.1.0 改动上构建。）具体 sha256 由 `release-pack.mjs` 写入 `release/SHA256SUMS` 与 `release/release-report.json`；发布树重跑后以该文件为准。
 
-**本手册不固化根包指纹**：根包 `files` 含 `docs/**/*.md`，本文档本身就在包内，任何文档编辑都会改变根包 sha256；0.1.0 的正式指纹只能在发布树打包后记录。同一构建树连续两次打包结果一致（本地字节可复现），但**不能用 alpha.2 指纹代替 0.1.0**：版本号变更、`client.js` 重建都会改变 tarball 字节。
+**本手册不固化根包指纹**：根包 `files` 含 `docs/**/*.md`，本文档本身就在包内，任何文档编辑都会改变根包 sha256；0.1.0 的正式指纹只能在发布树打包后记录。同一构建树连续两次打包结果一致（本地字节可复现）；发布记录以发布树实测为准。
 
 > 若从**目录**发布到 npm（不建议），registry 会重新打包，线上 sha256 与本地不同；应按成员集合与逐文件内容对账。若直发 tarball，则按本地 sha256 记录并在 registry 侧核对 `dist.integrity`。
 
@@ -148,7 +151,7 @@ npm run release                          # test:all + test:mutation + release:pa
 
 ### 4.1 现状
 
-- 仓库当前**没有 tag**，`main` 停在 `96ee842`，集成分支 `integration/v0.1.0` 在 `8758f43`；
+- 仓库当前**没有 tag**，`main` 停在 `96ee842`，集成分支 `integration/v0.1.0` 在 `9235039`（0.1.0 改动在其后）；
 - 发布动作（合并、tag、push）**只由负责人执行**；执行 attempt 不建/不推 tag。
 
 ### 4.2 推荐策略
@@ -162,7 +165,7 @@ npm run release                          # test:all + test:mutation + release:pa
 # 负责人执行
 git checkout main
 git merge --no-ff integration/v0.1.0
-git tag -a v0.1.0 -m "harness-reflex / dsh-reflex v0.1.0"
+git tag -a v0.1.0 -m "harness-reflex / @miuzel/dsh-reflex v0.1.0"
 git push origin main
 git push origin v0.1.0
 
@@ -196,19 +199,17 @@ sha256sum release/*.tgz
 理由：
 
 - 当前实测唯一完整跑通的安装路径是 `dsh plugin --profile <p> add --force <tarball>`；
-- `dsh-reflex` 包名在 npm 已被他人占用（B4），registry 直发会失败或需要改名/改 scope；
+- 插件已改名 `@miuzel/dsh-reflex`（B4 落地），但 scoped 名是否已注册仍需负责人复核；
 - npm 登录态为 E401（B5），没有可用的发布凭据；
 - tarball 路径能保证“**被测产物 == 发布产物**”，sha256 可直接进 release notes。
 
-发布方式：把 `release/harness-reflex-0.1.0.tgz`、`release/dsh-reflex-0.1.0.tgz`、`release/SHA256SUMS` 作为 GitHub Release 附件；安装文档写 tarball 命令。
+发布方式：把 `release/harness-reflex-0.1.0.tgz`、`release/miuzel-dsh-reflex-0.1.0.tgz`、`release/SHA256SUMS` 作为 GitHub Release 附件；安装文档写 tarball 命令。
 
-### 5.2 备选：registry 发布（受限）
+### 5.2 registry 发布（已就绪，待负责人 gate）
 
-- 根包 `harness-reflex`：npm 查询 404，名字可用；但同样受 B5 登录态限制。
-- 插件包 `dsh-reflex`：**当前不可发**。如需 registry，负责人必须在下列方案中选一：
-  - 改名（例如 `harness-reflex-dsh`）——需同步包名、`cordis.patch.yml` 的 `name`、测试与文档；
-  - 改 scope（例如 `@miuzel/dsh-reflex`）——需确认 DSH 对 scope 包名的支持，并改安装命令；
-  - 只发根包、插件继续 tarball 分发。
+- 根包 `harness-reflex`：npm 查询 404，名字可用；受 B5 登录态限制。
+- 插件包 `@miuzel/dsh-reflex`：scoped 名已落地（`package.json`、`cordis.patch.yml`、安装命令、文档均已同步）。
+  发布前由负责人执行 `npm view @miuzel/dsh-reflex` 复核；若 scope 下已存在同名包，退回只发根包、插件继续 tarball 分发。
 - 若发布，建议 `npm publish ./release/<tarball>`（直发已验字节），不要 `cd dist && npm publish`；发布后核对 `npm view <pkg> dist.integrity` 与本地记录。
 - 登录 gate（本次未执行）：
 
@@ -225,7 +226,7 @@ npm whoami --registry=https://registry.npmjs.org/   # 必须打印用户名
 
 ```bash
 gh release create v0.1.0 -R miuzel/harness-reflex \
-  release/harness-reflex-0.1.0.tgz release/dsh-reflex-0.1.0.tgz release/SHA256SUMS \
+  release/harness-reflex-0.1.0.tgz release/miuzel-dsh-reflex-0.1.0.tgz release/SHA256SUMS \
   --title "v0.1.0" --notes-file docs/release-notes-v0.1.0.md
 ```
 
@@ -246,14 +247,14 @@ diff <(gh release view v0.1.0 -R miuzel/harness-reflex --json body --jq .body) d
 
 ## 7. 本地全新 profile 验收
 
-用一个隔离的 `DSH_HOME`，避免污染正在使用的宿主实例。以下命令已在本仓库实测通过（alpha.2 tarball）：
+用一个隔离的 `DSH_HOME`，避免污染正在使用的宿主实例。以下命令已在本仓库实测通过（0.1.0 tarball）：
 
 ```bash
 export DSH_HOME="$PWD/tmp/dsh-pub-check"
 rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 
 # 1) 装 tarball；同版本必须 --force
-dsh plugin --profile web add --force "$PWD/release/dsh-reflex-0.1.0-alpha.2.tgz"
+dsh plugin --profile web add --force "$PWD/release/miuzel-dsh-reflex-0.1.0.tgz"
 
 # 2) profile 组合里出现插件（config: {} 为默认配置）
 dsh --profile web --dump-config | grep -A2 -- '- id: dsh-reflex'
@@ -272,7 +273,7 @@ curl -s http://127.0.0.1:3987/dsh-reflex/api/panel | head -c 400
 
 通过判据：
 
-- `dsh plugin add` 成功且依赖解析完成；
+- `dsh plugin --profile web add --force` 成功且依赖解析完成；
 - `--dump-config` 出现 `id: dsh-reflex`；
 - 健康端点返回插件名与版本；
 - 面板快照可解析，`tools.active` 与配置一致；`systemOne.health` 对 `mock` 后端**可能缺省**（in-process 后端不产生网关健康值，缺省不是故障）；
@@ -295,7 +296,7 @@ curl -s http://127.0.0.1:3987/dsh-reflex/api/panel | head -c 400
 
 **当前判定**：
 
-- 维度 1/2：在 dsh `0.2.1-rc.2` + 隔离 profile 上已验证（`tools.active` 4 个、MCP 8 个）；0.1.0 需复跑；
+- 维度 1/2：在 dsh `0.2.1-rc.2` + 隔离 profile 上已验证（`tools.active` 4 个、MCP 8 个）；
 - 维度 3：自动化测试覆盖四个能力与 `off`/`observe`/`active` 三态，**但本轮没有在真实会话的 `active` 模式手工验一次剪枝**；发布前必须补做（清单 §5），否则 0.1.0 只能声明“observe 已验证、active 待真机确认”。
 
 **明确禁止的错误表述**：DSH 面**没有** `reflex_prune`、`reflex_detect_stagnation`、`reflex_status_ledger` 工具；剪枝/停滞/收尾是自动干预，账本是 `/reflex-ledger` 命令。两套表面：MCP 8 工具，DSH 5 个可开关工具（默认 4 个）。
@@ -335,7 +336,7 @@ description:
 
 发布前先证明回滚路径可用：
 
-1. **保留上一版**：`release/dsh-reflex-0.1.0-alpha.2.tgz` 与对应 sha256 不要删。注意 `release-pack.mjs` 每次运行都会**清空 `release/`**，所以必须在打 0.1.0 包之前把上一版 tarball 复制到 `tmp/release-archive/`（或仓库外的归档目录）；
+1. **保留上一版**：上一版 `release/dsh-reflex-0.1.0-alpha.2.tgz` 与对应 sha256 不要删。注意 `release-pack.mjs` 每次运行都会**清空 `release/`**，所以必须在打 0.1.0 包之前把上一版 tarball 复制到 `tmp/release-archive/`（或仓库外的归档目录）；
 2. **回滚安装**：
 
    ```bash
@@ -347,7 +348,7 @@ description:
 3. **registry 已发布时**：优先发 `0.1.1` 修复；撤销用 `npm deprecate <pkg>@0.1.0 "reason"`，必要时调整 `dist-tag`；不要依赖 `npm unpublish`；
 4. **tag 已推送**：不删除、不移动 tag；用补丁版本修正；
 5. **数据面**：本插件无数据库迁移；账本 JSONL 只追加，回滚不会破坏旧记录；配置校验是 schema 路径校验，回滚后未知字段会被拒绝而不是静默忽略，必要时恢复上一份配置备份；
-6. **回滚演练**：在发布前用隔离 `DSH_HOME` 从 0.1.0 退回 alpha.2，并确认面板版本号与工具面恢复。
+6. **回滚演练**：在发布前用隔离 `DSH_HOME` 从 0.1.0 退回上一版，并确认面板版本号与工具面恢复。
 
 ---
 

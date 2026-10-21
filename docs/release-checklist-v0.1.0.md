@@ -2,8 +2,8 @@
 
 > 配套手册： [`release-handbook.md`](release-handbook.md)。
 > 用法：在仓库根逐节执行；`V=0.1.0`。标注 **[自动可验]** 的项有命令和机器判据；**[人工 gate]** 的项必须由负责人确认，不能由执行代理代替。
-> 状态：**未执行**（0.1.0 尚未发布）。当前所有方框均未勾选。
-> 事实基准：`integration/v0.1.0` @ `8758f43`，2026-10-21。
+> 状态：**代码面已收口**（版本/改名/文档/打包自检已执行，见 §1–§4 的已勾项）；**发布动作未执行**（tag/npm/GitHub/商店仍勾选为负责人 gate）。
+> 事实基准：`integration/v0.1.0` @ `9235039` + 本次 0.1.0 改动，2026-10-21。
 
 ```bash
 cd /path/to/harness-reflex       # 仓库根
@@ -12,11 +12,11 @@ V=0.1.0
 
 ---
 
-## 1. 版本号与元数据 [人工 gate]
+## 1. 版本号与元数据
 
-> 版本号变更属于发布动作，由负责人执行。**不要用 `npm version`**（会自动建 commit/tag）。
+> 版本号与包名变更已由执行代理完成；**tag / 发布动作**仍属负责人 gate。
 
-- [ ] 根包与插件包版本同步：
+- [x] 根包与插件包版本同步：
 
   ```bash
   npm pkg set version="$V"
@@ -25,14 +25,15 @@ V=0.1.0
   # 期望：0.1.0 / 0.1.0
   ```
 
-- [ ] 版本常量与测试引用同步（手工编辑）：
+- [x] 版本常量与测试引用同步（执行记录）：
 
   - `packages/dsh-reflex/src/panel-api.ts` → `REFLEX_PLUGIN_VERSION = '0.1.0'`
-  - `src/release-packaging.test.ts` 两处 alpha.2 文件名 → `0.1.0`
+  - `src/release-packaging.test.ts` 产物名改为按 manifest 版本动态生成（scoped 包为 `miuzel-dsh-reflex-<version>.tgz`）
+  - `packages/dsh-reflex/package.json` → `name: @miuzel/dsh-reflex`、`cordis.patch.yml` 的 `name` 同步（`id` 不变）
   - `USER_GUIDE.md`、`docs/USER_GUIDE.en.md`、`packages/dsh-reflex/README.md` 的当前版本声明
   - `package-lock.json`：`npm install --package-lock-only --ignore-scripts`
 
-- [ ] 当前版本引用不再有 alpha.2 残留（只查会随版本变化的文件，发布文档本身可保留历史引用）：
+- [x] 当前版本引用不再有 alpha.2 残留（只查会随版本变化的文件，发布文档本身可保留历史引用）：
 
   ```bash
   grep -n "0\.1\.0-alpha\.2" \
@@ -44,15 +45,15 @@ V=0.1.0
 
   通过判据：上述文件无 alpha.2；`docs/dsh-plugin.md` 的历史章节、本发布文档中的历史引用不计入。
 
-- [ ] 包名/渠道现状复核（人工决策）：
+- [ ] 包名/渠道现状复核（**负责人人工 gate**）：
 
   ```bash
-  npm view dsh-reflex version    # 当前返回他人 0.3.0 ⇒ registry 直发仍被阻塞
-  npm view harness-reflex version  # 期望 404（根包名可用）
-  npm whoami                     # 期望打印用户名；E401 即未登录
+  npm view @miuzel/dsh-reflex version  # 期望 404（scoped 名可用）；若已存在则必须换 scope
+  npm view harness-reflex version      # 期望 404（根包名可用）
+  npm whoami                           # 期望打印用户名；E401 即未登录
   ```
 
-  通过判据：负责人已明确 0.1.0 的发布渠道（tarball 直发 / 改名或 scope 后 registry）。
+  通过判据：负责人已复核 scoped 包名并明确 0.1.0 的发布渠道（tarball 直发 / registry）。
 
 ---
 
@@ -102,6 +103,7 @@ V=0.1.0
   mkdir -p tmp/release-archive
   cp -a release/harness-reflex-0.1.0-alpha.2.tgz release/dsh-reflex-0.1.0-alpha.2.tgz \
         release/SHA256SUMS tmp/release-archive/ 2>/dev/null || true
+  # 0.1.0 的 scoped 产物名是 miuzel-dsh-reflex-0.1.0.tgz
   (cd tmp/release-archive && sha256sum -c SHA256SUMS 2>/dev/null || true)
   ```
 
@@ -132,7 +134,7 @@ V=0.1.0
   sha256sum release/*.tgz
   (cd release && sha256sum -c SHA256SUMS)
   tar -tzf release/harness-reflex-$V.tgz | wc -l
-  tar -tzf release/dsh-reflex-$V.tgz | wc -l
+  tar -tzf release/miuzel-dsh-reflex-$V.tgz | wc -l
   ```
 
   通过判据：`sha256sum -c` 两行 OK；把两个字节数、entry 数、sha256 抄进 release notes 与发布记录。**alpha.2 的旧指纹不得复用**。
@@ -149,10 +151,10 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 - [ ] 用 tarball 安装（同版本必须 `--force`）：
 
   ```bash
-  dsh plugin --profile web add --force "$PWD/release/dsh-reflex-$V.tgz"
+  dsh plugin --profile web add --force "$PWD/release/miuzel-dsh-reflex-$V.tgz"
   ```
 
-  通过判据：pnpm 安装成功；`dsh plugin` 输出 `+ dsh-reflex file:.../dsh-reflex-0.1.0.tgz`。
+  通过判据：pnpm 安装成功；`dsh plugin` 输出 `+ @miuzel/dsh-reflex 0.1.0`（或等价的 file: 链接）。
 
 - [ ] 组合树里出现插件：
 
@@ -244,7 +246,7 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
   ```bash
   git checkout main
   git merge --no-ff integration/v0.1.0
-  git tag -a v0.1.0 -m "harness-reflex / dsh-reflex v0.1.0"
+  git tag -a v0.1.0 -m "harness-reflex / @miuzel/dsh-reflex v0.1.0"
   git push origin main && git push origin v0.1.0
   ```
 
@@ -263,7 +265,7 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 
   ```bash
   gh release create v0.1.0 -R miuzel/harness-reflex \
-    release/harness-reflex-0.1.0.tgz release/dsh-reflex-0.1.0.tgz release/SHA256SUMS \
+    release/harness-reflex-0.1.0.tgz release/miuzel-dsh-reflex-0.1.0.tgz release/SHA256SUMS \
     --title "v0.1.0" --notes-file docs/release-notes-v0.1.0.md
   diff <(gh release view v0.1.0 -R miuzel/harness-reflex --json body --jq .body) \
        docs/release-notes-v0.1.0.md
@@ -271,7 +273,7 @@ rm -rf "$DSH_HOME" && mkdir -p "$DSH_HOME"
 
   通过判据：release 创建成功；正文与真源逐字一致（仅末尾换行归一化）。
 
-- [ ] registry（仅当 B4/B5 已关闭）：`npm login` → `npm whoami` 打印用户名 → 按负责人决定的包名直发已验 tarball → `npm view <pkg> version` 与 `dist.integrity` 对账。未关闭则**明确记录“本版不发布到 registry”**，不得含糊。
+- [ ] registry（仅当 B4/B5 已关闭，**负责人 gate**）：`npm login` → `npm whoami` 打印用户名 → 发布 `harness-reflex` 与 `@miuzel/dsh-reflex` 的已验 tarball → `npm view <pkg> version` 与 `dist.integrity` 对账。未关闭则**明确记录“本版不发布到 registry”**，不得含糊。
 
 - [ ] awesome-dsh-plugin PR：按手册 §9 提交 `data/plugins/miuzel__harness-reflex.yml` 与重生成的 README；通过判据：PR 模板清单全部勾选，CI（仓库年龄/commits）通过。
 

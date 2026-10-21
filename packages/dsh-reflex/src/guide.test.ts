@@ -96,7 +96,8 @@ test('both guide revisions document the same thirteen sections', () => {
   // of them is incomplete no matter how many headings survive.
   const required = [
     'npm run build:all',
-    'dsh plugin add',
+    'dsh plugin --profile web add',
+    '@miuzel/dsh-reflex',
     'settings.section',
     'client.js',
     'USER_GUIDE.md',

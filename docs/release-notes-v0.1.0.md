@@ -1,7 +1,7 @@
 # Harness Reflex v0.1.0 发布记录（草稿）
 
 > **状态：草稿**。发布日期、产物指纹、最终测试计数在发布树实测后填入；正文以本文件为唯一真源。
-> 版本同步前的基线：`integration/v0.1.0` @ `8758f43`，2026-10-21。
+> 基线：`integration/v0.1.0` @ `9235039` + 本次 0.1.0 改动，2026-10-21。
 
 ## v0.1.0 — 待定（发布日期由负责人确认）
 
@@ -16,28 +16,35 @@
 ### 安装 / 升级
 
 ```bash
-dsh plugin --profile <profile> add --force ./dsh-reflex-0.1.0.tgz
+# 插件（本版包名 @miuzel/dsh-reflex；scoped 包 tarball 命名为 miuzel-dsh-reflex-0.1.0.tgz）
+dsh plugin --profile web add --force ./miuzel-dsh-reflex-0.1.0.tgz
+# 根包（MCP 面）
+npm install ./harness-reflex-0.1.0.tgz
 ```
 
-- 同版本号重装必须 `--force`；
+- **同版本号重装必须 `--force`**；
 - 本版无数据迁移；账本 JSONL 只追加，旧记录可直接读取；
-- 0.1.0 计划通过 **tarball / GitHub Release** 分发；`dsh-reflex` 包名在 npm 已被第三方占用，**除非负责人在发布前解决包名与登录问题，否则本版不发布到 registry**。
+- 0.1.0 计划两个包都发布：根包 `harness-reflex` 与插件 `@miuzel/dsh-reflex`；也可先走 **tarball / GitHub Release**。
+  npm 上未加 scope 的 `dsh-reflex` 已被第三方 `onesmash@0.3.0` 占用，因此插件使用 `@miuzel/dsh-reflex`；
+  发布前仍需负责人本机 `npm view @miuzel/dsh-reflex` 复核并完成 `npm login`。
 
 ### 验证与产物
 
-- **发布产物**（发布时由发布树实测填入，勿沿用 alpha.2 指纹）：
-  - `harness-reflex-0.1.0.tgz`：字节数 `<填>`，entry 数 `<填>`，SHA-256 `<填>`；
-  - `dsh-reflex-0.1.0.tgz`：字节数 `<填>`，entry 数 `<填>`，SHA-256 `<填>`；
-  - `SHA256SUMS` 随 Release 附件发布。
+- **发布产物**（发布树实测；完整 SHA-256 记在 `release/SHA256SUMS` 与 `release/RELEASE-0.1.0.md`）：
+  - `harness-reflex-0.1.0.tgz`：**73 entries**，约 **219 KiB**；根包内含本文档，任何文档编辑都会改变其字节，
+    因此不在正文固化 sha256；
+  - `miuzel-dsh-reflex-0.1.0.tgz`：**102 entries**，约 **578 KiB**；
+  - `SHA256SUMS` 随 Release 附件发布；连续两次打包 sha256 一致。
 - **打包核验**：`scripts/release-pack.mjs` **27/27** 通过（结构审计、零死链、零未声明依赖、根包离线安装、`bin`、具名 import、stdio MCP 8 工具、插件 `apply()` 与检索 API）。
-- **测试**（基线 8758f43）：根包 113 pass / 0 fail；插件 419 pass / 0 fail；负向对照 51/51 注入故障被抓（50 测试 + 1 编译器）。0.1.0 版本同步后以发布树实测为准。
-- **平台真机门禁**：Linux/WSL2 已实测（隔离 `DSH_HOME` + tarball 安装 + web 启动 + `/dsh-reflex/api/health` + `/panel`）；原生 Windows、macOS **本版未验证**。
+- **测试**（本次 0.1.0 工作树）：根包 113 pass / 0 fail；插件 419 pass / 0 fail；负向对照 51/51 注入故障被抓（50 测试 + 1 编译器）；三套 `--noEmit` exit 0。
+- **平台真机门禁**：Linux/WSL2 已实测（隔离 `DSH_HOME` + scoped tarball 安装 + `/dsh-reflex/api/health` 返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}` + `/panel` 可读）；原生 Windows、macOS **本版未验证**。
 - **发布记录**：详见 [`docs/release-checklist-v0.1.0.md`](release-checklist-v0.1.0.md)。
 - **可复现性**：同一构建树连续两次打包 sha256 一致；从 tag 发布树重新构建后需重新记录指纹。
 
 ### 已知限制
 
-- npm 包名 `dsh-reflex` 已被他人占用（`onesmash@0.3.0`），registry 直发需先改名/改 scope；根包名 `harness-reflex` 当前可用。
+- 未加 scope 的 npm 包名 `dsh-reflex` 已被他人占用（`onesmash@0.3.0`），本版改用 `@miuzel/dsh-reflex`；scoped 名可用性与 `npm login` 仍由负责人在发布前复核。
 - 仓库尚未配置 remote、尚未创建公开仓库/tag；商店（awesome-dsh-plugin）未提交。
 - `active` 模式下的 14.5K 剪枝已由自动化测试覆盖，但本轮尚未在真实会话手工复验一次；发布前按清单 §5 补做。
-- 根 `README.md`、插件 `README.md` 与 `docs/dsh-plugin.md` 的旧工具数表述尚未统一（以 `USER_GUIDE.md` §9/§13 与 `docs/dsh-plugin.md` §14 为准）。
+- 根 `README.md`、插件 `README.md`、`docs/dsh-plugin.md`、`USER_GUIDE.md` 及英文版已统一口径：
+  MCP 8 工具 / DSH 5 个可开关（默认 4，`route` 关）/ 剪枝与停滞为自动干预 / 账本用 `/reflex-ledger`。

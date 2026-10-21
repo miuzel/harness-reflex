@@ -1,6 +1,6 @@
-# Harness Reflex User Guide (v0.1.0-alpha.2)
+# Harness Reflex User Guide (v0.1.0)
 
-> This is the complete manual for the **`dsh-reflex` plugin** and the
+> This is the complete manual for the **`@miuzel/dsh-reflex` plugin** and the
 > **`harness-reflex` core package**. The same text is embedded into
 > `packages/dsh-reflex/client.js`, so it can be read directly in the DSH
 > settings panel under the **“Guide”** tab (it follows the DSH interface
@@ -19,16 +19,17 @@ probabilistic judgements — verification gates, context pruning, stagnation
 breaking, model routing and reasoning-effort decisions — and records every
 decision in an auditable ledger.
 
-It ships in two forms with identical capabilities:
+It ships in two forms that share one decision engine but expose **different tool surfaces** (see section 9):
 
 | Form | Package | Harness | Transport |
 | --- | --- | --- | --- |
 | stdio MCP server | `harness-reflex` | Claude Code, Codex CLI, AGY | MCP JSON-RPC child process |
-| DSH Host plugin | `dsh-reflex` | DeepSeek Harness (`dsh`) | In-process `ctx.tools` / Cordis hooks |
+| DSH Host plugin | `@miuzel/dsh-reflex` | DeepSeek Harness (`dsh`) | In-process `ctx.tools` / Cordis hooks |
 
-Both share tool names, main arguments and payloads, so one agent prompt can be
-reused across harnesses. See section 9 and each surface's actual tool definitions
-for argument and validation boundaries.
+The MCP surface exposes eight tools; the DSH surface registers five switchable
+tools (four by default), while pruning, stagnation detection and the ledger are
+carried by automatic interventions and the `/reflex-ledger` command. See section 9
+and each surface's actual tool definitions for argument and validation boundaries.
 
 ---
 
@@ -41,9 +42,9 @@ for argument and validation boundaries.
 └───────────────┬──────────────────────────────────┬───────────────────┘
                 │ stdio MCP                        │ in-process DSH Cordis
 ┌───────────────▼──────────────────┐  ┌────────────▼───────────────────┐
-│ harness-reflex core (dist/)      │  │ dsh-reflex plugin              │
+│ harness-reflex core (dist/)      │  │ @miuzel/dsh-reflex plugin      │
 │  gate · prune · stagnation       │◄─┤  src/bridge.ts  ReflexRuntime  │
-│  route · screen · score          │  │  src/tools.ts   8 reflex_*     │
+│  route · screen · score          │  │  src/tools.ts   5 switchable    │
 │  ledger · calibrate              │  │  src/router.ts  virtual provider│
 └───────────────┬──────────────────┘  │  src/effort.ts  effort intercept│
                 │ DecisionBackend     │  src/panel-*    settings + API  │
@@ -62,13 +63,13 @@ Key modules of the plugin:
 | --- | --- |
 | `src/index.ts` | Cordis entry `apply(ctx, config)`; install and teardown inside one `ctx.effect` |
 | `src/bridge.ts` | `ReflexRuntime`: backend / ledger / calibrator / decision services of one activation |
-| `src/tools.ts` | The eight `reflex_*` tools (Host `defineTool` validation plus an undeclared-argument fence) |
+| `src/tools.ts` | The five switchable `reflex_*` tools, four registered by default (Host `defineTool` validation plus an undeclared-argument fence) |
 | `src/router.ts` | `VirtualModelRouter`: candidate pool → System 1 decision → fallback / fail-closed → audit |
 | `src/virtual-adapter.ts` | `LlmAdapter` surface of the virtual provider plus a dispatch-layer safety net |
 | `src/routing.ts` | `installModelRouting`: registers the virtual provider, hooks `agent/pre-step` and `agent/request` |
 | `src/effort.ts` | `EffortInterceptor`: per-turn reasoning-effort decision, projection and status reporting |
 | `src/session-audit.ts` | Writes/reads `plugin:dsh-reflex/effort` session records without polluting model context |
-| `src/panel-api.ts` | Read-only panel projection and the `/api/dsh-reflex/*` routes (loopback only) |
+| `src/panel-api.ts` | Read-only panel projection and the `/dsh-reflex/api/*` routes (loopback only) |
 | `src/client/*` | Browser half: slot registration, zh/en copy, Markdown renderer, panel views |
 
 Activation order: DSH loads the plugin → `apply` resolves the configuration →
@@ -90,7 +91,8 @@ npm run build:all
 node dist/cli/index.js setup all      # or claude | codex | agy
 
 # 3) install as a DSH plugin (in-process integration, recommended)
-dsh plugin add ./packages/dsh-reflex
+#    release tarball: --force is required to reinstall the same version
+dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
 ```
 
 Every step of `npm run build:all` is required:
@@ -136,9 +138,9 @@ Plugin options (editable on the “System 1 backend” page, or in the DSH plugi
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `backend` | `auto` | `auto` derives from the environment; may be pinned to `mock` / `simple-jev` / `jev` |
+| `backend` | `auto` | `auto` derives from the environment; may be pinned to `mock` / `vllm` / `jev` (`vllm` is the logits read-out; the env name is `simple-jev`) |
 | `baseUrl` | unset | System 1 endpoint; unset uses the backend default |
-| `model` | unset | Server-side model id (required by `simple-jev`) |
+| `model` | unset | Server-side model id (required by `vllm` / `simple-jev`) |
 | `apiKeyEnv` | `SYSTEM_ONE_API_KEY` | Stores the **variable name only**; the secret never enters the settings document |
 | `timeoutMs` | `2000` | Per-decision timeout; a timeout follows the “System 1 unavailable” degradation path |
 
@@ -238,7 +240,7 @@ intent and context before each real API request, asks System 1 for the
 | --- | --- | --- |
 | `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; unset = never intervene, the plugin never touches `reasoningEffort`; a concrete level is chosen in the model selector, and the offered levels follow what the target model declares |
 | `effort.fallback` | `medium` | Deterministic cue vote used when System 1 is unavailable or below the confidence floor |
-| `effort.minConfidence` | `0.55` | Decisions below this confidence go to the fallback instead |
+| `effort.minConfidence` | `0.3` | Decisions below this confidence go to the fallback instead |
 | `effort.enabled` | `true` | `false` turns the whole layer off: no judgment, no audit, no injected `reflex` level |
 
 Configuration answers exactly one question: **should adaptive effort run at all?**
@@ -369,7 +371,7 @@ the documented default and needs no extra configuration.
 Retrieval is a read of the session events under that locator:
 
 ```ts
-import { readPrunedOriginal } from 'dsh-reflex';
+import { readPrunedOriginal } from '@miuzel/dsh-reflex';
 
 const record = readPrunedOriginal(session.ownEvents(), locator);
 record?.text;    // the original, byte for byte
@@ -452,7 +454,7 @@ The plugin declares its browser half through `dsh.client` and registers into the
   `pruneThreshold` and `calibrationPath`).
 - When the Host settings document is read-only the page becomes read-only and
   every write control is disabled.
-- Panel routes under `/api/dsh-reflex/*` accept loopback clients only, and
+- Panel routes under `/dsh-reflex/api/*` (`panel` / `health` / `ledger/clear`) accept loopback clients only, and
   clearing the ledger requires an explicit confirmation.
 
 ### What each group writes back
@@ -533,7 +535,7 @@ the **eight tools frozen since v0.1.0**, while the DSH plugin side registers
 by the automatic intervention layer and by one command instead of occupying the
 model's tool list.
 
-| Capability | MCP tool name (`harness-reflex mcp`) | DSH plugin side (`dsh-reflex`) | Main arguments | Advice |
+| Capability | MCP tool name (`harness-reflex mcp`) | DSH plugin side (`@miuzel/dsh-reflex`) | Main arguments | Advice |
 | --- | --- | --- | --- | --- |
 | Multi-option classification | `reflex_choice` | tool `reflex_choice` | `question`, `options[]`, optional `context` | Suggested for the agent |
 | Continuous rating | `reflex_score` | tool `reflex_score` | `statement`, optional `criteria`, `context` | Suggested for the agent |
@@ -628,7 +630,7 @@ Release artifacts (`release/`):
 | Artifact | Content |
 | --- | --- |
 | `harness-reflex-<version>.tgz` | Root package: `dist/`, `README.md`, `docs/`, `USER_GUIDE.md`, `experiments/` |
-| `dsh-reflex-<version>.tgz` | Plugin: `dist/`, `client.js` (with this manual embedded), `cordis.patch.yml`, `locale/` |
+| `miuzel-dsh-reflex-<version>.tgz` | Plugin `@miuzel/dsh-reflex` (scoped-package naming): `dist/`, `client.js` (with this manual embedded), `cordis.patch.yml`, `locale/` |
 | `SHA256SUMS` | SHA-256 checksums of the two tarballs |
 | `release-report.json` | The per-check packaging audit (entries, dead links, dependency declarations, install smoke) |
 | `RELEASE-<version>.md` | Release notes: install commands, verification checklist, contents |
@@ -646,7 +648,7 @@ stdio MCP `tools/list` for real.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| No “Reflex runtime” entry in settings | The Host half is not loaded or registered no configuration namespace; re-check `dsh plugin add` and reload `dsh` |
+| No “Reflex runtime” entry in settings | The Host half is not loaded or registered no configuration namespace; re-check `dsh plugin --profile web add` and reload `dsh` |
 | The panel is read-only | The DSH settings document is not writable; disabled writes are expected in that mode |
 | A virtual model errors instead of dispatching | The pool is empty and `routing.fallback` is unset; add candidates or a fallback target |
 | Text is not routed as expected | Check `routing.enabled`, the virtual model id spelling, and whether the agent actually requested that virtual model |
@@ -664,13 +666,13 @@ stdio MCP `tools/list` for real.
 
 ## 13. Version and compatibility
 
-- Version: `harness-reflex` and `dsh-reflex` ship together at v0.1.0-alpha.2;
+- Version: `harness-reflex` and `@miuzel/dsh-reflex` ship together at v0.1.0;
 - Node: `>= 18` (root package `engines`); DSH Host dependencies `@deepseek-ai/*@0.2.1-alpha.4`;
 - Host contracts are declared as `peerDependencies`, so the plugin never bundles
   a second copy of Host modules;
 - The eight-tool stdio MCP surface has been frozen since v0.1.0; a Host-side
   change must not silently alter its payloads;
-- The DSH plugin-side tool surface, since v0.1.0-alpha.2, is **five switchable
+- The DSH plugin-side tool surface, since v0.1.0, is **five switchable
   capabilities with four registered by default** (`route` is off by default) and
   the ledger is the `/reflex-ledger` command — that side does not promise to
   mirror the MCP side item by item.

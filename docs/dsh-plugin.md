@@ -1,14 +1,21 @@
-# DSH Host 插件：`dsh-reflex` 工程说明
+# DSH Host 插件：`@miuzel/dsh-reflex` 工程说明
 
 > 本文记录「把 Harness Reflex 的 System One 能力以 DSH Cordis Host 插件形式集成」这一目标的实现方式、
 > 验收对照与验证证据。插件源码在 [`packages/dsh-reflex/`](../packages/dsh-reflex/)。
+>
+> **现行口径（0.1.0）**：npm 包名 `@miuzel/dsh-reflex`（Cordis 插件 id 仍是 `dsh-reflex`）
+> - MCP 面（根包 stdio server）：**8 个工具**，含 `reflex_prune`/`reflex_detect_stagnation`/`reflex_status_ledger`
+> - DSH 面（本插件）：**5 个可开关工具**（默认 4 个，`route` 关）；剪枝/停滞/收尾是自动干预；账本用 `/reflex-ledger`
+> - 面板与 API：`/dsh-reflex/api/*` 与 `data-reflex-*` 不随包名变化
+>
+> 下文 g-001…g-013 的验收表是各自交付时点的历史记录；与现行口径冲突处，以本节与 §14 为准。
 
 ## 1. 交付形态
 
-- 新增 workspace 包 **`dsh-reflex`**（`packages/dsh-reflex/`），TS 源码 + 插件元数据入库，`dist/` 为构建产物。
+- 新增 workspace 包 **`@miuzel/dsh-reflex`**（`packages/dsh-reflex/`），TS 源码 + 插件元数据入库，`dist/` 为构建产物。
 - 仓库根包 `harness-reflex` 对插件暴露一个新增的共享投影模块 `src/core/score.ts`，并让 ledger 支持
   「纯内存」模式（`new DecisionLedger(null)`），使 Host 内嵌场景不写用户项目。
-- 不改动 `main` 上已发布的对外 MCP 行为；8 个 `reflex_*` 工具的 stdio MCP 表面保持原样。
+- 不改动已发布的对外 MCP 行为；stdio MCP 仍是 8 个 `reflex_*` 工具；DSH 面是 5 个可开关工具（默认 4 个）。
 - 新增**虚拟 Provider 与基于 System 1 的动态模型路由**：插件可注册一个虚拟 provider（默认 `reflex`），
   把 `reflex-auto` / `reflex-fast` 这类虚拟模型按其物理候选池用 System 1 毫秒级映射到真实
   provider/model（主代理与 subagent 都走同一条链路），每条决策写入台账 `type:'model-route'`。
@@ -38,19 +45,20 @@
 
 | 判据 | 实现 | 证据 |
 | --- | --- | --- |
-| ① 符合 DSH Cordis Host 插件规范 | `package.json`（`name: dsh-reflex`、`exports`、`dsh.bundle.patch`、peerDependencies）→ [`packages/dsh-reflex/package.json`](../packages/dsh-reflex/package.json)；`cordis.patch.yml` 经 YAML 解析得 `[{insert:[{id:reflex,name:dsh-reflex}]}]`；`locale/{zh,en}.json` 均含 `meta.title/description`；`src/index.ts` 导出 `name`/`inject = ['tools', 'llm']`/`Config`/`apply(ctx, config)` | `plugin module satisfies the Cordis Host plugin contract`、`Config is a schemastery schema that carries the deployment defaults`；`node -e "yaml.parse(...)"` 校验通过 |
-| ② 8 个原生工具注入 + 严格参数校验 + 可调用 | `src/tools.ts` 用 `defineTool` 声明 8 个工具（必填/类型/枚举/嵌套 `additionalProperties: false`），并补一道顶层未声明参数拦截；`src/bridge.ts` 的 `ReflexRuntime` 提供全部实现 | `apply registers every tool with a model-visible description`、`the eight reflexive capabilities use the MCP-compatible names`、8 个工具各自的行为测试、`every tool rejects undeclared, missing, mistyped, and out-of-enum arguments`（18 个反例 + 1 个成功对照） |
-| ③ 生命周期完全可逆 | 注册/观察/释放收在单个 `ctx.effect`：卸载时摘除 `tools/change` 观察者 → 逆序注销 8 个工具 → `runtime.dispose()`（幂等、内存台账清空） | `disposing the context unregisters every tool and disposes the runtime`、`unloading the plugin fiber releases tools, the observer, and the runtime`、`the runtime a Host receives is disposable exactly once and fully`、`a second activation after a full unload rebuilds a working surface`、`two activations on one context own disjoint surfaces and release in any order` |
-| ④ `npm run build` 成功 + 新旧测试全绿 | 根包脚本新增 `build:all` / `test:plugin` / `test:all` / `test:mutation`；`scripts/link-dsh-deps.mjs` 负责离线依赖链接 | `npm run build:all` exit 0；`npm test` = 26/26；`npm run test:plugin` = 186/186；`npm run test:mutation` = 32/32 故障被抓（31 测试 + 1 编译器） |
-| 命名规范（`dsh-` 前缀） | 包名 `dsh-reflex`，patch `name: 'dsh-reflex'`，无 `dsh-plugin-` 残留 | `grep -rn "dsh-plugin" packages/ src/ scripts/` 无包名残留（仅文档路径命中） |
+| ① 符合 DSH Cordis Host 插件规范 | `package.json`（`name: @miuzel/dsh-reflex`、`exports`、`dsh.bundle.patch`、peerDependencies）→ [`packages/dsh-reflex/package.json`](../packages/dsh-reflex/package.json)；`cordis.patch.yml` 经 YAML 解析得 `[{insert:[{id:dsh-reflex,name:'@miuzel/dsh-reflex'}]}]`；`locale/{zh,en}.json` 均含 `meta.title/description`；`src/index.ts` 导出 `name`/`inject = ['tools', 'llm', 'commands']`/`Config`/`apply(ctx, config)` | `plugin module satisfies the Cordis Host plugin contract`、`Config is a schemastery schema that carries the deployment defaults`；`node -e "yaml.parse(...)"` 校验通过 |
+| ② 原生工具注入 + 严格参数校验 + 可调用 | `src/tools.ts` 用 `defineTool` 声明 **5 个可开关工具**（默认 4 个，`route` 关；必填/类型/枚举/嵌套 `additionalProperties: false`），并补一道顶层未声明参数拦截；`src/bridge.ts` 的 `ReflexRuntime` 提供全部实现；prune/stagnation 由 `src/interventions.ts` 自动执行 | `apply registers every enabled tool with a model-visible description`、5 个能力各自的行为测试、`every tool rejects undeclared, missing, mistyped, and out-of-enum arguments`（18 个反例 + 1 个成功对照） |
+| ③ 生命周期完全可逆 | 注册/观察/释放收在单个 `ctx.effect`：卸载时摘除 `tools/change` 观察者 → 逆序注销已注册工具（默认 4、最多 5）→ `/reflex-ledger` 注销 → `runtime.dispose()`（幂等、内存台账清空） | `disposing the context unregisters every tool and disposes the runtime`、`unloading the plugin fiber releases tools, the observer, and the runtime`、`the runtime a Host receives is disposable exactly once and fully`、`a second activation after a full unload rebuilds a working surface`、`two activations on one context own disjoint surfaces and release in any order` |
+| ④ `npm run build` 成功 + 新旧测试全绿 | 根包脚本新增 `build:all` / `test:plugin` / `test:all` / `test:mutation`；`scripts/link-dsh-deps.mjs` 负责离线依赖链接 | `npm run build:all` exit 0；`npm test` = 113/113；`npm run test:plugin` = 419/419；`npm run test:mutation` = 51/51 故障被抓（50 测试 + 1 编译器）；`npm run release:pack` = 27/27 |
+| 包名与路由稳定 | npm 包名 `@miuzel/dsh-reflex`；Cordis id `dsh-reflex`；patch `name: '@miuzel/dsh-reflex'`；`/dsh-reflex/api/*` 与 `data-reflex-*` 不变 | `grep -rn "@miuzel/dsh-reflex" packages/dsh-reflex/package.json packages/dsh-reflex/cordis.patch.yml`；路由测试断言旧路径仍通过 |
 
 ## 3. 架构
 
 ```
 DSH Host (cordis)
-  └─ ctx.plugin(dsh-reflex, config)
+  └─ ctx.plugin(@miuzel/dsh-reflex, config)
        └─ apply(ctx, config) ── ctx.effect(build → cleanup)
-            ├─ defineReflexTools(runtime, config) → 8 × ctx.tools.register(defineTool(...))
+            ├─ defineReflexTools(runtime, config) → 5 × ctx.tools.register(defineTool(...))（默认 4，route 关）
+            ├─ installInterventions(...) → prune / stagnation / gate / closing 自动钩子（不是工具）
             ├─ ctx.on('tools/change') → runtime.noteToolSurface(存活工具)
             ├─ installModelRouting(ctx, runtime)        # 需要 ctx.llm；候选池缺失时只装拦截层
             │    ├─ ctx.llm.registerAdapter(['reflex'], ReflexVirtualAdapter)  # 仅配置了候选池时
@@ -113,18 +121,19 @@ agent/request ─ next() 得到调用配置 → 路由决策（若配置了候�
 
 ```
 DSH Web GUI (loader)
-  └─ window.__ModuleLoader__.load({ id:'dsh-reflex', factory }) ── client.js（构建产物，5 模块内联）
+  └─ window.__ModuleLoader__.load({ id:'@miuzel/dsh-reflex', factory }) ── client.js（构建产物，模块内联）
+       # id 由 package.json name 派生：DSH loader 按包名注册并校验
        ├─ exports.inject = ['slots','locale']
        ├─ ctx.locale.register('dsh-reflex.panel', {zh, en})            # 面板文案（跟随 Host 语言）
        └─ ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'reflex',
             order:55, label: t('title') }, PanelComponent))
             └─ PanelComponent ── src/client/{view,store,panel}.ts
-                 ├─ PanelStore：fetch('/api/dsh-reflex/panel') 轮询 4000ms → 快照
+                 ├─ PanelStore：fetch('/dsh-reflex/api/panel') 轮询 4000ms → 快照
                  ├─ ctx.configForms.whileServed(['dsh-reflex','reflex'], …) → form.getSnapshot()/mutate(ops, revision)
                  └─ 5 个 tab：概览 / 虚拟 Provider / 推理强度 / System 1 后端 / 决策账本
 ```
 
-数据流（面板）：浏览器 `GET /api/dsh-reflex/panel?limit=N` → Host `panel-api.answerPanelRequest`
+数据流（面板）：浏览器 `GET /dsh-reflex/api/panel?limit=N` → Host `panel-api.answerPanelRequest`
 （loopback 边界 → `source.snapshot(limit)`）→ `panel-mount.panelFacts(runtime)` 现场读 `ReflexRuntime`
 （路由池、effort 设置、ledger 尾部与汇总、System 1 连接块，**只带 api key 的「是否存在」**）→ JSON 回包。
 写配置走官方 `configForms`（不经过本插件的路由）；清空账本走 `POST …/ledger/clear?confirm=clear`。
@@ -221,7 +230,7 @@ DSH Web GUI (loader)
     （`['react']`），`verifyClientPackage` 会核对。选 `react` 是刻意的：它是 GUI 自身的 seed，**零新增重量级依赖**。
 25. **走「设置页 + 自己拥有的 loopback 路由」，而不是依赖 `dsh-settings` 的 REST 面**：面板需要的是**实时**
     运行时事实（内存台账、当前路由池、本轮 effort 决策），这些只存在于插件进程内。因此 Host 半边
-    （`src/panel-api.ts` + `src/panel-mount.ts`）用 `ctx.webServer.register` 挂 `/api/dsh-reflex/{panel,health,ledger/clear}`，
+    （`src/panel-api.ts` + `src/panel-mount.ts`）用 `ctx.webServer.register` 挂 `/dsh-reflex/api/{panel,health,ledger/clear}`，
     浏览器半边 `fetch` 它。好处：不把 `dsh-client-ui-settings`/`dsh-settings` 拉成运行时依赖；坏处：多一个
     HTTP 面，所以它**默认只答 loopback**，且清空台账需要显式 `?confirm=clear`。
 26. **写配置仍走官方通道**：编辑配置不用上面的路由，而是 `ctx.configForms.whileServed(NS_CANDIDATES, …)` +
@@ -283,11 +292,13 @@ DSH Web GUI (loader)
 ```bash
 npm run build:all      # 根包 tsc → 链接 DSH 依赖 → 插件 tsc → 生成内嵌文档 → 客户端 tsc + 打包  exit 0
                        #   末步产出 packages/dsh-reflex/client.js
-                       #   (172049 bytes, 8 modules, externals: react)
-npm test               # 根包测试：tests 58  pass 58  fail 0
-npm run test:plugin    # 插件测试：tests 219 pass 219 fail 0
-npm run test:mutation  # 负向对照：32/32 注入故障被抓（31 由测试、1 由编译器）
-npm run release:pack   # 打包 release/：26/26 核验通过，两份 tarball + SHA256SUMS + 报告
+                       #   (295019 bytes, 9 modules, externals: react)
+npm test               # 根包测试：tests 113 pass 113 fail 0
+npm run test:plugin    # 插件测试：tests 419 pass 419 fail 0
+npm run test:mutation  # 负向对照：51/51 注入故障被抓（50 由测试、1 由编译器）
+npm run release:pack   # 打包 release/：27/27 核验通过，两份 tarball + SHA256SUMS + 报告
+                       #   harness-reflex-0.1.0.tgz (73 entries, 218 KiB)
+                       #   miuzel-dsh-reflex-0.1.0.tgz (102 entries, 578 KiB)
 ```
 
 `client.js` 是**入库的构建产物**（`files` 白名单包含它），因此「改客户端源码 → 重新打包」是发布步骤的一部分；
@@ -311,7 +322,7 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 
 | 注入故障 | 命中面 | 结果 |
 | --- | --- | --- |
-| `drop-tool-at-registration` | 8 个工具齐全 | CAUGHT-BY-TESTS |
+| `drop-tool-at-registration` | 默认 4 个工具齐全（route 关） | CAUGHT-BY-TESTS |
 | `drop-tool-from-suffix-list` | 工具名清单完整 | CAUGHT-BY-BUILD（联合类型收窄） |
 | `no-teardown` | 生命周期可逆 | CAUGHT-BY-TESTS |
 | `no-root-argument-check` | 严格参数校验 | CAUGHT-BY-TESTS |
@@ -372,17 +383,19 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 - **进程内所有权 WeakMap**：同一 `LlmRuntime` 上首个激活拥有虚拟路由；若该激活被卸载，路由会释放，
   其余激活的路由拦截仍在但没有虚拟 provider（会在下一次请求时表现为 provider 不存在）。
 
-- **未发布到 npm**：插件的 `harness-reflex` 依赖是 `file:../..`，干净 checkout 上 `dsh plugin add` 前需先
-  `npm run build:all`；真正的独立安装取决于 Host 的解析/发布策略（本目标范围内不做）。
+- **npm 发布仍是人工 gate**：0.1.0 的两个包都已具备打包条件（根包 `harness-reflex`、插件 `@miuzel/dsh-reflex`），
+  但 `npm login` / `npm publish` / tag / 商店上架由负责人执行；本仓库只提供可安装的 tarball。
 - **跨表面一致性**：`reflex_score` 在两套测试里各自与同一投影函数 `scoreStatement` 做深比较（等价于
-  「MCP 表面 = 插件表面 = core」）；其余 7 个工具在两个表面分别有行为测试，但未逐字段比对两条链路，
-  后续如需强一致可复用同一断言模式。
+  「MCP 表面 = 插件表面 = core」）；`choice`/`screen`/`gate` 与可选的 `route` 在两套表面分别有行为测试，
+  但未逐字段比对两条链路；`prune`/`detect_stagnation`/`status_ledger` 只存在于 MCP 面，不做跨表面对齐。
 - **`auto` backend 依赖环境变量**：无任何环境变量时落到离线 mock（确定性、无网络）；`jev`/`vllm` 需要
   API key / base url，否则调用期报错（属既有 backend 行为）。
-- **未在真实 `dsh` 进程里加载**：验证覆盖到 Cordis 装载路径（`ctx.plugin(name/inject/Config/apply)` +
-  真实 `SystemPrompt`/`ToolRuntime` 服务），未执行 `dsh plugin add` 的 CLI 安装流程。
-- **未提交到 `main`**：`main` 是已发布分支，本次改动以工作区文件形式落地（未 commit、未建分支），
-  是否落分支/提交由负责人决定。
+- **真实 `dsh` 冒烟（0.1.0）**：隔离 `DSH_HOME` 下 `dsh plugin --profile web add --force <tarball>` 成功，
+  `--dump-config` 出现 `id: dsh-reflex / name: '@miuzel/dsh-reflex'`，`/dsh-reflex/api/health` 返回
+  `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`，`/panel` 可读且 `tools.active` 为默认 4 个；
+  `/reflex-ledger` 由 `command.test.ts` 覆盖（headless 入口不能执行斜杠命令）。
+- **历史分支状态**：本目标当时以工作区文件形式落地；0.1.0 工作已在 `integration/v0.1.0` 上提交，
+  `main` 仍为只读发布分支，合并由负责人执行。
 
 设置面板（g-004）追加的边界：
 
@@ -400,7 +413,7 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 - **`client.js` 的 externals 只允许 `react`**：想再引入任何平台能力（如 `zod`、`@deepseek-ai/cordis`），
   必须同时在 `src/client-bundle.ts` 的 `ALLOWED_SEEDS`、`dsh.client.external` 与 TS 侧声明三处落地，
   否则契约测试会报「说明符与声明不一致」。
-- **清空台账是不可撤销的**：`POST /api/dsh-reflex/ledger/clear?confirm=clear` 会删除落盘的 JSONL
+- **清空台账是不可撤销的**：`POST /dsh-reflex/api/ledger/clear?confirm=clear` 会删除落盘的 JSONL
   （页面用「再点一次确认」二次确认）。这是刻意的显式操作，但一旦点下去没有撤销路径。
 - **只在 loopback 上可用**：面板路由默认拒绝非本机 socket（除非 Host 提供了配对服务）。远程 GUI
   场景下页面会显示请求失败（403），需要在 Host 侧接入配对/反向代理。
@@ -517,11 +530,11 @@ g-006（路由上下文感知与会话粘性）增量：
 
 | 判据 | 实现 | 证据 |
 | --- | --- | --- |
-| ① 详尽使用说明（插件架构 / 虚拟 Provider 模型池 / 自适应思考等级 / System 1 后端 / MCP↔原生工具对照） | [`USER_GUIDE.md`](../USER_GUIDE.md)（中文，12 节）与 [`docs/USER_GUIDE.en.md`](./USER_GUIDE.en.md)（English，同构 12 节）：架构图、安装与构建、`SYSTEM_ONE_BACKEND` 接入、虚拟 Provider 与模型池配置、`reflex`/`auto` 思考等级、设置面板说明、8 个 `reflex_*` 工具与 MCP 对照表、决策账本、测试与发布、FAQ、版本兼容 | `guide.test.ts`：两份文档摘要与产物一致、节号齐全、各自包含 `npm run build:all` / `dsh plugin add` / `settings.section` / `client.js` / `SYSTEM_ONE_BACKEND` / `virtualProvider` / `reasoningEffort` / `reflex-auto` 与 8 个工具名；两份文档都能被渲染器解析出 ≥13 个标题、≥3 张表（无空/错位单元格）、≥6 个带语言标注的代码块 |
+| ① 详尽使用说明（插件架构 / 虚拟 Provider 模型池 / 自适应思考等级 / System 1 后端 / MCP↔原生工具对照） | [`USER_GUIDE.md`](../USER_GUIDE.md)（中文，13 节）与 [`docs/USER_GUIDE.en.md`](./USER_GUIDE.en.md)（English，同构 13 节）：架构图、安装与构建、`SYSTEM_ONE_BACKEND` 接入、虚拟 Provider 与模型池配置、`reflex`/`auto` 思考等级、设置面板说明、MCP 8 工具 ↔ DSH 5 可开关能力对照表、决策账本、测试与发布、FAQ、版本兼容 | `guide.test.ts`：两份文档摘要与产物一致、节号齐全、各自包含 `npm run build:all` / `dsh plugin --profile web add` / `settings.section` / `client.js` / `SYSTEM_ONE_BACKEND` / `virtualProvider` / `reasoningEffort` / `reflex-auto` 与 8 个工具名；两份文档都能被渲染器解析出 ≥13 个标题、≥3 张表（无空/错位单元格）、≥6 个带语言标注的代码块 |
 | ② 设置页 UI 内可查看说明（独立 Tab + 中英双语） | `src/client/store.ts` 的 `PANEL_TABS` 增加 `'guide'`；`src/client/view.ts` 的 `GuideTab` 渲染标题/导语/来源摘要 + `renderMarkdown(t('guideBody'))`；`locale.ts` zh `使用说明` / en `Guide`，正文随 Host 语言切换 | `client-page.test.ts`：`the guide page renders the shipped user guide inside the panel`（探针 `Harness Reflex 使用说明`、`1. Harness Reflex 是什么`、`虚拟 Provider 与模型池`、`npm run build:all`、`reflex_detect_stagnation`，并断言渲染出 h1/h2/table/pre/li 与 `/文档来源 USER_GUIDE\.md · 摘要 [0-9a-f]{12}/`）、`the guide page follows the Host language`（en 界面读英文文档）、tab 文案断言包含 `使用说明` / `Guide` |
 | ③ 文档与查看功能在构建/打包产物中完整生效 | `build:plugin-client` 与插件 `build:client` 都先跑 `scripts/embed-user-guide.mjs`；`client.js` 内联两份文档与摘要；根包 `files` 白名单新增 `USER_GUIDE.md`（`docs/**/*.md` 已覆盖英文版） | `npm run build:all` exit 0（`client-bundle: wrote …/client.js (172049 bytes, 8 modules, externals: react)`）；`npm run release:pack`：`plugin: the shipped guide is the repository revision`、`root: the shipped guide is the repository revision`（比对 release tarball 内文档与仓库文档的 sha256）、`plugin: the browser half is one self-contained artifact` |
-| ④ 补齐相关自动化测试 | 新增 `packages/dsh-reflex/src/guide.test.ts`（5 条）、扩展 `client-page.test.ts`（+2 条）、新增根包 `src/release-packaging.test.ts`（6 条打包清单测试） | `npm run test:plugin` = 209/209；`npm test` = 58/58；`the plugin manifest ships the browser half and the guide it renders`、`the plugin declares every host package its build imports`、`the root files allow-list ships the release promises and nothing else` |
-| ⑤ 最终集成验收与 release tarball | `scripts/release-pack.mjs`：真实 `npm pack` 两份包 → 解压核验（必需文件 / 禁运测试产物与临时目录 / 无本地绝对路径 / 零死链 / 零未声明运行时依赖 / bin 可执行位）→ 根包离线 `npm install` 冒烟（`bin --help`、具名 import、stdio MCP `tools/list` 八个工具）→ 插件按发布形态解压后 `import` 冒烟 → `SHA256SUMS` + `release-report.json` + `RELEASE-<version>.md` | `npm run release:pack` 26/26 通过：`release/harness-reflex-0.1.0-alpha.2.tgz`（68 entries）、`release/dsh-reflex-0.1.0-alpha.2.tgz`（90 entries）；`the packed tarball can resolve its runtime dependency by name`（`harness-reflex` 声明为 `^0.1.0-alpha.2` 可发布范围）；`a packed release directory is internally consistent`（重算 SHA256SUMS） |
+| ④ 补齐相关自动化测试 | 新增 `packages/dsh-reflex/src/guide.test.ts`（5 条）、扩展 `client-page.test.ts`（+2 条）、新增根包 `src/release-packaging.test.ts`（6 条打包清单测试） | `npm run test:plugin` = 419/419；`npm test` = 113/113；`the plugin manifest ships the browser half and the guide it renders`、`the plugin declares every host package its build imports`、`the root files allow-list ships the release promises and nothing else` |
+| ⑤ 最终集成验收与 release tarball | `scripts/release-pack.mjs`：真实 `npm pack` 两份包 → 解压核验（必需文件 / 禁运测试产物与临时目录 / 无本地绝对路径 / 零死链 / 零未声明运行时依赖 / bin 可执行位）→ 根包离线 `npm install` 冒烟（`bin --help`、具名 import、stdio MCP `tools/list` 八个工具）→ 插件按 scoped 包名解压后 `import` 冒烟 → `SHA256SUMS` + `release-report.json` + `RELEASE-<version>.md` | `npm run release:pack` 27/27 通过：`release/harness-reflex-0.1.0.tgz`（73 entries）、`release/miuzel-dsh-reflex-0.1.0.tgz`（102 entries）；`smoke: the extracted plugin resolves and exposes apply()`；`a packed release directory is internally consistent`（重算 SHA256SUMS） |
 
 ## 12. 路由上下文感知与会话粘性验收对照（g-006）
 
@@ -543,12 +556,13 @@ g-006（路由上下文感知与会话粘性）增量：
 | S2 虚拟路由下不再逐步注入 `[model changed: …; the session continues with reflex/*]` | `src/routing.ts`：`isVirtualModelSwitchNotice`（认 `<from> → <to>` 摘要、`continues with <to>` 正文、`reflex/…` 前缀、池内模型名）与 `filterVirtualSwitchNotices`（不改原对象、无命中时返回同一引用）；`ensureVirtualSwitchFilter` 在该 agent 自己的 ctx 上以 `prepend` 后注册，成为 `installModelSelection` 通知层的**外层**包装，因此能删掉已追加的假通知；仅针对虚拟目标，物理↔物理切换通知保留 | `virtual-switch-notice.test.ts`（4 条）：认领矩阵（含 `form:'selection'`、纯文本引用、无目标一律拒收）、单次决策过滤（仅假通知被删、物理通知逐字保留、入参不被改动、无命中返回同一引用）、真实 waterfall 集成（第 1 步仍播报一次 → 第 2 步起为 0、任务文本存活、物理通知仍送达、安装后覆盖后续所有步）、无 `agent.ctx` 的 agent 不被打断（通知原样通过而非抛错） |
 | S3 + P9 先定目标模型、读其声明档位、**在声明集合内**自适应，不常态化 `snapped`；纯逐字复述深度关键词须判 `off`/`low` | `src/effort.ts`：#decideTurn 对逐字复述轮次**先短路**（不咨询 System 1，理由写进台账）、`#askSystemOne` 在置信度地板之后追加「必须超过 `1/候选数` 均分基线」的否决、`buildEffortChoiceOptions(efforts?)` 按目标模型声明的档位收敛候选（邻居吸附）、`VERBATIM_INSTRUCTION` 扩到 `原样发给我/原样发给/原样输出/原文照抄/照抄` | `effort-model-levels.test.ts`：中文深度轮次读 System 1 词汇（`source==='system-one'`、`confidence > 1/3`、`high`）而非坍缩到首候选；「只与均分持平」的答案在任何候选数下都不被信任（GPT/FULL/DEEPSEEK → `cue-fallback`，reason 命中 `/floor|baseline/`；对照组 0.5 → `system-one` + `low`）；简报点名的每种复述措辞都保住低成本档（`cleaned.verbatim === true`，`off|low`，`outcome 'supported'`） |
 | S4 有思考能力的物理模型与虚拟模型都在模型选择器里提供 `reflex` 自适应档；无思考能力模型不显示；固定物理模型只调档位不改路由；策略跨切换/恢复保持且不覆盖显式档位 | `src/routing.ts` 的 `installAdaptiveEffortSurface` 包装 `resolveModelInfo`（只在**已声明 reasoning** 的模型前面插入 `{id:'reflex', name:'Reflex (Auto)'}`，`defaultEffort` 保持适配器原值）、`resolveCallConfig`/`prepareCall`（把标记还原成目标模型声明集合内的档位）；`src/virtual-adapter.ts` 的虚拟模型声明 `reflex` 选择且**不带** `defaultEffort`（带上的话会打断 `markAgentLoopRequest` 的请求同一性）；`model/selection` 回放：日志里是 `reflex` 则重新武装自适应，是具体等级则解除 | `adaptive-effort-surface.test.ts`（7 条）：思考路由首位是 `Reflex (Auto)` 且既有档位与默认值存活、无 reasoning 的路由完全不出现档位、未激活时不发明 `reasoningEffort`、显式物理选择不被改写、`prepareCall` 后请求同一性保持 |
-| 接口一致性 / 版本 / 序列化 / 打包 / 真机 | `reflex_detect_stagnation` 增加可选 `history`（`MAX_HISTORY=30`，`mergeHistory`）；版本 `0.1.0-alpha.2`；DeepSeek/GPT 序列化载荷结构化验证；四套命令全绿；`release/` 只留 alpha.2 产物 | `npm run build:all` exit 0（`client.js (172049 bytes, 8 modules, externals: react)`）；`npm test` = 58/58；`npm run test:plugin` = 219/219；`npm run release:pack` = 26/26（`harness-reflex-0.1.0-alpha.2.tgz` 68 entries、`dsh-reflex-0.1.0-alpha.2.tgz` 90 entries）；`provider-serialization.test.ts`（4 条，缺失 SDK 时按 NT 跳过并显式声明）；**真机**：`tmp/dsh-home` 装 alpha.2 tarball 起 `dsh web --port 3099`，面板显示 `v0.1.0-alpha.2`、`/dsh-reflex/api/health` 返回 `{"name":"dsh-reflex","version":"0.1.0-alpha.2"}`、配置池后模型选择器出现「Reflex (System 1 router) → reflex-auto」、插件页状态条 `激活·reflex·mock-heuristic-v1`、池 `reflex-auto 2 候选`（截图 `tmp/e2e-reflex-panel-3099.png`）；有意保留的取舍：固定物理模型下需在选择器里选 `reflex` 才进入自适应，选具体等级即钉死 |
+| 接口一致性 / 版本 / 序列化 / 打包 / 真机 | `reflex_detect_stagnation` 增加可选 `history`（`MAX_HISTORY=30`，`mergeHistory`）；版本 `0.1.0`；DeepSeek/GPT 序列化载荷结构化验证；四套命令全绿；`release/` 只留 0.1.0 产物 | `npm run build:all` exit 0（`client.js (295986 bytes, 9 modules, externals: react)`）；`npm test` = 113/113；`npm run test:plugin` = 419/419；`npm run release:pack` = 27/27（`harness-reflex-0.1.0.tgz` 73 entries、`miuzel-dsh-reflex-0.1.0.tgz` 102 entries）；`provider-serialization.test.ts`（4 条，缺失 SDK 时按 NT 跳过并显式声明）；**真机**：隔离 `DSH_HOME` 装 0.1.0 tarball 起 `dsh web`，面板显示 `v0.1.0`、`/dsh-reflex/api/health` 返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`、配置池后模型选择器出现「Reflex (System 1 router) → reflex-auto」、插件页状态条 `激活·reflex·mock-heuristic-v1`、池 `reflex-auto 2 候选`（截图 `tmp/e2e-reflex-panel-3099.png`）；有意保留的取舍：固定物理模型下需在选择器里选 `reflex` 才进入自适应，选具体等级即钉死 |
 
 ## 14. 能力开关设置面与插件侧工具面收敛（g-009）
 
-> **本节起，插件侧的工具面以本节为准。** 第 1/2 节的「8 个原生工具」是 g-001 交付时的事实，
-> 此后已收敛；stdio MCP 侧仍是自 v0.1.0 起冻结的 8 个工具，两者不再逐项对齐。
+> **本节起，插件侧的工具面以本节为准。** 第 1/2 节已按现行口径改写为「MCP 8 / DSH 5（默认 4）」；
+> 本节保留从 8 个工具收敛到 5 个可开关能力的历史决策，stdio MCP 侧仍是自 v0.1.0 起冻结的 8 个工具，
+> 两者不再逐项对齐。
 
 - 插件侧注册 **5 个可开关能力、默认 4 个**：`choice`/`score`/`screen`/`gate` 默认开启，`route`
   默认关闭（`src/tools.ts` 的 `REFLEX_TOOL_DEFAULT_ENABLED`；面板工具开关页里它是唯一起始关闭项，

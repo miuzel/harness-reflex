@@ -1,6 +1,6 @@
-# Harness Reflex 使用说明（v0.1.0-alpha.2）
+# Harness Reflex 使用说明（v0.1.0）
 
-> 本文档是 **`dsh-reflex` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
+> 本文档是 **`@miuzel/dsh-reflex` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
 > 同一份内容会内嵌进 `packages/dsh-reflex/client.js`，可在 DSH 设置面板的
 > **「使用说明 / Guide」** 标签页内直接阅读（跟随 DSH 界面语言中英切换）。
 > 因此修改本文档后必须重新执行 `npm run build:all`，否则面板里仍是上一次构建的副本
@@ -14,15 +14,15 @@ Harness Reflex 是一个 **System One（快思考）决策运行时**：它在�
 System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁校验、上下文剪枝、
 死循环拦截、模型路由与推理强度决策，并把每一次决策写进可审计的决策账本。
 
-它有两种交付形态，能力完全相同：
+它有两种交付形态，共享同一套判定引擎，但**对外工具面不同**（见第 9 节）：
 
 | 形态 | 包 | 适用 Harness | 通信方式 |
 | --- | --- | --- | --- |
 | stdio MCP 服务器 | `harness-reflex` | Claude Code、Codex CLI、AGY | MCP JSON-RPC 子进程 |
-| DSH Host 插件 | `dsh-reflex` | DeepSeek Harness (`dsh`) | 进程内 `ctx.tools` / Cordis 钩子 |
+| DSH Host 插件 | `@miuzel/dsh-reflex` | DeepSeek Harness (`dsh`) | 进程内 `ctx.tools` / Cordis 钩子 |
 
-两者共享工具名、主要参数与返回载荷，同一个 Agent 提示词可以跨 Harness 复用；
-参数及校验边界以第 9 节和各表面实际工具定义为准。
+MCP 面暴露 8 个工具；DSH 面只注册 5 个可开关工具（默认 4 个），剪枝/停滞/账本由自动干预与
+`/reflex-ledger` 命令承载。参数及校验边界以第 9 节和各表面实际工具定义为准。
 
 ---
 
@@ -35,9 +35,9 @@ System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁
 └───────────────┬──────────────────────────────────┬───────────────────┘
                 │ stdio MCP                        │ DSH Cordis 进程内
 ┌───────────────▼──────────────────┐  ┌────────────▼───────────────────┐
-│ harness-reflex 核心（dist/）      │  │ dsh-reflex 插件                │
+│ harness-reflex 核心（dist/）      │  │ @miuzel/dsh-reflex 插件        │
 │  gate · prune · stagnation       │◄─┤  src/bridge.ts  ReflexRuntime  │
-│  route · screen · score          │  │  src/tools.ts   8 个 reflex_*  │
+│  route · screen · score          │  │  src/tools.ts   5 个可开关工具 │
 │  ledger · calibrate              │  │  src/router.ts  虚拟 Provider  │
 └───────────────┬──────────────────┘  │  src/effort.ts  推理强度拦截   │
                 │ DecisionBackend     │  src/panel-*    设置面板 + API │
@@ -56,13 +56,13 @@ System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁
 | --- | --- |
 | `src/index.ts` | Cordis 插件入口 `apply(ctx, config)`，注册与拆除都在一个 `ctx.effect` 内 |
 | `src/bridge.ts` | `ReflexRuntime`：一次激活的 backend / ledger / 校准器 / 决策服务集合 |
-| `src/tools.ts` | 8 个 `reflex_*` 工具（Host `defineTool` 严格校验 + 顶层未声明参数拦截） |
+| `src/tools.ts` | 5 个可开关 `reflex_*` 工具，默认注册 4 个（Host `defineTool` 严格校验 + 顶层未声明参数拦截） |
 | `src/router.ts` | `VirtualModelRouter`：候选池 → System 1 决策 → 降级 / Fail-Closed → 审计 |
 | `src/virtual-adapter.ts` | 虚拟 provider 的 `LlmAdapter` 表面与派发层兜底 |
 | `src/routing.ts` | `installModelRouting`：注册虚拟 provider，挂 `agent/pre-step`、`agent/request` |
 | `src/effort.ts` | `EffortInterceptor`：每轮推理强度判定、投影与状态上报 |
 | `src/session-audit.ts` | 写/读 `plugin:dsh-reflex/effort` 会话记录（不污染模型上下文） |
-| `src/panel-api.ts` | 设置面板只读投影 + `/api/dsh-reflex/*` 路由（仅 loopback） |
+| `src/panel-api.ts` | 设置面板只读投影 + `/dsh-reflex/api/*` 路由（仅 loopback） |
 | `src/client/*` | 浏览器半边：槽位注册、中英文案、Markdown 渲染、面板视图 |
 
 启动顺序：DSH 载入插件 → `apply` 解析配置 → 建立 `ReflexRuntime` → 注册虚拟
@@ -82,7 +82,8 @@ npm run build:all
 node dist/cli/index.js setup all      # 或 claude | codex | agy
 
 # 3) 以 DSH 插件方式安装（进程内集成，推荐）
-dsh plugin add ./packages/dsh-reflex
+#    发布 tarball：同版本重装必须 --force；开发期也可直接装目录
+dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
 ```
 
 `npm run build:all` 的每一步都是必需的：
@@ -126,7 +127,7 @@ export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `backend` | `auto` | `auto` 按环境变量判定，也可强制 `mock` / `simple-jev` / `jev` |
+| `backend` | `auto` | `auto` 按环境变量判定，也可强制 `mock` / `vllm` / `jev`（`vllm` 即 logits 读出，环境变量侧名 `simple-jev`） |
 | `baseUrl` | 省略 | System 1 服务地址；省略时用后端默认值 |
 | `model` | 省略 | 服务端模型 ID（`simple-jev` 必填） |
 | `apiKeyEnv` | `SYSTEM_ONE_API_KEY` | **只记录环境变量名**，密钥本身不进入设置文档 |
@@ -213,7 +214,7 @@ routing:
 | --- | --- | --- |
 | `effort.reasoningEffort` | 省略 | `reflex` / `auto` = 每轮自适应；省略 = 不干预，插件完全不碰 `reasoningEffort`；具体档位请在模型选择器里选择，可选项取决于目标模型声明的档位集合 |
 | `effort.fallback` | `medium` | System 1 不可用或置信度低于下限时，确定性线索投票的兜底档 |
-| `effort.minConfidence` | `0.55` | 低于该置信度的判定不直接采用，改走兜底 |
+| `effort.minConfidence` | `0.3` | 低于该置信度的判定不直接采用，改走兜底 |
 | `effort.enabled` | `true` | 设为 `false` = 整层关闭：不判定、不审计、不注入 `reflex` 档位 |
 
 配置只回答一个问题：**要不要启用自适应**。
@@ -322,7 +323,7 @@ interventions:
 取回就是拿同一条定位符读会话事件：
 
 ```ts
-import { readPrunedOriginal } from 'dsh-reflex';
+import { readPrunedOriginal } from '@miuzel/dsh-reflex';
 
 const record = readPrunedOriginal(session.ownEvents(), locator);
 record?.text;    // 逐字节原文
@@ -381,7 +382,7 @@ record?.digest;  // 与决策记录里的 digest 一致
   后端页覆盖 `backend`、`systemOne`、`toolPrefix`、`ledgerPath`、`pruneThreshold`、
   `calibrationPath` 六条配置路径，保存时逐条整值写入）；
 - Host 文档只读时页面自动进入只读模式，写操作按钮禁用；
-- 面板路由 `/api/dsh-reflex/*` 只接受 loopback 客户端，清除账本必须显式确认。
+- 面板路由 `/dsh-reflex/api/*`（`panel` / `health` / `ledger/clear`）只接受 loopback 客户端，清除账本必须显式确认。
 
 ### 各组的写回范围
 
@@ -440,7 +441,7 @@ record?.digest;  // 与决策记录里的 digest 一致
 DSH 插件侧只注册 **5 个可开关的能力（默认 4 个）**——另外三项能力改由自动干预与一条
 命令承载，不占用模型的工具清单。
 
-| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 插件侧（`dsh-reflex`） | 主要参数 | 建议 |
+| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 插件侧（`@miuzel/dsh-reflex`） | 主要参数 | 建议 |
 | --- | --- | --- | --- | --- |
 | 多选一分类 | `reflex_choice` | 工具 `reflex_choice` | `question`, `options[]`, 可选 `context` | 建议暴露 |
 | 连续评分 | `reflex_score` | 工具 `reflex_score` | `statement`, 可选 `criteria`, `context` | 建议暴露 |
@@ -518,7 +519,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | 产物 | 内容 |
 | --- | --- |
 | `harness-reflex-<version>.tgz` | 根包：`dist/`、`README.md`、`docs/`、`USER_GUIDE.md`、`experiments/` |
-| `dsh-reflex-<version>.tgz` | 插件：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
+| `miuzel-dsh-reflex-<version>.tgz` | 插件 `@miuzel/dsh-reflex`（scoped 包命名）：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
 | `SHA256SUMS` | 上述两份 tarball 的 SHA-256 校验和 |
 | `release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
 | `RELEASE-<version>.md` | 发布说明：安装命令、核验清单、内容构成 |
@@ -534,7 +535,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 设置里找不到「Reflex 决策运行时」 | Host 半边未加载或未注册配置命名空间；确认 `dsh plugin add` 后重启/重载 `dsh` |
+| 设置里找不到「Reflex 决策运行时」 | Host 半边未加载或未注册配置命名空间；确认 `dsh plugin --profile web add` 成功并重启/重载 `dsh` |
 | 面板显示只读 | 当前 DSH 设置文档不可写；只读模式下所有写操作被禁用属预期行为 |
 | 虚拟模型报错而不是派发 | 候选池为空且没有 `routing.fallback`；补候选或配置兜底目标 |
 | 文本没有按预期被路由 | 检查 `routing.enabled`、虚拟模型 ID 拼写，以及 Agent 是否真的请求了该虚拟模型 |
@@ -552,9 +553,9 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 ## 13. 版本与兼容性
 
-- 版本：`harness-reflex` 与 `dsh-reflex` 同步发布，v0.1.0-alpha.2；
+- 版本：`harness-reflex` 与 `@miuzel/dsh-reflex` 同步发布，v0.1.0；
 - Node：`>= 18`（根包 `engines`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
 - 插件以 `peerDependencies` 声明 Host 契约，运行时不重复打包 Host 模块；
 - stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷；
-- DSH 插件侧的工具表面自 v0.1.0-alpha.2 起是 **5 个可开关能力、默认注册 4 个**
+- DSH 插件侧的工具表面自 v0.1.0 起是 **5 个可开关能力、默认注册 4 个**
   （`route` 默认关闭），账本为 `/reflex-ledger` 命令——这一侧不承诺与 MCP 侧逐项对齐。

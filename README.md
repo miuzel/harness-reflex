@@ -34,7 +34,7 @@
    - **Codex CLI**：`.codex/config.json` 原生 MCP 挂载。
    - **Antigravity (AGY)**：支持全功能 Bundle 插件（`.agents/plugins/harness-reflex/`），内嵌 `plugin.json`、`mcp_config.json`、`hooks.json` 与 `rules/AGENTS.md`。
 
-2. **全套 System One 工具链（原生 MCP Tools 暴露给 Agent）**：
+2. **全套 System One 工具链（MCP 面 8 个工具，由根包 stdio server 暴露给外部客户端）**：
    - **底层通用 API**：
      - `reflex_choice`：多选一概率分布预测，毫秒级得出答案，零生成开销。
      - `reflex_score`：对代码/陈述进行 0.0 ~ 1.0 的连续标准评分。
@@ -46,13 +46,21 @@
      - `reflex_route`：技能与工具的意图排序（只排序，不卡死阈值）。
      - `reflex_status_ledger`：决策台账与净节省 Token/成本统计。
 
+   > 这 8 个工具**只属于 MCP 面**。DSH 宿主插件面只有 5 个可开关工具，见下面第 4 条。
+
 3. **离线拟合校准闭环（Isotonic PAVA & Platt 回归）**：
    - 内置 `calibrate` 引擎，可基于历史标注集拟合单调映射曲线，计算 ECE 误差并输出校准配置；
    - 线上运行时自动修正过度自信的模型原始概率，杜绝盲目放行。
 
-4. **DSH Host 插件（进程内集成，`dsh-reflex`）**：
+4. **DSH Host 插件（进程内集成，`@miuzel/dsh-reflex`）**：
    - 除 stdio MCP 之外，同一套 System One 能力还以 **DSH Cordis Host 插件**形式在 `dsh` 进程内注册：
-     `packages/dsh-reflex/` 通过 `ctx.tools` 注入 8 个同名 `reflex_*` 工具，省掉子进程与 JSON-RPC 往返。
+     `packages/dsh-reflex/` 通过 `ctx.tools` 注册 **5 个可开关工具** `reflex_choice` / `reflex_score` /
+     `reflex_route` / `reflex_screen` / `reflex_gate`，**默认开启前 4 个、`route` 默认关闭**。
+   - **剪枝、停滞拦截、收尾核验与失效纠偏是自动干预**，不是工具：它们由宿主的
+     `tools/post-execute`、`agent/pre-step`、`agent/turn-stopping` 钩子按 `interventions.mode`
+     （`off` / `observe` / `active`，默认 `observe`）执行；DSH 面**没有** `reflex_prune` /
+     `reflex_detect_stagnation` / `reflex_status_ledger` 三个工具。
+   - 账本用 **`/reflex-ledger` 命令**（或设置面板「账本」页）读取，不经模型、不占工具位。
    - 严格参数校验沿用 Host 的 `defineTool`（必填/类型/枚举/嵌套 `additionalProperties`），工具层再拦截
      顶层未声明参数；卸载时通过单个 `ctx.effect` 摘除观察者、逆序注销工具、释放运行时，完全可逆。
    - 同时提供**虚拟 Provider 与动态模型路由**：注册虚拟 provider（默认 `reflex`），把 `reflex-auto` /
@@ -91,7 +99,20 @@ node dist/cli/index.js setup codex
 node dist/cli/index.js setup agy
 ```
 
-### 4. 配置 System One 决策后端（可选）
+### 4. 安装 DSH 插件（可选，进程内集成）
+
+```bash
+# 从本仓库产物安装；同版本重装必须加 --force（pnpm 不会静默覆盖同版本）
+dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
+
+# 首次发布到 npm 后（包名 @miuzel/dsh-reflex）：
+dsh plugin --profile web add @miuzel/dsh-reflex@0.1.0
+```
+
+安装后重启 / 重载 `dsh`，设置页会出现「Reflex 决策运行时」面板；`/dsh-reflex/api/health`
+应返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`。
+
+### 5. 配置 System One 决策后端（可选）
 默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
 
 ```bash
@@ -154,7 +175,7 @@ npm run release          # 全量构建与测试通过后再打包（发布闸�
 | 产物 | 说明 |
 | --- | --- |
 | `release/harness-reflex-<version>.tgz` | 根包：核心运行时、CLI、stdio MCP、适配器、`dist/`（含类型与自包含 source map）、`USER_GUIDE.md`、`docs/` |
-| `release/dsh-reflex-<version>.tgz` | DSH Host 插件：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
+| `release/miuzel-dsh-reflex-<version>.tgz` | DSH Host 插件 `@miuzel/dsh-reflex`（scoped 包的 npm pack 命名）：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
 | `release/SHA256SUMS` | 两份 tarball 的 SHA-256 校验和 |
 | `release/release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
 | `release/RELEASE-<version>.md` | 发布说明：安装方式、核验清单、内容构成 |

@@ -26,11 +26,24 @@
  * @module dsh-reflex/client-bundle
  */
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** `__ModuleLoader__` id of the bundle; the package name. */
-export const CLIENT_BUNDLE_ID = 'dsh-reflex';
+/**
+ * `__ModuleLoader__` id of the bundle: the npm package name.
+ *
+ * The DSH client loader keys every bundle by its **package name**
+ * (`dsh-client-modules/lib/index.js:546` reads `fiber.entry.options.name`, and
+ * `lib/client.js:874` rejects an artifact whose `__ModuleLoader__.load({id})`
+ * does not match), so hardcoding a second copy here goes stale the moment the
+ * scoped name changes. Reading the manifest keeps one source of truth.
+ *
+ * This is not the Cordis plugin id (`export const name = 'dsh-reflex'`), the
+ * `/dsh-reflex/api/*` route prefix, or the `data-reflex-*` attributes — those
+ * stay stable across a package rename.
+ */
+export const CLIENT_BUNDLE_ID = (createRequire(import.meta.url)('../package.json') as { name: string }).name;
 
 /** Bundled module key the factory block executes first. */
 export const CLIENT_ENTRY_KEY = 'index';

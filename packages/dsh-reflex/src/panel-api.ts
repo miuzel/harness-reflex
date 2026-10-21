@@ -33,7 +33,7 @@ import { INTERVENTION_CAPABILITIES } from './config.js';
 import type { ReflexEffortStatus } from './effort.js';
 
 /** Version reported by the panel; kept in step with `package.json` by a test. */
-export const REFLEX_PLUGIN_VERSION = '0.1.0-alpha.2';
+export const REFLEX_PLUGIN_VERSION = '0.1.0';
 
 /** Namespace every panel route lives under. */
 export const PANEL_BASE = '/dsh-reflex/api';

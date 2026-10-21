@@ -1,6 +1,6 @@
 {
   "name": "harness-reflex",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0",
   "type": "module",
   "description": "System 1 decision runtime and Jev-compatible reflex layer for Codex, Claude Code, and Antigravity (AGY)",
   "main": "dist/index.js",

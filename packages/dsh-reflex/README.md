@@ -1,4 +1,4 @@
-# dsh-reflex — Harness Reflex 的 DSH Host 插件
+# @miuzel/dsh-reflex — Harness Reflex 的 DSH Host 插件
 
 把仓库根目录的 **Harness Reflex（System One 决策运行时）** 以 **DSH Cordis Host 插件**的形式挂进 `dsh`
 进程内：不再经过 stdio MCP 子进程，5 个 `reflex_*` 能力直接注册到 `ctx.tools`（默认注册其中 4 个，
@@ -11,11 +11,14 @@
 路由**上下文感知且带会话粘性**：每次决策都会拿到本会话已累积的上下文规模与当前物理模型，提示词里写明
 「保留当前模型可省缓存、非必要不切」，名次相近时守住已经在用的模型，只有明显更合适才切换。
 
-- 插件包名：`dsh-reflex`（DSH 命名规范：`dsh-` 前缀即可）
+- 插件包名：`@miuzel/dsh-reflex`（scoped；npm 上未加 scope 的 `dsh-reflex` 已被第三方占用）
+- Cordis 插件 id：`dsh-reflex`（`src/index.ts` 导出的 `name`，不是 npm 包名）；
+  浏览器 bundle 的 `__ModuleLoader__` id 则由 `package.json` 的 `name` 派生（DSH loader 按包名注册）
 - Cordis 插件入口：`apply(ctx, config)`（另导出 `applyReflex(ctx, config)` 返回运行时实例，便于测试/审计）
-- 依赖：`harness-reflex`（本仓库根包，发布清单声明为 `^0.1.0-alpha.2`）+ Host 提供的
-  `@deepseek-ai/cordis` / `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm`（模型路由）/ `@deepseek-ai/dsh-agent`
-  / `@deepseek-ai/dsh-session` / `@deepseek-ai/dsh-system-prompt` / `@deepseek-ai/dsh-host-webserver`（面板路由类型）
+- 依赖：**运行时零 `harness-reflex` 依赖**——核心以源码 vendored 进 `dist/vendor/harness-reflex`，随 tarball 一起发布；
+  其余所需模块全部由 Host 提供：`@deepseek-ai/cordis` / `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm`（模型路由）
+  / `@deepseek-ai/dsh-commands`（`/reflex-ledger`）/ `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session`
+  / `@deepseek-ai/dsh-system-prompt` / `@deepseek-ai/dsh-host-webserver`（面板路由）
 - 使用说明：[`../../USER_GUIDE.md`](../../USER_GUIDE.md)（中文）/ [`../../docs/USER_GUIDE.en.md`](../../docs/USER_GUIDE.en.md)（English）
   —— 同一份文档已嵌入浏览器半边，可在 DSH 设置页 **Reflex → 使用说明** 标签内阅读
 
@@ -26,7 +29,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `package.json` | 插件元数据：`name`/`exports`/`dsh.bundle.patch`/peerDependencies |
-| `cordis.patch.yml` | Bundle patch：`- insert: [{ id: reflex, name: 'dsh-reflex' }]` |
+| `cordis.patch.yml` | Bundle patch：`- insert: [{ id: dsh-reflex, name: '@miuzel/dsh-reflex' }]`（`id` 是稳定的组合条目 id，`name` 是 npm 模块名） |
 | `locale/{zh,en}.json` | `dsh plugin` 列表里显示的标题与描述 |
 | `tsconfig.json` | 独立编译配置（`src/` → `dist/`） |
 | `src/config.ts` | `ReflexConfig` 类型 + schemastery `Config` 模式 + `resolveConfig` |
@@ -67,7 +70,10 @@ DSH_HOST_MODULES=/path/to/dsh/node_modules npm run build:all
 `package.json` 里的 `dsh.bundle.patch` 已指向 `cordis.patch.yml`，因此按 DSH bundle 插件的通用方式安装即可：
 
 ```bash
-dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex 加进插件列表
+# 从发布 tarball 安装（同版本重装必须 --force）
+dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
+# 开发时也可以直接装目录（会链接当前构建）
+dsh plugin --profile web add ./packages/dsh-reflex
 ```
 
 插件的配置项（全部可选，schemastery 提供默认值）：
@@ -91,8 +97,8 @@ dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex �
 配置示例（YAML）：
 
 ```yaml
-- id: reflex
-  name: 'dsh-reflex'
+- id: dsh-reflex
+  name: '@miuzel/dsh-reflex'
   config:
     backend: mock
     toolPrefix: reflex_
@@ -215,9 +221,11 @@ npm run test:mutation    # 负向对照：注入故障，要求被测试或编�
 
 ## 已知边界
 
-- 仓库内开发时，插件包内的 `harness-reflex` 依赖由 `scripts/link-dsh-deps.mjs` 软链到本仓库根包
-  （`--check` 在未就绪时退出码 1，不触碰 registry）；发布时清单声明的是可发布的 `^0.1.0-alpha.2` 范围，
-  因此 `release/dsh-reflex-*.tgz` 可被 npm 正常解析（见根 [`README.md`](../../README.md) 的发布产物一节）。
+- 仓库内开发时，`scripts/link-dsh-deps.mjs` 把 `harness-reflex` 与 Host 模块软链进
+  `packages/dsh-reflex/node_modules/`（`--check` 在未就绪时退出码 1，不触碰 registry）；**发布形态不依赖任何
+  `harness-reflex` 版本范围**：`npm run build:all` 会把根包源码编译进 `dist/vendor/harness-reflex`，tarball
+  自包含，安装时只需 Host 提供的 peer 模块。插件 tarball 采用 scoped 包的标准命名
+  `release/miuzel-dsh-reflex-<version>.tgz`（见根 [`README.md`](../../README.md) 的发布产物一节）。
 - `dist/` 是构建产物（已 gitignore），提交进版本库的是 TS 源码与插件元数据。
 - `ledgerPath` 默认不落盘，是为了避免 Host 在用户项目里产生 `.reflex/` 垃圾文件；需要审计时显式配置。
 - 路由决策的任务文本来自 `agent/pre-step` 的用户消息文本块（多模态输入只有文本参与打分）；每次
