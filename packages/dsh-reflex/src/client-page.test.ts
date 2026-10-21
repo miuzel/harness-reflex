@@ -208,6 +208,21 @@ class HookRuntime {
     this.pending.push({ record, run: effect });
   };
 
+  /** `react.useState`: one box per slot, and a setter that marks the tree stale. */
+  useState = (initial: unknown): [unknown, (next: unknown) => void] => {
+    const record = this.slot();
+    if (record.value === undefined) {
+      const box = { value: typeof initial === 'function' ? (initial as () => unknown)() : initial };
+      record.value = box;
+    }
+    const box = record.value as { value: unknown };
+    const set = (next: unknown): void => {
+      box.value = typeof next === 'function' ? (next as (previous: unknown) => unknown)(box.value) : next;
+      this.stale = true;
+    };
+    return [box.value, set];
+  };
+
   /** `react.useSyncExternalStore`, including React's post-subscribe re-check. */
   useSyncExternalStore = (subscribe: (listener: () => void) => () => void, getSnapshot: () => unknown): unknown => {
     const record = this.slot();
@@ -586,7 +601,8 @@ async function mountPanel(options: {
     useCallback: (callback: unknown) => (runtime as HookRuntime).useCallback(callback),
     useEffect: (effect: () => void | (() => void), deps?: readonly unknown[]) => (runtime as HookRuntime).useEffect(effect, deps),
     useSyncExternalStore: (subscribe: (listener: () => void) => () => void, getSnapshot: () => unknown) =>
-      (runtime as HookRuntime).useSyncExternalStore(subscribe, getSnapshot)
+      (runtime as HookRuntime).useSyncExternalStore(subscribe, getSnapshot),
+    useState: (initial: unknown) => (runtime as HookRuntime).useState(initial)
   };
 
   const exported = bundle.factory((spec) => {
@@ -1427,6 +1443,297 @@ test('the guide page follows the Host language', async () => {
   assert.ok(text.includes('/reflex-ledger'), 'the English guide does not document the ledger command');
   assert.ok(text.includes('docs/USER_GUIDE.en.md'), 'the English guide does not name its source document');
   assert.ok(!text.includes('虚拟 Provider 与模型池'), 'the Chinese guide leaked into the English page');
+  mounted.unmount();
+});
+
+//#endregion
+
+//#region field guidance: placeholders, (?) disclosures, defaults, accessibility
+
+/** Read a dotted path out of a plain object. */
+function readPath(value: unknown, path: string): unknown {
+  let current: any = value;
+  for (const key of path.split('.')) {
+    if (current === null || typeof current !== 'object') return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
+/** Every primitive leaf path of a plain object, skipping arrays and empty nodes. */
+function leafPaths(value: unknown, prefix = ''): string[] {
+  if (value === null || typeof value !== 'object') return prefix === '' ? [] : [prefix];
+  if (Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    out.push(...leafPaths(child, prefix === '' ? key : `${prefix}.${key}`));
+  }
+  return out;
+}
+
+/** Schema leaves that a default config leaves unset, so they have no resolved key. */
+const OPTIONAL_SCHEMA_PATHS = [
+  'routing.fallback',
+  'effort.setting',
+  'systemOne.baseUrl',
+  'systemOne.model',
+  'systemOne.apiKeyEnv',
+  'systemOne.timeoutMs',
+  'ledgerPath',
+  'calibrationPath'
+] as const;
+
+/** Resolved keys that are derived rather than edited on the page. */
+const DERIVED_SCHEMA_PATHS = new Set(['systemOne.backend', 'interventions.enabled']);
+
+/** Schema path → the page group that renders it. */
+function tabOfPath(path: string): string {
+  if (path.startsWith('routing.')) return 'routing';
+  if (path.startsWith('effort.')) return 'effort';
+  if (path.startsWith('interventions.')) return 'interventions';
+  if (path.startsWith('tools.')) return 'tools';
+  return 'backend';
+}
+
+/** Copy rules of one language. */
+interface GuidanceCopy {
+  required: readonly string[];
+  optional: readonly string[];
+  defaultPattern: RegExp;
+  optionalDefault: string;
+  leaveDefault: string;
+  unsetDefault: string;
+  onDefault: string;
+  offDefault: string;
+}
+
+const GUIDANCE_COPY: Record<'zh' | 'en', GuidanceCopy> = {
+  zh: {
+    required: ['用途：', '格式：', '默认：'],
+    optional: ['留空：', '范围：'],
+    defaultPattern: /默认：([^；。]+)/,
+    optionalDefault: '不干预',
+    leaveDefault: '不干预',
+    unsetDefault: '未设置',
+    onDefault: '开启',
+    offDefault: '关闭'
+  },
+  en: {
+    required: ['Use:', 'Format:', 'Default:'],
+    optional: ['Blank:', 'Range:'],
+    defaultPattern: /Default: ([^;]+)/,
+    optionalDefault: 'leave untouched',
+    leaveDefault: 'leave untouched',
+    unsetDefault: 'not set',
+    onDefault: 'on',
+    offDefault: 'off'
+  }
+};
+
+/** The default a field's help must state, derived from `resolveConfig({})`. */
+function expectedDefaultToken(path: string, resolved: unknown, language: 'zh' | 'en'): string | undefined {
+  const copy = GUIDANCE_COPY[language];
+  if (path === 'effort.setting') return copy.leaveDefault;
+  if (path.startsWith('interventions.capabilities.')) return 'inherit';
+  if (path.startsWith('tools.enabled.')) {
+    const suffix = path.split('.').pop() ?? '';
+    const on = Boolean((resolved as any).tools?.enabled?.[suffix]);
+    return on ? copy.onDefault : copy.offDefault;
+  }
+  const value = readPath(resolved, path);
+  if (value === undefined) return copy.unsetDefault;
+  if (typeof value === 'boolean') return value ? copy.onDefault : copy.offDefault;
+  return String(value);
+}
+
+/** The `(?)` button of one guided field wrapper. */
+function helpButtonOf(wrapper: Element): Element {
+  const button = elements(wrapper).find(
+    (element) => element.type === 'button' && typeof element.props['aria-describedby'] === 'string'
+  );
+  assert.ok(button !== undefined, `field ${String(wrapper.props['data-reflex-path'])} has no (?) button`);
+  return button as Element;
+}
+
+/** The note a field's `aria-describedby` points at. */
+function helpNoteOf(wrapper: Element): { id: string; note: Element } {
+  const button = helpButtonOf(wrapper);
+  const id = String(button.props['aria-describedby']);
+  const note = elements(wrapper).find((element) => element.type === 'span' && element.props.id === id);
+  assert.ok(note !== undefined, `field ${String(wrapper.props['data-reflex-path'])} points aria-describedby at a missing node`);
+  return { id, note: note as Element };
+}
+
+test('every schema field carries a placeholder and a four-part (?) explanation', async () => {
+  const resolved = resolveConfig({});
+  // `pruneJudgeMinChars` is a resolved leaf now (g-014), so the traversal picks
+  // it up from `resolveConfig` rather than from a local pending list.
+  assert.equal(resolved.interventions.pruneJudgeMinChars, 10000, 'the Host default for the judge threshold changed');
+  const expectedPaths = [
+    ...leafPaths(resolved).filter((path) => !DERIVED_SCHEMA_PATHS.has(path)),
+    ...OPTIONAL_SCHEMA_PATHS
+  ];
+  const uniquePaths = [...new Set(expectedPaths)];
+  assert.ok(uniquePaths.length >= 30, `the schema traversal found only ${uniquePaths.length} fields`);
+
+  const keysByLanguage: Record<string, string[]> = {};
+  let covered = 0;
+
+  for (const language of ['zh', 'en'] as const) {
+    const copy = GUIDANCE_COPY[language];
+    const { form } = settingsForm(AUTHORED);
+    const mounted = await mountPanel({ facts: facts(true), form, language });
+    keysByLanguage[language] = Object.keys(mounted.dictionaries['dsh-reflex.panel'] ?? {}).sort();
+
+    const tabLabels: Record<string, string> = {
+      routing: language === 'zh' ? '虚拟 Provider' : 'Virtual provider',
+      effort: language === 'zh' ? '推理强度' : 'Reasoning effort',
+      backend: language === 'zh' ? 'System 1 后端' : 'System 1 backend',
+      interventions: language === 'zh' ? '自动干预' : 'Interventions',
+      tools: language === 'zh' ? '工具开关' : 'Tools'
+    };
+    const groupOf = (path: string): string => tabOfPath(path);
+
+    const tabs = ['routing', 'effort', 'backend', 'interventions', 'tools'];
+    for (const tab of tabs) {
+      openTab(mounted.tree, tabLabels[tab] as string);
+      const tree = await mounted.runtime.flush();
+      const wrappers = elements(tree).filter((element) => typeof element.props['data-reflex-path'] === 'string');
+      const pathsInTab = uniquePaths.filter((path) => groupOf(path) === tab);
+      assert.ok(pathsInTab.length > 0, `no schema field maps to the ${tab} tab`);
+
+      for (const path of pathsInTab) {
+        const wrapper = wrappers.find((element) => element.props['data-reflex-path'] === path);
+        assert.ok(wrapper !== undefined, `the ${tab} tab does not render field ${path}`);
+        covered += 1;
+
+        // Placeholder: every text input must show a non-empty example.
+        const control = elements(wrapper).find(
+          (element) => element.type === 'input' || element.type === 'select'
+        );
+        assert.ok(control !== undefined, `field ${path} has no control`);
+        const isText = control.type === 'input' && control.props.type === 'text';
+        if (isText) {
+          const placeholder = String(control.props.placeholder ?? '');
+          assert.ok(placeholder.trim().length > 0, `field ${path} has an empty placeholder`);
+        }
+
+        // (?) contract: a native, focusable button with aria-label/description.
+        const button = helpButtonOf(wrapper);
+        assert.equal(button.props.type, 'button', `field ${path} (?) is not a button`);
+        assert.notEqual(button.props.disabled, true, `field ${path} (?) is disabled`);
+        const ariaLabel = String(button.props['aria-label'] ?? '');
+        assert.ok(ariaLabel.trim().length > 3, `field ${path} (?) has no aria-label`);
+        const title = String(button.props.title ?? '');
+        assert.ok(title.trim().length > 3, `field ${path} (?) lost its native title fallback`);
+
+        const { id, note } = helpNoteOf(wrapper);
+        assert.ok(id.startsWith('reflex-help-'), `field ${path} help id is not stable: ${id}`);
+        assert.equal(button.props['aria-controls'], id, `field ${path} (?) controls the wrong node`);
+        assert.equal(button.props['aria-expanded'], false, `field ${path} (?) starts expanded`);
+
+        const help = textOf(note);
+        for (const marker of copy.required) {
+          assert.ok(help.includes(marker), `field ${path} help (${language}) lacks "${marker}": ${help}`);
+        }
+        assert.ok(
+          copy.optional.some((marker) => help.includes(marker)),
+          `field ${path} help (${language}) lacks a blank/range clause: ${help}`
+        );
+        assert.ok(help.length > 20, `field ${path} help is too thin: ${help}`);
+        assert.equal(title, help, `field ${path} title and aria-describedby copy diverged`);
+        if (language === 'en') {
+          assert.ok(!/[\u4e00-\u9fff]/.test(help), `field ${path} help leaked Chinese into the English page: ${help}`);
+        }
+
+        // Default: the stated value must equal what resolveConfig computes.
+        const expected = expectedDefaultToken(path, resolved, language);
+        assert.ok(expected !== undefined, `field ${path} has no derivable default`);
+        const match = copy.defaultPattern.exec(help);
+        assert.ok(match !== null, `field ${path} help (${language}) has no parseable default: ${help}`);
+        assert.equal(match?.[1].trim(), expected, `field ${path} declares a default that resolveConfig does not: ${help}`);
+      }
+
+      // Beyond the schema table: every text input on these tabs shows an example.
+      for (const input of elements(tree).filter(
+        (element) => element.type === 'input' && element.props.type === 'text'
+      )) {
+        assert.ok(
+          String(input.props.placeholder ?? '').trim().length > 0,
+          `an input on the ${tab} tab has no placeholder`
+        );
+      }
+    }
+    mounted.unmount();
+  }
+
+  // Every expected field was rendered in both languages.
+  assert.equal(covered, uniquePaths.length * 2, 'the traversal did not visit every field in both languages');
+  // The dictionaries are key-aligned.
+  assert.deepEqual(keysByLanguage.zh, keysByLanguage.en, 'the Chinese and English dictionaries have different keys');
+});
+
+test('the constraint copy matches the Host rules and the judge field is cross-checked', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '自动干预');
+  let tree = await mounted.runtime.flush();
+
+  const note = (path: string): string => {
+    const wrapper = elements(tree).find((element) => element.props['data-reflex-path'] === path);
+    assert.ok(wrapper !== undefined, `no field ${path}`);
+    return textOf(helpNoteOf(wrapper as Element).note);
+  };
+
+  assert.ok(note('interventions.repeatThreshold').includes('最小 2'), 'repeatThreshold minimum 2 is not stated');
+  assert.ok(note('interventions.failureThreshold').includes('最小 2'), 'failureThreshold minimum 2 is not stated');
+  assert.ok(note('interventions.windowSize').includes('最小 3'), 'windowSize minimum 3 is not stated');
+  assert.ok(note('interventions.minConfidence').includes('0~1'), 'intervention minConfidence range is not stated');
+  assert.ok(note('interventions.pruneFloorRatio').includes('0~1'), 'pruneFloorRatio range is not stated');
+
+  const judge = note('interventions.pruneJudgeMinChars');
+  assert.ok(judge.includes('10000'), 'the judge threshold default is missing');
+  assert.ok(judge.includes('pruneThreshold'), 'the judge threshold does not name its lower bound');
+  const judgeWrapper = elements(tree).find(
+    (element) => element.props['data-reflex-path'] === 'interventions.pruneJudgeMinChars'
+  ) as Element;
+  const judgeInput = elements(judgeWrapper).find((element) => element.type === 'input');
+  assert.equal(String(judgeInput?.props.placeholder), '10000', 'the judge threshold placeholder is not 10000');
+
+  openTab(tree, '推理强度');
+  tree = await mounted.runtime.flush();
+  assert.ok(note('effort.minConfidence').includes('0~1'), 'effort minConfidence range is not stated');
+  mounted.unmount();
+});
+
+test('the (?) disclosure is keyboard-operable and its text is always readable', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  const wrapperOf = (): Element => {
+    const wrapper = elements(tree).find((element) => element.props['data-reflex-path'] === 'toolPrefix');
+    assert.ok(wrapper !== undefined, 'no toolPrefix field');
+    return wrapper as Element;
+  };
+
+  const button = helpButtonOf(wrapperOf());
+  // The note is in the DOM (and in the accessibility tree) before any pointer event.
+  const before = helpNoteOf(wrapperOf());
+  assert.notEqual((before.note.props.style as { display?: string }).display, 'block', 'the note is visible before the user asks for it');
+  assert.equal(button.props['aria-expanded'], false);
+
+  // A native button is what makes Enter/Space work in the browser; the handler toggles.
+  fire(button, 'onClick');
+  tree = await mounted.runtime.flush();
+  const opened = helpButtonOf(wrapperOf());
+  assert.equal(opened.props['aria-expanded'], true, '(?) did not expand');
+  assert.equal((helpNoteOf(wrapperOf()).note.props.style as { display?: string }).display, 'block', 'the expanded note is still hidden');
+
+  fire(opened, 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.equal(helpButtonOf(wrapperOf()).props['aria-expanded'], false, '(?) did not collapse');
   mounted.unmount();
 });
 

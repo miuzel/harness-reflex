@@ -32,4 +32,7 @@ declare module 'react' {
 
   /** Subscribe to an external store without tearing. */
   export function useSyncExternalStore<T>(subscribe: (listener: () => void) => () => void, getSnapshot: () => T): T;
+
+  /** Local component state; the setter accepts a value or an updater. */
+  export function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous: T) => T)) => void];
 }

@@ -173,6 +173,7 @@ export interface InterventionsDraft {
   pruneFloorRatio: string;
   pruneHeadChars: string;
   pruneTailChars: string;
+  pruneJudgeMinChars: string;
   intent: string;
 }
 
@@ -253,6 +254,9 @@ export const EMPTY_DRAFT: PanelDraft = {
     pruneFloorRatio: '0.5',
     pruneHeadChars: '400',
     pruneTailChars: '400',
+    // Blank means "let the Host apply its own default"; the page never seeds a
+    // value here, so an unrelated save cannot pin this field.
+    pruneJudgeMinChars: '',
     intent: ''
   },
   tools: { enabled: defaultToolSwitches() }
@@ -427,6 +431,7 @@ export function draftFromConfig(value: unknown): PanelDraft {
       pruneFloorRatio: asText(interventions.pruneFloorRatio) || EMPTY_DRAFT.interventions.pruneFloorRatio,
       pruneHeadChars: asText(interventions.pruneHeadChars) || EMPTY_DRAFT.interventions.pruneHeadChars,
       pruneTailChars: asText(interventions.pruneTailChars) || EMPTY_DRAFT.interventions.pruneTailChars,
+      pruneJudgeMinChars: asText(interventions.pruneJudgeMinChars),
       intent: asText(interventions.intent)
     },
     tools: {
@@ -524,6 +529,21 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   for (const [text, minimum] of budgets) {
     const parsed = asNumber(text);
     if (parsed === undefined || !Number.isInteger(parsed) || parsed < minimum) errors.push('errInterventionBudget');
+  }
+  // Blank is legal and means "let the Host apply its own default". When set, the
+  // per-segment judge cannot be cheaper to reach than pruning itself: a threshold
+  // below `pruneThreshold` would ask System One about a payload the manifest
+  // decided was too small to prune, and the Host rejects the inversion.
+  if (draft.interventions.pruneJudgeMinChars.trim() !== '') {
+    const judgeMinChars = asNumber(draft.interventions.pruneJudgeMinChars);
+    if (
+      judgeMinChars === undefined ||
+      !Number.isInteger(judgeMinChars) ||
+      judgeMinChars < 0 ||
+      (pruneThreshold !== undefined && judgeMinChars < pruneThreshold)
+    ) {
+      errors.push('errPruneJudgeMinChars');
+    }
   }
   for (const text of [draft.interventions.minConfidence, draft.interventions.pruneFloorRatio]) {
     const parsed = asNumber(text);
@@ -665,6 +685,9 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
         ...(count(draft.interventions.pruneTailChars) === undefined
           ? {}
           : { pruneTailChars: count(draft.interventions.pruneTailChars) }),
+        ...(count(draft.interventions.pruneJudgeMinChars) === undefined
+          ? {}
+          : { pruneJudgeMinChars: count(draft.interventions.pruneJudgeMinChars) }),
         ...(present(draft.interventions.intent) === undefined ? {} : { intent: draft.interventions.intent.trim() })
       };
       return [{ path: [group], value: section }];

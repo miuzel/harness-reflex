@@ -86,6 +86,77 @@ export const zh = {
   labelPruneHeadChars: '裁剪保留头部字符数',
   labelPruneTailChars: '裁剪保留尾部字符数',
   labelPruneIntent: '裁剪判定意图',
+  labelPruneJudgeMinChars: '逐段判定最小字符数',
+
+  // (?) 就地提示：每条都写成「用途 / 格式 / 默认 / 留空或范围」四段，
+  // field-guidance 测试会按段解析，并用 resolveConfig 实算的默认值对拍。
+  helpAbout: '关于「{field}」的说明',
+  helpSwitchOn: '开启',
+  helpSwitchOff: '关闭',
+  helpRoutingEnabled:
+    '用途：决定是否安装 reflex 虚拟 Provider 接管模型路由；格式：布尔开关；默认：开启；留空：未写时按开启处理，关闭后模型调用直连物理 Provider。',
+  helpVirtualProvider:
+    '用途：虚拟 Provider 对外暴露的名字，模型池路由挂在它名下；格式：非空字符串，不能包含冒号；默认：reflex；范围：留空取默认，为空或含冒号会被配置校验拒绝。',
+  helpFallback:
+    '用途：所有候选池都无法回答时使用的物理兜底目标；格式：provider:model，例如 deepseek-official:deepseek-flash；默认：未设置；留空：不启用兜底、路由失败即失败关闭，且不能指回虚拟 Provider 自身。',
+  helpMaxTaskChars:
+    '用途：交给 System One 判定的任务文本长度上限；格式：正整数（字符数）；默认：400；范围：必须大于 0，超长文本会先截断再判定。',
+  helpEffortEnabled:
+    '用途：是否允许按轮自适应决定推理强度；格式：布尔开关；默认：开启；留空：未写时按开启处理，关闭后不再做自适应判定、也不再注入 reflex 档位。',
+  helpEffortSetting:
+    '用途：决定每轮下发的推理强度；格式：留空、reflex（别名 auto）或一个具体档位；默认：不干预；留空：完全不设置 reasoningEffort，把选择权交给调用方。',
+  helpEffortFallback:
+    '用途：System One 与线索分类器都没有证据时使用的兜底档位；格式：一个自适应档位；默认：medium；范围：必须是已提供的自适应档位之一，留空按默认处理。',
+  helpEffortMinConfidence:
+    '用途：System One 的置信度达到多少才压过线索分类器；格式：小数；默认：0.3；范围：0~1，越界会被拒绝。',
+  helpBackend:
+    '用途：选择决策后端实现；格式：auto / mock / jev / vllm 之一；默认：auto；留空：按 auto 处理，由环境自动挑选可用后端。',
+  helpBaseUrl:
+    '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址。',
+  helpModel:
+    '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型。',
+  helpApiKeyEnv:
+    '用途：存放 API Key 的环境变量名（不是密钥本身）；格式：大写环境变量名，例如 JEV_API_KEY；默认：未设置；留空：由环境自动发现，密钥永远不会写进设置文档。',
+  helpTimeoutMs:
+    '用途：单次后端请求的超时时间；格式：毫秒整数；默认：未设置；留空：使用后端默认超时，小于 100 会被拒绝。',
+  helpToolPrefix:
+    '用途：所有 reflex_* 工具注册名的前缀；格式：小写字母、数字与下划线；默认：reflex_；留空：按默认前缀注册，空字符串会被拒绝。',
+  helpPruneThreshold:
+    '用途：单个工具结果超过多少字符才触发裁剪；格式：非负整数（字符数）；默认：500；范围：小于 0 会被拒绝，0 表示不设阈值。',
+  helpLedgerPath:
+    '用途：决策账本 JSONL 的落盘路径；格式：相对或绝对路径；默认：未设置；留空：只保留在内存，进程退出即丢失。',
+  helpCalibrationPath:
+    '用途：应用到 choice 置信度上的离线校准曲线文件；格式：相对或绝对 JSON 路径；默认：未设置；留空：不做离线校准，直接使用原始置信度。',
+  helpInterventionMode:
+    '用途：自动干预的总开关语义；格式：off / observe / active 之一；默认：observe；留空：按 observe 处理，只检测并记录、不真正干预。',
+  helpMaxInterventionsPerTurn:
+    '用途：每轮最多执行多少次干预；格式：非负整数；默认：3；留空：按默认处理，0 表示本轮不执行干预。',
+  helpMaxJudgmentsPerTurn:
+    '用途：每轮最多做多少次 System One 判定；格式：非负整数；默认：3；留空：按默认处理。',
+  helpMaxJudgmentsPerSession:
+    '用途：整个会话最多做多少次 System One 判定；格式：非负整数；默认：20；留空：按默认处理。',
+  helpRepeatThreshold:
+    '用途：同一工具调用重复多少次才判定为停滞；格式：整数；默认：3；范围：最小 2，小于 2 会被拒绝。',
+  helpFailureThreshold:
+    '用途：连续失败多少次才触发失败门禁；格式：整数；默认：3；范围：最小 2，小于 2 会被拒绝。',
+  helpInterventionMinConfidence:
+    '用途：干预判定需要的最低置信度；格式：小数；默认：0.6；范围：0~1，越界会被拒绝（注意与推理强度组的 0.3 不同）。',
+  helpWindowSize:
+    '用途：判定重复/停滞时回看的历史窗口大小；格式：整数；默认：6；范围：最小 3，小于 3 会被拒绝。',
+  helpPruneFloorRatio:
+    '用途：裁剪后至少要保留原结果的比例；格式：0~1 的小数；默认：0.5；范围：越界会被拒绝。',
+  helpPruneHeadChars:
+    '用途：裁剪时固定保留的结果头部字符数；格式：非负整数；默认：400；留空：按默认处理，0 表示不保留头部。',
+  helpPruneTailChars:
+    '用途：裁剪时固定保留的结果尾部字符数；格式：非负整数；默认：400；留空：按默认处理，0 表示不保留尾部。',
+  helpPruneIntent:
+    '用途：交给裁剪判定判断哪些内容值得保留的意图描述；格式：自然语言短句；默认：extract diagnostics, relevant results and errors；留空：按默认意图处理。',
+  helpPruneJudgeMinChars:
+    '用途：工具结果达到多少字符才启用逐段 System One 判定；格式：整数（字符数）；默认：10000；范围：不得小于 pruneThreshold，倒挂会被配置校验拒绝。',
+  helpCapability:
+    '用途：控制「{name}」这一路自动干预是否执行；格式：off / observe / active / inherit；默认：inherit；范围：留空即继承主模式（当前 {mode}），显式三态会覆盖主模式。',
+  helpToolSwitch:
+    '用途：{what}；格式：布尔开关（开启/关闭）；默认：{default}；留空：未写时按默认处理，关闭即从工具注册表下线，模型看不到该工具。',
   interventionsEffective: '当前生效（只读）',
   effectiveActing: '执行状态',
   effectiveUnknown: '尚未读取到运行时状态。',
@@ -190,6 +261,7 @@ export const zh = {
   errInterventionCapability: '能力项必须是 off / observe / active / inherit',
   errInterventionBudget: '预算与阈值必须是不小于各自下限的整数',
   errInterventionRatio: '该比例必须是 0 到 1 之间的数字',
+  errPruneJudgeMinChars: '逐段判定最小字符数必须是不小于裁剪阈值的整数',
 
   toneActive: '激活',
   toneInactive: '未激活',
@@ -306,6 +378,78 @@ export const en: Record<keyof typeof zh, string> = {
   labelPruneHeadChars: 'Prune head characters',
   labelPruneTailChars: 'Prune tail characters',
   labelPruneIntent: 'Prune judgment intent',
+  labelPruneJudgeMinChars: 'Per-segment judge minimum characters',
+
+  // (?) guidance: each entry spells out use / format / default / blank-or-range.
+  // The field-guidance test parses those segments and cross-checks the defaults
+  // against resolveConfig instead of trusting this copy.
+  helpAbout: 'About {field}',
+  helpSwitchOn: 'on',
+  helpSwitchOff: 'off',
+  helpRoutingEnabled:
+    'Use: whether the reflex virtual provider is installed to take over model routing; Format: boolean switch; Default: on; Blank: treated as on when omitted, and off sends calls straight to the physical provider.',
+  helpVirtualProvider:
+    'Use: the public name of the virtual provider that owns the model pools; Format: non-empty string without a colon; Default: reflex; Range: blank means the default, while an empty or colon-containing value is rejected by config validation.',
+  helpFallback:
+    'Use: the physical target used when no candidate pool can answer; Format: provider:model, e.g. deepseek-official:deepseek-flash; Default: not set; Blank: no fallback and routing fails closed, and it must not point back at the virtual provider.',
+  helpMaxTaskChars:
+    'Use: the character budget of the task text handed to System One; Format: positive integer (characters); Default: 400; Range: must be greater than 0, and longer text is truncated before the decision.',
+  helpEffortEnabled:
+    'Use: whether each turn may adapt its reasoning effort; Format: boolean switch; Default: on; Blank: treated as on when omitted, and off withdraws adaptive decisions and the injected reflex level.',
+  helpEffortSetting:
+    'Use: the reasoning effort dispatched each turn; Format: blank, reflex (alias auto), or one concrete level; Default: leave untouched; Blank: never set reasoningEffort, leaving the choice to the caller.',
+  helpEffortFallback:
+    'Use: the level used when System One and the cue classifier both lack evidence; Format: one adaptive level; Default: medium; Range: must be an offered adaptive level, and blank means the default.',
+  helpEffortMinConfidence:
+    'Use: the System One confidence needed to override the cue classifier; Format: decimal; Default: 0.3; Range: 0 to 1, and out-of-range values are rejected.',
+  helpBackend:
+    'Use: choose the decision backend implementation; Format: one of auto / mock / jev / vllm; Default: auto; Blank: treated as auto, which picks an available backend from the environment.',
+  helpBaseUrl:
+    'Use: the System One gateway or OpenAI-compatible logits endpoint; Format: http(s) URL; Default: not set; Blank: use the environment or the backend default address.',
+  helpModel:
+    'Use: the model id the backend asks for; Format: non-empty string; Default: not set; Blank: use the environment or the backend default model.',
+  helpApiKeyEnv:
+    'Use: the name of the environment variable holding the API key, never the key itself; Format: an uppercase environment variable name, e.g. JEV_API_KEY; Default: not set; Blank: discovered from the environment, and the secret never enters the settings document.',
+  helpTimeoutMs:
+    'Use: the per-request backend timeout; Format: integer milliseconds; Default: not set; Blank: use the backend default, and values below 100 are rejected.',
+  helpToolPrefix:
+    'Use: the prefix of every registered reflex_* tool name; Format: lowercase letters, digits and underscores; Default: reflex_; Blank: register with the default prefix, and an empty string is rejected.',
+  helpPruneThreshold:
+    'Use: the character count above which a tool result is pruned; Format: non-negative integer (characters); Default: 500; Range: negative values are rejected, and 0 disables the threshold.',
+  helpLedgerPath:
+    'Use: the JSONL sink for the decision ledger; Format: relative or absolute path; Default: not set; Blank: keep the ledger in memory only, lost when the process exits.',
+  helpCalibrationPath:
+    'Use: the offline calibration curve applied to choice confidences; Format: relative or absolute JSON path; Default: not set; Blank: no offline calibration, and raw confidences are used.',
+  helpInterventionMode:
+    'Use: the master semantics of automatic interventions; Format: one of off / observe / active; Default: observe; Blank: treated as observe, which detects and records only and never acts.',
+  helpMaxInterventionsPerTurn:
+    'Use: how many interventions may run per turn; Format: non-negative integer; Default: 3; Blank: the default, where 0 runs none this turn.',
+  helpMaxJudgmentsPerTurn:
+    'Use: how many System One judgments may run per turn; Format: non-negative integer; Default: 3; Blank: the default.',
+  helpMaxJudgmentsPerSession:
+    'Use: how many System One judgments may run per session; Format: non-negative integer; Default: 20; Blank: the default.',
+  helpRepeatThreshold:
+    'Use: how often the same tool call must repeat before it counts as stagnation; Format: integer; Default: 3; Range: minimum 2, and smaller values are rejected.',
+  helpFailureThreshold:
+    'Use: how many consecutive failures trigger the failure gate; Format: integer; Default: 3; Range: minimum 2, and smaller values are rejected.',
+  helpInterventionMinConfidence:
+    'Use: the minimum confidence an intervention needs; Format: decimal; Default: 0.6; Range: 0 to 1, and out-of-range values are rejected (the effort group uses 0.3).',
+  helpWindowSize:
+    'Use: the history window examined for repetition and stagnation; Format: integer; Default: 6; Range: minimum 3, and smaller values are rejected.',
+  helpPruneFloorRatio:
+    'Use: the minimum fraction of the original result kept after pruning; Format: decimal from 0 to 1; Default: 0.5; Range: out-of-range values are rejected.',
+  helpPruneHeadChars:
+    'Use: head characters always kept when pruning; Format: non-negative integer; Default: 400; Blank: the default, where 0 keeps no head.',
+  helpPruneTailChars:
+    'Use: tail characters always kept when pruning; Format: non-negative integer; Default: 400; Blank: the default, where 0 keeps no tail.',
+  helpPruneIntent:
+    'Use: the intent description that tells the pruning judgment what is worth keeping; Format: a short natural-language phrase; Default: extract diagnostics, relevant results and errors; Blank: the default intent.',
+  helpPruneJudgeMinChars:
+    'Use: the result size that enables per-segment System One judging; Format: integer (characters); Default: 10000; Range: must not be smaller than pruneThreshold, and an inverted pair is rejected by config validation.',
+  helpCapability:
+    'Use: whether the "{name}" automatic intervention may run; Format: off / observe / active / inherit; Default: inherit; Range: blank inherits the master mode ({mode}), while an explicit state overrides it.',
+  helpToolSwitch:
+    'Use: {what}; Format: boolean switch (on / off); Default: {default}; Blank: treated as the default when omitted, and off unregisters the tool so the model never sees it.',
   interventionsEffective: 'Currently effective (read-only)',
   effectiveActing: 'Acting',
   effectiveUnknown: 'No runtime state read yet.',
@@ -411,6 +555,7 @@ export const en: Record<keyof typeof zh, string> = {
   errInterventionCapability: 'A capability setting must be off / observe / active / inherit',
   errInterventionBudget: 'Budgets and thresholds must be integers at or above their own minimum',
   errInterventionRatio: 'This ratio must be a number in [0, 1]',
+  errPruneJudgeMinChars: 'The per-segment judge minimum must be an integer at least the prune threshold',
 
   toneActive: 'live',
   toneInactive: 'not live',

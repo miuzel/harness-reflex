@@ -12,7 +12,7 @@
  *
  * @module dsh-reflex/client/view
  */
-import { createElement as h, useCallback, useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { createElement as h, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 
 import {
   ADAPTIVE_EFFORT_LEVELS,
@@ -36,6 +36,7 @@ import {
 } from './panel';
 import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab } from './store';
 import { renderMarkdown } from './markdown';
+import { guideFor, templateGuideFor } from './field-guide';
 
 /** Context face the panel needs; structurally typed against the client runtime. */
 export interface PanelContextLike {
@@ -151,8 +152,45 @@ const S = {
   metricValue: { fontSize: '16px', fontWeight: 600, fontVariantNumeric: 'tabular-nums' },
   field: { display: 'flex', flexDirection: 'column', gap: '4px' },
   fieldRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' },
+  labelRow: { display: 'flex', alignItems: 'flex-start', gap: '6px' },
+  fieldLabel: { display: 'flex', flexDirection: 'column', gap: '4px', flex: '1 1 auto', minWidth: 0 },
   label: { fontSize: '11px', color: token('--dsw-alias-label-tertiary', '#8a8a8a') },
   hint: { fontSize: '11px', color: token('--dsw-alias-label-caption', '#777') },
+  helpButton: {
+    appearance: 'none',
+    flex: '0 0 auto',
+    width: '16px',
+    height: '16px',
+    padding: 0,
+    marginTop: '1px',
+    borderRadius: '999px',
+    border: `1px solid ${token('--dsw-alias-border-l2', 'rgba(255,255,255,.12)')}`,
+    background: token('--dsw-alias-bg-layer-2', 'rgba(255,255,255,.05)'),
+    color: token('--dsw-alias-label-tertiary', '#8a8a8a'),
+    fontSize: '10px',
+    lineHeight: '1',
+    cursor: 'help'
+  },
+  helpText: {
+    display: 'block',
+    fontSize: '11px',
+    lineHeight: '1.5',
+    color: token('--dsw-alias-label-caption', '#777'),
+    maxWidth: '560px'
+  },
+  // Visually hidden but still in the accessibility tree, so `aria-describedby`
+  // reads the same text before the disclosure is expanded.
+  helpSrOnly: {
+    position: 'absolute',
+    width: '1px',
+    height: '1px',
+    padding: 0,
+    margin: '-1px',
+    overflow: 'hidden',
+    clip: 'rect(0 0 0 0)',
+    whiteSpace: 'nowrap',
+    border: 0
+  },
   paragraph: { margin: 0, fontSize: '12px', lineHeight: '1.6' },
   input: {
     width: '100%',
@@ -245,11 +283,6 @@ const S = {
   swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 } as const;
 
-/** One labelled control. */
-function Field(props: { label: string; hint?: string; children?: ReactNode }): ReactNode {
-  return h('label', { style: S.field }, h('span', { style: S.label }, props.label), props.children, props.hint === undefined ? null : h('span', { style: S.hint }, props.hint));
-}
-
 /** One read-only metric card. */
 function Metric(props: { label: string; value: string }): ReactNode {
   return h('div', { style: S.metric }, h('span', { style: S.metricLabel }, props.label), h('span', { style: S.metricValue }, props.value));
@@ -319,20 +352,137 @@ function Select(props: { value: string; options: readonly { value: string; label
   );
 }
 
-/** A checkbox preference row. */
-function Toggle(props: { checked: boolean; label: string; onChange: (checked: boolean) => void; disabled?: boolean }): ReactNode {
+/**
+ * One labelled form field with an optional `(?)` disclosure.
+ *
+ * Accessibility contract: the explanation lives in the DOM as a `role="note"`
+ * element and is referenced by `aria-describedby`, so a screen reader reaches
+ * it without any pointer. The `(?)` itself is a native `<button>`: Tab focuses
+ * it and Enter/Space toggles the visible copy, while the native `title` remains
+ * as a fallback. The note starts visually hidden (not `display:none`), which
+ * keeps it readable before expansion.
+ */
+function Field(props: {
+  label: string;
+  path?: string;
+  help?: string;
+  helpLabel?: string;
+  helpId?: string;
+  hint?: string;
+  checkbox?: { checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void };
+  children?: ReactNode;
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const helpId =
+    props.helpId ?? (props.path === undefined ? undefined : `reflex-help-${props.path.replace(/[^A-Za-z0-9_-]/g, '-')}`);
+  const hasHelp = props.help !== undefined && props.help.length > 0 && helpId !== undefined;
+  const control =
+    props.checkbox === undefined
+      ? h('label', { style: S.fieldLabel }, h('span', { style: S.label }, props.label), props.children)
+      : h(
+          'label',
+          { style: { ...S.row, flex: '1 1 auto', minWidth: 0 } },
+          h('input', {
+            type: 'checkbox',
+            checked: props.checkbox.checked,
+            disabled: props.checkbox.disabled === true,
+            onChange: (event: { target: { checked: boolean } }) => {
+              props.checkbox?.onChange(event.target.checked);
+            }
+          }),
+          h('span', { style: { fontSize: '12px' } }, props.label)
+        );
   return h(
-    'label',
-    { style: S.row },
-    h('input', {
-      type: 'checkbox',
-      checked: props.checked,
-      disabled: props.disabled === true,
-      onChange: (event: { target: { checked: boolean } }) => {
-        props.onChange(event.target.checked);
-      }
-    }),
-    h('span', { style: { fontSize: '12px' } }, props.label)
+    'div',
+    { style: S.field, ...(props.path === undefined ? {} : { 'data-reflex-path': props.path }) },
+    h(
+      'div',
+      { style: S.labelRow },
+      control,
+      hasHelp
+        ? h(
+            'button',
+            {
+              type: 'button',
+              style: S.helpButton,
+              'aria-label': props.helpLabel ?? props.label,
+              'aria-describedby': helpId,
+              'aria-expanded': open,
+              'aria-controls': helpId,
+              title: props.help,
+              onClick: () => {
+                setOpen((previous) => !previous);
+              }
+            },
+            '?'
+          )
+        : null
+    ),
+    hasHelp ? h('span', { id: helpId, role: 'note', style: open ? S.helpText : S.helpSrOnly }, props.help) : null,
+    props.hint === undefined ? null : h('span', { style: S.hint }, props.hint)
+  );
+}
+
+/**
+ * A `Field` whose label, example value and `(?)` copy come from the field guide.
+ *
+ * Callers pass the Host schema path, so the label/placeholder/help triple cannot
+ * drift between the page and the guide table. Dynamic families (tool switches,
+ * intervention capabilities) supply their own label and help text and use the
+ * wildcard row for the rest.
+ */
+function GuidedField(props: {
+  t: Translate;
+  path: string;
+  label?: string;
+  help?: string;
+  hint?: string;
+  value?: string;
+  onChange?: (value: string) => void;
+  options?: readonly { value: string; label: string }[];
+  placeholder?: string;
+  mono?: boolean;
+  disabled?: boolean;
+  checkbox?: { checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void };
+  children?: ReactNode;
+}): ReactNode {
+  const family = props.path.split('.').slice(0, -1).join('.');
+  const guide = guideFor(props.path) ?? (family.length === 0 ? undefined : templateGuideFor(family));
+  const label = props.label ?? (guide?.labelKey === undefined ? props.path : props.t(guide.labelKey));
+  const help = props.help ?? (guide === undefined ? '' : props.t(guide.helpKey));
+  // A component rendered through `h(GuidedField, props)` arrives with an empty
+  // children array; treat that as "no explicit control" so the default control
+  // is still built.
+  const explicitChildren = Array.isArray(props.children) && props.children.length === 0 ? undefined : props.children;
+  const control =
+    explicitChildren ??
+    (props.checkbox !== undefined
+      ? undefined
+      : props.options !== undefined
+        ? Select({
+            value: props.value ?? '',
+            options: props.options,
+            disabled: props.disabled === true,
+            onChange: props.onChange ?? (() => undefined)
+          })
+        : TextInput({
+            value: props.value ?? '',
+            onChange: props.onChange ?? (() => undefined),
+            placeholder: props.placeholder ?? guide?.placeholder,
+            mono: props.mono === true,
+            disabled: props.disabled === true
+          }));
+  return h(
+    Field,
+    {
+      label,
+      path: props.path,
+      help,
+      helpLabel: interpolate(props.t('helpAbout'), { field: label }),
+      hint: props.hint,
+      checkbox: props.checkbox
+    },
+    control
   );
 }
 
@@ -482,13 +632,17 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
       children: h(
         'div',
         { style: S.field },
-        Toggle({ checked: draft.routing.enabled, label: t('labelEnabled'), disabled, onChange: (checked) => setRouting({ enabled: checked }) }),
+        GuidedField({
+          t,
+          path: 'routing.enabled',
+          checkbox: { checked: draft.routing.enabled, disabled, onChange: (checked) => setRouting({ enabled: checked }) }
+        }),
         h(
           'div',
           { style: S.fieldRow },
-          Field({ label: t('labelVirtualProvider'), children: TextInput({ value: draft.routing.virtualProvider, disabled, mono: true, placeholder: 'reflex', onChange: (value) => setRouting({ virtualProvider: value }) }) }),
-          Field({ label: t('labelFallback'), children: TextInput({ value: draft.routing.fallback, disabled, mono: true, placeholder: 'provider:model (如 deepseek-official:deepseek-flash)', onChange: (value) => setRouting({ fallback: value }) }) }),
-          Field({ label: t('labelMaxTaskChars'), children: TextInput({ value: draft.routing.maxTaskChars, disabled, placeholder: '400', onChange: (value) => setRouting({ maxTaskChars: value }) }) })
+          GuidedField({ t, path: 'routing.virtualProvider', value: draft.routing.virtualProvider, disabled, mono: true, onChange: (value) => setRouting({ virtualProvider: value }) }),
+          GuidedField({ t, path: 'routing.fallback', value: draft.routing.fallback, disabled, mono: true, onChange: (value) => setRouting({ fallback: value }) }),
+          GuidedField({ t, path: 'routing.maxTaskChars', value: draft.routing.maxTaskChars, disabled, onChange: (value) => setRouting({ maxTaskChars: value }) })
         )
       )
     }),
@@ -506,7 +660,7 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
               'div',
               { style: S.row },
               h('span', { style: S.label }, t('poolModelId')),
-              TextInput({ value: pool.model, disabled, mono: true, onChange: (value) => setPoolModel(index, value) }),
+              TextInput({ value: pool.model, disabled, mono: true, placeholder: 'reflex-pro', onChange: (value) => setPoolModel(index, value) }),
               Button({ label: t('poolAddEntry'), small: true, disabled, onClick: () => store.addCandidate(index) }),
               Button({ label: t('poolRemoveModel'), small: true, kind: 'danger', disabled, onClick: () => store.removePool(index) })
             ),
@@ -594,28 +748,38 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
       children: h(
         'div',
         { style: S.field },
-        Toggle({
-          checked: draft.effort.enabled,
-          label: t('labelEffortEnabled'),
-          disabled,
-          onChange: (checked) => setEffort({ enabled: checked })
+        GuidedField({
+          t,
+          path: 'effort.enabled',
+          checkbox: { checked: draft.effort.enabled, disabled, onChange: (checked) => setEffort({ enabled: checked }) }
         }),
         h('div', { style: S.hint }, t('effortDisabledHint')),
         h(
           'div',
           { style: S.fieldRow },
-          Field({
-            label: t('labelEffortSetting'),
+          GuidedField({
+            t,
+            path: 'effort.setting',
             hint: t('effortHint'),
-            children: Select({ value: draft.effort.setting, options: effortPolicyOptions(t), disabled, onChange: (value) => setEffort({ setting: value }) })
+            value: draft.effort.setting,
+            options: effortPolicyOptions(t),
+            disabled,
+            onChange: (value) => setEffort({ setting: value })
           }),
-          Field({
-            label: t('labelEffortFallback'),
-            children: Select({ value: draft.effort.fallback, options: adaptiveLevelOptions(), disabled, onChange: (value) => setEffort({ fallback: value }) })
+          GuidedField({
+            t,
+            path: 'effort.fallback',
+            value: draft.effort.fallback,
+            options: adaptiveLevelOptions(),
+            disabled,
+            onChange: (value) => setEffort({ fallback: value })
           }),
-          Field({
-            label: t('labelEffortMinConfidence'),
-            children: TextInput({ value: draft.effort.minConfidence, disabled, placeholder: '0.3', onChange: (value) => setEffort({ minConfidence: value }) })
+          GuidedField({
+            t,
+            path: 'effort.minConfidence',
+            value: draft.effort.minConfidence,
+            disabled,
+            onChange: (value) => setEffort({ minConfidence: value })
           })
         )
       )
@@ -671,30 +835,29 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
         h(
           'div',
           { style: S.fieldRow },
-          Field({
-            label: t('labelBackend'),
-            children: Select({
-              value: draft.backend.backend,
-              options: BACKEND_CHOICES.map((value) => ({ value, label: value })),
-              disabled,
-              onChange: (value) => {
-                if (value === 'jev') {
-                  setBackend({
-                    backend: value,
-                    baseUrl: draft.backend.baseUrl || 'https://api.typesafe.ai/v1/systemone',
-                    model: draft.backend.model || 'jev-latest',
-                    apiKeyEnv: draft.backend.apiKeyEnv || 'JEV_API_KEY'
-                  });
-                } else {
-                  setBackend({ backend: value });
-                }
+          GuidedField({
+            t,
+            path: 'backend',
+            value: draft.backend.backend,
+            options: BACKEND_CHOICES.map((value) => ({ value, label: value })),
+            disabled,
+            onChange: (value) => {
+              if (value === 'jev') {
+                setBackend({
+                  backend: value,
+                  baseUrl: draft.backend.baseUrl || 'https://api.typesafe.ai/v1/systemone',
+                  model: draft.backend.model || 'jev-latest',
+                  apiKeyEnv: draft.backend.apiKeyEnv || 'JEV_API_KEY'
+                });
+              } else {
+                setBackend({ backend: value });
               }
-            })
+            }
           }),
-          Field({ label: t('labelBaseUrl'), children: TextInput({ value: draft.backend.baseUrl, disabled, mono: true, placeholder: 'https://api.typesafe.ai/v1/systemone', onChange: (value) => setBackend({ baseUrl: value }) }) }),
-          Field({ label: t('labelModel'), children: TextInput({ value: draft.backend.model, disabled, mono: true, placeholder: 'jev-latest', onChange: (value) => setBackend({ model: value }) }) }),
-          Field({ label: t('labelApiKeyEnv'), hint: t('backendHint'), children: TextInput({ value: draft.backend.apiKeyEnv, disabled, mono: true, placeholder: 'SYSTEM_ONE_API_KEY', onChange: (value) => setBackend({ apiKeyEnv: value }) }) }),
-          Field({ label: t('labelTimeoutMs'), children: TextInput({ value: draft.backend.timeoutMs, disabled, placeholder: '10000', onChange: (value) => setBackend({ timeoutMs: value }) }) })
+          GuidedField({ t, path: 'systemOne.baseUrl', value: draft.backend.baseUrl, disabled, mono: true, onChange: (value) => setBackend({ baseUrl: value }) }),
+          GuidedField({ t, path: 'systemOne.model', value: draft.backend.model, disabled, mono: true, onChange: (value) => setBackend({ model: value }) }),
+          GuidedField({ t, path: 'systemOne.apiKeyEnv', hint: t('backendHint'), value: draft.backend.apiKeyEnv, disabled, mono: true, onChange: (value) => setBackend({ apiKeyEnv: value }) }),
+          GuidedField({ t, path: 'systemOne.timeoutMs', value: draft.backend.timeoutMs, disabled, onChange: (value) => setBackend({ timeoutMs: value }) })
         ),
         h(
           'div',
@@ -712,10 +875,10 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
       children: h(
         'div',
         { style: S.fieldRow },
-        Field({ label: t('labelToolPrefix'), children: TextInput({ value: draft.runtime.toolPrefix, disabled, mono: true, placeholder: 'reflex_', onChange: (value) => setRuntime({ toolPrefix: value }) }) }),
-        Field({ label: t('labelPruneThreshold'), children: TextInput({ value: draft.runtime.pruneThreshold, disabled, placeholder: '500', onChange: (value) => setRuntime({ pruneThreshold: value }) }) }),
-        Field({ label: t('labelLedgerPath'), children: TextInput({ value: draft.runtime.ledgerPath, disabled, mono: true, placeholder: '.reflex/ledger.jsonl (默认留空存内存)', onChange: (value) => setRuntime({ ledgerPath: value }) }) }),
-        Field({ label: t('labelCalibrationPath'), children: TextInput({ value: draft.runtime.calibrationPath, disabled, mono: true, placeholder: '可选校准 JSON 路径 (默认留空)', onChange: (value) => setRuntime({ calibrationPath: value }) }) })
+        GuidedField({ t, path: 'toolPrefix', value: draft.runtime.toolPrefix, disabled, mono: true, onChange: (value) => setRuntime({ toolPrefix: value }) }),
+        GuidedField({ t, path: 'pruneThreshold', value: draft.runtime.pruneThreshold, disabled, onChange: (value) => setRuntime({ pruneThreshold: value }) }),
+        GuidedField({ t, path: 'ledgerPath', value: draft.runtime.ledgerPath, disabled, mono: true, onChange: (value) => setRuntime({ ledgerPath: value }) }),
+        GuidedField({ t, path: 'calibrationPath', value: draft.runtime.calibrationPath, disabled, mono: true, onChange: (value) => setRuntime({ calibrationPath: value }) })
       )
     })
   );
@@ -864,17 +1027,14 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
     }));
   };
   const effective = state.snapshot?.interventions;
-  const budgetField = (label: string, key: keyof PanelDraft['interventions'], placeholder: string): ReactNode =>
-    h(
-      Field,
-      { key: String(key), label: t(label) },
-      TextInput({
-        value: String(draft.interventions[key] ?? ''),
-        disabled,
-        placeholder,
-        onChange: (value) => setInterventions({ [key]: value } as Partial<PanelDraft['interventions']>)
-      })
-    );
+  const budgetField = (key: keyof PanelDraft['interventions']): ReactNode =>
+    GuidedField({
+      t,
+      path: `interventions.${String(key)}`,
+      value: String(draft.interventions[key] ?? ''),
+      disabled,
+      onChange: (value) => setInterventions({ [key]: value } as Partial<PanelDraft['interventions']>)
+    });
   return h(
     'div',
     { style: S.root },
@@ -887,49 +1047,58 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
         h(
           'div',
           { style: S.fieldRow },
-          Field({
-            label: t('labelInterventionMode'),
+          GuidedField({
+            t,
+            path: 'interventions.mode',
             hint: t('interventionModeHint'),
-            children: Select({
-              value: draft.interventions.mode,
-              options: interventionModeOptions(t, false),
-              disabled,
-              onChange: (value) => setInterventions({ mode: value })
-            })
+            value: draft.interventions.mode,
+            options: interventionModeOptions(t, false),
+            disabled,
+            onChange: (value) => setInterventions({ mode: value })
           }),
           ...INTERVENTION_CAPABILITIES.map((capability) =>
-            h(
-              Field,
-              { key: capability, label: t(CAPABILITY_COPY[capability] ?? capability) },
-              Select({
-                value: draft.interventions.capabilities[capability] ?? 'inherit',
-                options: interventionModeOptions(t, true),
-                disabled,
-                onChange: (value) => setCapability(capability, value)
-              })
-            )
+            h(GuidedField, {
+              key: capability,
+              t,
+              path: `interventions.capabilities.${capability}`,
+              label: t(CAPABILITY_COPY[capability] ?? capability),
+              help: interpolate(t('helpCapability'), {
+                name: t(CAPABILITY_COPY[capability] ?? capability),
+                mode: draft.interventions.mode
+              }),
+              value: draft.interventions.capabilities[capability] ?? 'inherit',
+              options: interventionModeOptions(t, true),
+              disabled,
+              onChange: (value: string) => setCapability(capability, value)
+            })
           )
         ),
         h(
           'div',
           { style: S.fieldRow },
-          budgetField('labelMaxInterventionsPerTurn', 'maxInterventionsPerTurn', '3'),
-          budgetField('labelMaxJudgmentsPerTurn', 'maxJudgmentsPerTurn', '3'),
-          budgetField('labelMaxJudgmentsPerSession', 'maxJudgmentsPerSession', '20'),
-          budgetField('labelRepeatThreshold', 'repeatThreshold', '3'),
-          budgetField('labelFailureThreshold', 'failureThreshold', '3'),
-          budgetField('labelWindowSize', 'windowSize', '6'),
-          budgetField('labelInterventionMinConfidence', 'minConfidence', '0.6'),
-          budgetField('labelPruneFloorRatio', 'pruneFloorRatio', '0.5'),
-          budgetField('labelPruneHeadChars', 'pruneHeadChars', '400'),
-          budgetField('labelPruneTailChars', 'pruneTailChars', '400'),
-          Field({
-            label: t('labelPruneIntent'),
-            children: TextInput({
-              value: draft.interventions.intent,
-              disabled,
-              onChange: (value) => setInterventions({ intent: value })
-            })
+          budgetField('maxInterventionsPerTurn'),
+          budgetField('maxJudgmentsPerTurn'),
+          budgetField('maxJudgmentsPerSession'),
+          budgetField('repeatThreshold'),
+          budgetField('failureThreshold'),
+          budgetField('windowSize'),
+          budgetField('minConfidence'),
+          budgetField('pruneFloorRatio'),
+          budgetField('pruneHeadChars'),
+          budgetField('pruneTailChars'),
+          GuidedField({
+            t,
+            path: 'interventions.pruneJudgeMinChars',
+            value: draft.interventions.pruneJudgeMinChars,
+            disabled,
+            onChange: (value) => setInterventions({ pruneJudgeMinChars: value })
+          }),
+          GuidedField({
+            t,
+            path: 'interventions.intent',
+            value: draft.interventions.intent,
+            disabled,
+            onChange: (value) => setInterventions({ intent: value })
           })
         )
       )
@@ -1022,14 +1191,23 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
               h(
                 'div',
                 { style: S.toolHead },
-                Toggle({
+                GuidedField({
+                  t,
+                  path: `tools.enabled.${suffix}`,
+                  // The label is the registered name under the current prefix.
+                  label: `${draft.runtime.toolPrefix}${suffix}`,
+                  help: interpolate(t('helpToolSwitch'), {
+                    what: t(`toolWhat_${suffix}`).replace(/[。.]$/, ''),
+                    default: (draft.tools.enabled[suffix] ?? TOOL_DEFAULT_ENABLED[suffix]) ? t('helpSwitchOn') : t('helpSwitchOff')
+                  }),
                   // The switch shows the *effective* state, so a suffix the
                   // deployment never mentioned reads its documented default
                   // (`route` starts off) instead of an unconditional "on".
-                  checked: draft.tools.enabled[suffix] ?? TOOL_DEFAULT_ENABLED[suffix],
-                  label: `${draft.runtime.toolPrefix}${suffix}`,
-                  disabled,
-                  onChange: (checked) => setTool(suffix, checked)
+                  checkbox: {
+                    checked: draft.tools.enabled[suffix] ?? TOOL_DEFAULT_ENABLED[suffix],
+                    disabled,
+                    onChange: (checked) => setTool(suffix, checked)
+                  }
                 }),
                 h(
                   'span',
