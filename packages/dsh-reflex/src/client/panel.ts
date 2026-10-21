@@ -927,7 +927,12 @@ export interface PanelChip {
   /** `true` when {@link text} is a copy key rather than literal text. */
   translated: boolean;
   tone: string;
+  /** Literal hover/focus copy, for a chip whose explanation needs no translation. */
   title?: string;
+  /** Copy key for the explanation: what it is, why it is in this state, where to change it. */
+  titleKey?: string;
+  /** Values interpolated into a translated {@link text} / {@link titleKey}. */
+  values?: Record<string, string>;
 }
 
 /** Live snapshot as the panel consumes it; a loose shape by design. */
@@ -1076,27 +1081,41 @@ export function panelChips(snapshot: PanelSnapshotLike | null): PanelChip[] {
   if (snapshot === null) return [];
   const chips: PanelChip[] = [];
   const routing = snapshot.routing ?? {};
+  const routingActive = routing.active === true;
+  const candidates = formatInteger(routing.candidates ?? 0);
   chips.push({
     id: 'routing',
-    text: routing.active === true ? 'toneActive' : 'toneInactive',
+    text: routingActive ? 'chipRoutingActive' : 'chipRoutingInactive',
     translated: true,
-    tone: routing.active === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-label-tertiary',
-    title: `${String(routing.virtualProvider ?? '')} · ${formatInteger(routing.candidates ?? 0)}`
+    tone: routingActive ? '--dsw-alias-state-success-primary' : '--dsw-alias-label-tertiary',
+    titleKey: routingActive ? 'chipRoutingTitleActive' : 'chipRoutingTitleInactive',
+    values: { candidates }
   });
   const setting = snapshot.effort?.setting;
+  const effortUnset = setting === null || setting === undefined || setting === '';
   chips.push({
     id: 'effort',
-    text: setting === null || setting === undefined || setting === '' ? 'unset' : setting,
-    translated: setting === null || setting === undefined || setting === '',
-    tone: setting === null || setting === undefined || setting === '' ? '--dsw-alias-label-tertiary' : levelTone(setting)
+    text: effortUnset ? 'chipEffortUnset' : 'chipEffortSet',
+    translated: true,
+    tone: effortUnset ? '--dsw-alias-label-tertiary' : levelTone(setting),
+    titleKey: effortUnset ? 'chipEffortTitleUnset' : 'chipEffortTitleSet',
+    ...(effortUnset ? {} : { values: { level: String(setting) } })
   });
   const backend = snapshot.systemOne;
+  const backendName = String(backend?.active ?? backend?.backend ?? '');
+  const apiKeyEnv = backend?.apiKeyEnv;
   chips.push({
     id: 'backend',
-    text: String(backend?.active ?? backend?.backend ?? ''),
-    translated: false,
+    text: 'chipBackend',
+    translated: true,
     tone: '--dsw-alias-label-secondary',
-    title: backend?.apiKeyEnv === undefined ? undefined : `${backend.apiKeyEnv}: ${backend.apiKeyPresent === true ? 'set' : 'empty'}`
+    titleKey:
+      apiKeyEnv === undefined
+        ? 'chipBackendTitleUnsetKey'
+        : backend?.apiKeyPresent === true
+          ? 'chipBackendTitle'
+          : 'chipBackendTitleMissing',
+    values: apiKeyEnv === undefined ? { backend: backendName } : { backend: backendName, env: apiKeyEnv }
   });
   return chips;
 }

@@ -540,14 +540,17 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
       h(
         'div',
         { style: S.chips },
-        ...chips.map((chip) =>
-          h(
+        ...chips.map((chip) => {
+          const values = chip.values ?? {};
+          const label = chip.translated ? interpolate(t(chip.text), values) : chip.text;
+          const title = chip.titleKey === undefined ? chip.title ?? '' : interpolate(t(chip.titleKey), values);
+          return h(
             'span',
-            { key: chip.id, style: { ...S.chip, color: token(chip.tone, 'inherit') }, title: chip.title ?? '' },
+            { key: chip.id, style: { ...S.chip, color: token(chip.tone, 'inherit') }, title },
             h('span', { style: S.chipDot }),
-            chip.translated ? t(chip.text) : chip.text
-          )
-        )
+            label
+          );
+        })
       )
     ),
     h('span', { style: S.subtitle }, t('subtitle')),

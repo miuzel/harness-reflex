@@ -279,6 +279,26 @@ export const zh = {
   toneEnabled: '已启用',
   toneDisabled: '已停用',
 
+  chipRoutingActive: '路由 · 已启用（{candidates} 候选）',
+  chipRoutingInactive: '路由 · 未启用',
+  chipRoutingTitleActive:
+    '虚拟 Provider 路由已启用：请求会按模型池路由到候选物理模型，当前共 {candidates} 个候选。可在「虚拟 Provider」页调整启用状态、候选池或兜底目标。',
+  chipRoutingTitleInactive:
+    '虚拟 Provider 路由未启用（routing.enabled=false 或候选池为空）：请求直接使用所选物理模型。请在「虚拟 Provider」页启用路由并配置候选池。',
+  chipEffortSet: '推理强度 · {level}',
+  chipEffortUnset: '推理强度 · 未设置',
+  chipEffortTitleSet:
+    '已选择推理强度：每轮按 {level} 执行并随请求下发。可在「推理强度」页改选其他档位或 Reflex 自适应。',
+  chipEffortTitleUnset:
+    '无推理强度选择：插件不干预，使用模型默认档位。请在「推理强度」页选择具体档位或 Reflex 自适应。',
+  chipBackend: '后端 · {backend}',
+  chipBackendTitle:
+    'System One 决策后端当前为 {backend}；API Key 环境变量 {env} 已就绪（apiKeyEnv: set）。可在「System 1 后端」页更换实现或调整连接。',
+  chipBackendTitleMissing:
+    'System One 决策后端当前为 {backend}；缺少 {env} 环境变量（apiKeyEnv: empty），决策会降级到本地兜底。请在「System 1 后端」页配置该环境变量或更换后端。',
+  chipBackendTitleUnsetKey:
+    'System One 决策后端当前为 {backend}；未声明 API Key 环境变量，插件会使用环境默认密钥或降级到本地兜底。可在「System 1 后端」页配置连接。',
+
   // In-panel user guide: the body is the repository document itself, embedded
   // at build time by `scripts/embed-user-guide.mjs`.
   guideTitle: 'Harness Reflex 使用说明',
@@ -583,6 +603,26 @@ export const en: Record<keyof typeof zh, string> = {
   toneInactive: 'not live',
   toneEnabled: 'enabled',
   toneDisabled: 'disabled',
+
+  chipRoutingActive: 'Routing · enabled (candidates: {candidates})',
+  chipRoutingInactive: 'Routing · disabled',
+  chipRoutingTitleActive:
+    'Virtual Provider routing is enabled: requests are routed to candidate physical models from the pools, currently {candidates} candidates. Change the switch, pools, or fallback on the "Virtual Provider" page.',
+  chipRoutingTitleInactive:
+    'Virtual Provider routing is disabled (routing.enabled=false or the candidate pools are empty): requests use the selected physical model directly. Enable routing and configure a pool on the "Virtual Provider" page.',
+  chipEffortSet: 'Reasoning effort · {level}',
+  chipEffortUnset: 'Reasoning effort · not set',
+  chipEffortTitleSet:
+    'A reasoning effort is selected: every turn dispatches {level} with the request. Change it or pick Reflex adaptive on the "Reasoning effort" page.',
+  chipEffortTitleUnset:
+    'No reasoning effort is selected: the plugin does not intervene and the model default level applies. Choose a level or Reflex adaptive on the "Reasoning effort" page.',
+  chipBackend: 'Backend · {backend}',
+  chipBackendTitle:
+    'System One decision backend is {backend}; API key env {env} is ready (apiKeyEnv: set). Change the implementation or connection on the "System 1 backend" page.',
+  chipBackendTitleMissing:
+    'System One decision backend is {backend}; API key env {env} is missing (apiKeyEnv: empty), so decisions degrade to the local fallback. Set that env var or change the backend on the "System 1 backend" page.',
+  chipBackendTitleUnsetKey:
+    'System One decision backend is {backend}; no API key env is declared, so the plugin uses the environment default key or degrades to the local fallback. Configure the connection on the "System 1 backend" page.',
 
   // In-panel user guide; see the Chinese dictionary for the embedding contract.
   guideTitle: 'Harness Reflex user guide',

@@ -1156,6 +1156,104 @@ test('the backend page reports a missing key variable', async () => {
   mounted.unmount();
 });
 
+//#region header chips
+
+/** The header badges: their visible label and their hover/focus explanation. */
+function chipViews(tree: unknown): { text: string; title: string }[] {
+  return elements(tree)
+    .filter((element) => element.type === 'span' && typeof element.props.title === 'string' && (element.props.title as string).length > 0)
+    .map((element) => ({ text: textOf(element), title: element.props.title as string }));
+}
+
+/** Facts whose snapshot leaves the reasoning effort unset. */
+function factsWithUnsetEffort(apiKeyPresent: boolean): PanelRuntimeFacts {
+  const base = facts(apiKeyPresent);
+  return {
+    ...base,
+    config: resolveConfig({ ...AUTHORED, effort: { fallback: 'low', minConfidence: 0.3 } })
+  };
+}
+
+test('header chips name their subject and explain the active state', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+
+  const chips = chipViews(mounted.tree);
+  assert.equal(chips.length, 3, 'the header must show exactly three badges');
+  const [routing, effort, backend] = chips;
+  assert.equal(routing?.text, '路由 · 已启用（1 候选）');
+  assert.ok(routing?.title.includes('虚拟 Provider 路由已启用'), 'routing badge does not say what it is');
+  assert.ok(routing?.title.includes('「虚拟 Provider」页'), 'routing badge does not say where to change it');
+  assert.equal(effort?.text, '推理强度 · reflex');
+  assert.ok(effort?.title.includes('推理强度'), 'effort badge does not say what it is');
+  assert.ok(effort?.title.includes('「推理强度」页'), 'effort badge does not say where to change it');
+  assert.equal(backend?.text, '后端 · jev');
+  assert.ok(backend?.title.includes('System One 决策后端'), 'backend badge does not say what it is');
+  assert.ok(backend?.title.includes('apiKeyEnv: set'), 'backend badge drops the key status');
+  assert.ok(backend?.title.includes('「System 1 后端」页'), 'backend badge does not say where to change it');
+  mounted.unmount();
+});
+
+test('disabled routing and unset effort state the reason instead of only the negation', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form });
+
+  const chips = chipViews(mounted.tree);
+  assert.equal(chips.length, 3, 'the header must show exactly three badges');
+  const [routing, effort, backend] = chips;
+  assert.equal(routing?.text, '路由 · 未启用');
+  assert.ok(routing?.title.includes('routing.enabled=false'), 'routing badge does not name the disabled switch');
+  assert.ok(routing?.title.includes('候选池为空'), 'routing badge does not name the empty pool');
+  assert.ok(routing?.title.includes('「虚拟 Provider」页'), 'routing badge does not say where to enable it');
+  assert.equal(effort?.text, '推理强度 · 未设置');
+  assert.ok(effort?.title.includes('不干预'), 'unset effort does not say the plugin stays passive');
+  assert.ok(effort?.title.includes('模型默认档位'), 'unset effort does not say what applies instead');
+  assert.ok(effort?.title.includes('「推理强度」页'), 'unset effort does not say where to choose one');
+  assert.equal(backend?.text, '后端 · jev');
+  assert.ok(backend?.title.includes('缺少 REFLEX_TEST_KEY'), 'missing key is not named');
+  assert.ok(backend?.title.includes('apiKeyEnv: empty'), 'missing key status is not shown');
+  assert.ok(backend?.title.includes('降级'), 'missing key does not warn about degradation');
+  mounted.unmount();
+});
+
+test('the English header chips mirror the subjects and explanations', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form, language: 'en' });
+
+  const chips = chipViews(mounted.tree);
+  const [routing, effort, backend] = chips;
+  assert.equal(routing?.text, 'Routing · enabled (candidates: 1)');
+  assert.ok(routing?.title.includes('Virtual Provider routing is enabled'));
+  assert.ok(routing?.title.includes('"Virtual Provider" page'));
+  assert.equal(effort?.text, 'Reasoning effort · reflex');
+  assert.ok(effort?.title.includes('"Reasoning effort" page'));
+  assert.equal(backend?.text, 'Backend · jev');
+  assert.ok(backend?.title.includes('apiKeyEnv: set'));
+  assert.ok(backend?.title.includes('"System 1 backend" page'));
+  mounted.unmount();
+});
+
+test('the English header chips explain the inactive, unset, and degraded states', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form, language: 'en' });
+
+  const chips = chipViews(mounted.tree);
+  const [routing, effort, backend] = chips;
+  assert.equal(routing?.text, 'Routing · disabled');
+  assert.ok(routing?.title.includes('routing.enabled=false'));
+  assert.ok(routing?.title.includes('pools are empty'));
+  assert.equal(effort?.text, 'Reasoning effort · not set');
+  assert.ok(effort?.title.includes('does not intervene'));
+  assert.ok(effort?.title.includes('model default'));
+  assert.equal(backend?.text, 'Backend · jev');
+  assert.ok(backend?.title.includes('is missing'));
+  assert.ok(backend?.title.includes('apiKeyEnv: empty'));
+  assert.ok(backend?.title.includes('degrade'));
+  mounted.unmount();
+});
+
+//#endregion
+
 //#region host write contract
 
 /** The part of a schemastery node the write contract walks. */
