@@ -168,6 +168,12 @@ export interface ReflexInterventionsConfig {
   pruneHeadChars?: number;
   /** Characters always kept from the tail of a pruned payload. Default `400`. */
   pruneTailChars?: number;
+  /**
+   * Character count at/above which pruning judges the payload segment by
+   * segment through System One. Below it the deterministic local candidates run
+   * and no judgment is spent. Must be at least `pruneThreshold`. Default `10000`.
+   */
+  pruneJudgeMinChars?: number;
   /** Lookup intent handed to the pruning judgment. */
   intent?: string;
 }
@@ -190,6 +196,8 @@ export interface ResolvedInterventionsConfig {
   pruneFloorRatio: number;
   pruneHeadChars: number;
   pruneTailChars: number;
+  /** At/above this character count pruning judges segments through System One. */
+  pruneJudgeMinChars: number;
   intent: string;
 }
 
@@ -346,6 +354,10 @@ const InterventionsSchema = z
     pruneFloorRatio: z.number().min(0).max(1).default(0.5),
     pruneHeadChars: z.natural().default(400),
     pruneTailChars: z.natural().default(400),
+    pruneJudgeMinChars: z
+      .natural()
+      .default(10000)
+      .description('At or above this many characters, pruning judges the output segment by segment through System One.'),
     intent: z.string().description('Lookup intent handed to the pruning judgment.')
   })
   .volatile();
@@ -482,10 +494,15 @@ export function resolveInterventionSetting(
  * answer instead of re-deriving inheritance.
  *
  * @param authored - the authored `interventions` block.
+ * @param pruneThreshold - the runtime prune threshold, the lower bound of the
+ *   segment-judging threshold.
  * @returns the resolved master mode, effective capability modes, and limits.
  * @throws Error when a field is present but unusable.
  */
-export function resolveInterventionsConfig(authored: ReflexInterventionsConfig | undefined): ResolvedInterventionsConfig {
+export function resolveInterventionsConfig(
+  authored: ReflexInterventionsConfig | undefined,
+  pruneThreshold = 500
+): ResolvedInterventionsConfig {
   const block = authored ?? {};
   const mode = (resolveInterventionSetting(block.mode, false, 'interventions.mode') ?? 'observe') as InterventionMode;
 
@@ -507,7 +524,8 @@ export function resolveInterventionsConfig(authored: ReflexInterventionsConfig |
     [block.failureThreshold, 'failureThreshold', 3, 2],
     [block.windowSize, 'windowSize', 6, 3],
     [block.pruneHeadChars, 'pruneHeadChars', 400, 0],
-    [block.pruneTailChars, 'pruneTailChars', 400, 0]
+    [block.pruneTailChars, 'pruneTailChars', 400, 0],
+    [block.pruneJudgeMinChars, 'pruneJudgeMinChars', 10000, 0]
   ];
   const resolved: Record<string, number> = {};
   for (const [value, name, fallback, minimum] of counts) {
@@ -529,6 +547,12 @@ export function resolveInterventionsConfig(authored: ReflexInterventionsConfig |
   if (!Number.isFinite(pruneFloorRatio) || pruneFloorRatio < 0 || pruneFloorRatio > 1) {
     throw new Error(`interventions.pruneFloorRatio must be a number in [0, 1] (got "${String(block.pruneFloorRatio)}")`);
   }
+  const pruneJudgeMinChars = resolved.pruneJudgeMinChars!;
+  if (pruneJudgeMinChars < pruneThreshold) {
+    throw new Error(
+      `interventions.pruneJudgeMinChars must be >= pruneThreshold (${String(pruneThreshold)}) (got "${String(pruneJudgeMinChars)}")`
+    );
+  }
 
   return {
     mode,
@@ -547,6 +571,7 @@ export function resolveInterventionsConfig(authored: ReflexInterventionsConfig |
     pruneFloorRatio,
     pruneHeadChars: resolved.pruneHeadChars!,
     pruneTailChars: resolved.pruneTailChars!,
+    pruneJudgeMinChars,
     intent: optionalText(block.intent) ?? 'extract diagnostics, relevant results and errors'
   };
 }
@@ -731,7 +756,7 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
       minConfidence
     },
     tools: resolveToolsConfig(validated.tools),
-    interventions: resolveInterventionsConfig(validated.interventions)
+    interventions: resolveInterventionsConfig(validated.interventions, validated.pruneThreshold ?? 500)
   };
 }
 

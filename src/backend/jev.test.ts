@@ -9,9 +9,11 @@ import {
   STAGNATION_PATTERNS,
   STAGNATION_STUCK_FLOOR,
   buildPruneCandidates,
+  buildScoredPruneCandidates,
   detectStagnationLocally,
   normalizeSystemOneEndpoint,
   pickLocalPruneCandidate,
+  segmentPruneOutput,
   uniqueCriteriaKeys
 } from './jev.js';
 import type { ActionStep, RouteRequest } from './types.js';
@@ -399,32 +401,224 @@ test('gate fails closed without calling the gateway when there is no evidence', 
   }
 });
 
-test('prune ranks its deterministic candidates with one score question', async () => {
-  const stub = stubFetch(() => ({
-    json: envelope({ prune: { type: 'score', score: 0.1, confidence: 0.9, legend: {}, probabilities: { 0: 0.9, 1: 0.05, 2: 0.05 } } })
-  }));
+/* -------------------------------------------------------------------------- */
+/* Prune: deterministic path for small payloads, segment judging for large ones */
+/* -------------------------------------------------------------------------- */
+
+/** One segment-score answer: `keep` as the probability of criterion 1. */
+function scoreAnswer(keep: number): unknown {
+  return { type: 'score', score: keep, confidence: 1, probabilities: { '0': 1 - keep, '1': keep } };
+}
+
+/** Answer every segment question of a request with the score the callback returns. */
+function replySegments(scoreOf: (segmentIndex: number) => number) {
+  return (call: StubCall) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(call.body.questions ?? {})) {
+      const index = Number(id.slice('prune-seg-'.length));
+      answers[id] = scoreAnswer(scoreOf(index));
+    }
+    return { json: envelope(answers) };
+  };
+}
+
+/** Backend with an explicit segment-judging threshold. */
+function judgingBackend(pruneJudgeMinChars?: number): JevDecisionBackend {
+  return new JevDecisionBackend({
+    apiKey: 'test-key',
+    model: 'jev-latest',
+    timeoutMs: 500,
+    ...(pruneJudgeMinChars === undefined ? {} : { pruneJudgeMinChars })
+  });
+}
+
+/** A line padded to an exact width, so fixture sizes are predictable. */
+function fixedWidthLine(prefix: string, width: number): string {
+  return `${prefix} ${'x'.repeat(Math.max(0, width - prefix.length - 1))}`;
+}
+
+/** Blank-line separated blocks, each block one segment (unless a line is overridden). */
+function blocksLog(
+  blocks: number,
+  linesPerBlock: number,
+  width: number,
+  override?: (block: number, line: number) => string | undefined
+): string {
+  const lines: string[] = [];
+  for (let block = 0; block < blocks; block++) {
+    if (block > 0) lines.push('');
+    for (let line = 0; line < linesPerBlock; line++) {
+      const custom = override?.(block, line);
+      lines.push(custom ?? fixedWidthLine(`block-${String(block).padStart(2, '0')}-line-${String(line)}`, width));
+    }
+  }
+  return lines.join('\n');
+}
+
+/** The reproducible progress-bar format of the bug report. */
+function progressLog(count: number, width: number): string {
+  return Array.from({ length: count }, (_, index) => `[===] progress ${String(index).padStart(3, '0')} ${'x'.repeat(width)}`).join(
+    '\n'
+  );
+}
+
+/** A different layout: percentage counters with unique numbers. */
+function percentLog(count: number, width: number): string {
+  return Array.from(
+    { length: count },
+    (_, index) =>
+      `Downloading artifact ${String(index).padStart(3, '0')} ${String((index * 7) % 100).padStart(2, '0')}% ${'x'.repeat(width)}`
+  ).join('\n');
+}
+
+test('prune below the judge threshold uses the local candidates and sends no request', async () => {
+  const stub = stubFetch(() => ({ json: envelope({}) }));
   try {
-    const result = await backend().prune({ rawOutput: LOG, intent: 'find the test failure' });
+    const raw = blocksLog(30, 3, 97); // ~8.8k characters, below the 10k default
+    assert.ok(raw.length < 10000);
+    const result = await backend().prune({ rawOutput: raw, intent: 'find the failure' });
+
+    assert.equal(stub.calls.length, 0, 'a payload below pruneJudgeMinChars must not reach the gateway');
+    assert.equal(result.judgePath, 'local');
+    assert.ok(result.processedOutput.length <= raw.length);
+    assert.equal(result.shadow, false);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('prune at 10k characters or more judges every segment in exactly one request', async () => {
+  const stub = stubFetch(replySegments(() => 0.9));
+  try {
+    const raw = blocksLog(24, 3, 165); // ~12k characters, 24 blank-line segments
+    assert.ok(raw.length >= 10000);
+    const result = await backend().prune({ rawOutput: raw, intent: 'find the failure' });
+
+    assert.equal(stub.calls.length, 1, 'the segment judgment is one batched request');
+    const [call] = stub.calls;
+    const ids = Object.keys(call.body.questions).sort();
+    assert.ok(ids.length > 1);
+    for (const id of ids) {
+      assert.match(id, /^prune-seg-\d+$/);
+      assert.equal(call.body.questions[id].type, 'score');
+      assert.deepEqual(call.body.questions[id].criteria, [
+        'omit: repetitive, irrelevant, or safe to drop',
+        'keep: unique, relevant, or diagnostic content'
+      ]);
+    }
+    assert.equal(ids.length, result.judgedSegments, 'question count == judged segment count');
+    assert.equal(ids.length, Object.keys(call.body.state.segments).length, 'each judged segment carries its text');
+    assert.equal(call.body.state.intent, 'find the failure');
+    assert.equal(result.judgePath, 'segmented');
+    assert.equal(result.unjudgedSegments, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('exactly pruneJudgeMinChars is already the segmented path', async () => {
+  const stub = stubFetch(replySegments(() => 0.9));
+  try {
+    const base = blocksLog(20, 3, 160);
+    const raw = base + 'y'.repeat(10000 - base.length); // exactly 10,000 characters
+    assert.equal(raw.length, 10000);
+    const result = await backend().prune({ rawOutput: raw, intent: 'errors' });
 
     assert.equal(stub.calls.length, 1);
-    const [call] = stub.calls;
-    assert.equal(call.url, DEFAULT_SYSTEMONE_ENDPOINT);
-    assert.deepEqual(questionIds(call.body), ['prune']);
-    const question = call.body.questions.prune;
-    assert.equal(question.type, 'score');
-    assert.ok(Array.isArray(question.criteria));
-    assert.ok(question.criteria.length >= 2, 'the gateway must be given candidates to score');
-    assert.equal(question.criteria.length, Object.keys(call.body.state.candidates).length);
-    assert.equal(call.body.state.intent, 'find the test failure');
+    assert.equal(result.judgePath, 'segmented');
+  } finally {
+    stub.restore();
+  }
+});
 
-    // Candidate 0 is the aggressive filter: diagnostics kept, noise dropped.
-    assert.ok(result.processedOutput.includes('AssertionError: expected 3 to equal 4'));
-    assert.equal(result.processedOutput.includes('npm warn deprecated'), false);
-    assert.equal(result.processedOutput.includes('node_modules/left-pad'), false);
-    assert.ok(result.processedOutput.length < LOG.length);
-    assert.ok(result.reductionPercentage > 0);
-    assert.equal(result.estimatedTokensSaved > 0, true);
-    assert.equal(result.shadow, false);
+test('segments beyond the 40-segment limit are reported and never dropped', async () => {
+  const stub = stubFetch(replySegments(() => 0.1));
+  try {
+    const raw = blocksLog(45, 1, 50);
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'errors' });
+
+    assert.equal(stub.calls.length, 1);
+    assert.equal(Object.keys(stub.calls[0]!.body.questions).length, 40);
+    assert.equal(result.judgedSegments, 40);
+    assert.equal(result.unjudgedSegments, 5);
+    assert.equal(result.judgePath, 'segmented');
+    // Unjudged segments are a safety margin: they survive even at score 0.1.
+    assert.ok(result.processedOutput.includes('block-44-line-0'), 'an unjudged segment must be kept deterministically');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('scores decide: high-score segments kept, low-score segments omitted in original order', async () => {
+  const stub = stubFetch(replySegments((index) => (index % 2 === 0 ? 0.05 : 0.95)));
+  try {
+    const raw = blocksLog(8, 3, 200);
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'errors' });
+
+    for (const kept of [1, 3, 5, 7]) {
+      assert.ok(result.processedOutput.includes(`block-0${String(kept)}-line-0`), `segment ${String(kept)} should be kept`);
+    }
+    for (const dropped of [2, 4, 6]) {
+      assert.equal(
+        result.processedOutput.includes(`block-0${String(dropped)}-line-0`),
+        false,
+        `segment ${String(dropped)} should be omitted`
+      );
+    }
+    const order = ['block-01-line-0', 'block-03-line-0', 'block-05-line-0', 'block-07-line-0'].map((needle) =>
+      result.processedOutput.indexOf(needle)
+    );
+    assert.deepEqual([...order].sort((a, b) => a - b), order, 'kept segments must stay in original order');
+    assert.equal((result.processedOutput.match(/segments omitted/g) ?? []).length, 3, 'one marker per omitted run');
+    assert.equal(result.judgePath, 'segmented');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('anchors, diagnostics and intent matches survive verbatim even at score 0', async () => {
+  const stub = stubFetch(replySegments((index) => ([1, 4, 6].includes(index) ? 0.95 : 0.05)));
+  try {
+    const raw = blocksLog(8, 3, 140, (block, line) =>
+      block === 3 && line === 1 ? 'FAIL src/thing.test.js — needle result here' : undefined
+    );
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'needle' });
+    const out = result.processedOutput;
+
+    // Segment 3 scored 0.05 and lost its budget, but its diagnostic/intent line is forced.
+    assert.ok(out.includes('FAIL src/thing.test.js — needle result here'));
+    assert.ok(out.includes('block-00-line-0'), 'the first line is an anchor');
+    assert.ok(out.includes('block-07-line-2'), 'the last line is an anchor');
+    assert.equal(out.includes('block-03-line-0'), false, 'non-forced lines of a low-score segment are omitted');
+    const failAt = out.indexOf('FAIL src/thing.test.js');
+    assert.ok(out.indexOf('block-01-line-0') < failAt && failAt < out.indexOf('block-04-line-0'), 'original order preserved');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('the three budgets keep different amounts, balanced reduces by at least 30%', async () => {
+  const stub = stubFetch(replySegments(() => 0.9));
+  try {
+    for (const raw of [progressLog(80, 135), percentLog(80, 110)]) {
+      assert.ok(raw.length > 10000, `fixture too small: ${String(raw.length)}`);
+      const result = await backend().prune({ rawOutput: raw, intent: 'find the failure' });
+      assert.equal(result.judgePath, 'segmented');
+      assert.ok(
+        result.reductionPercentage >= 30,
+        `balanced must reduce >=30% (got ${String(result.reductionPercentage)}%)`
+      );
+
+      const segments = segmentPruneOutput(raw, 'find the failure');
+      const scores = new Map(segments.map((segment) => [segment.index, 0.9]));
+      const candidates = buildScoredPruneCandidates(raw, segments, scores);
+      const [aggressive, balanced, conservative] = candidates;
+      const sizes = candidates.map((candidate) => candidate.text.length);
+      assert.ok(sizes[0]! < sizes[1]! && sizes[1]! < sizes[2]!, `budgets must differ, got ${sizes.join(', ')}`);
+      assert.equal(aggressive?.id, 'aggressive');
+      assert.equal(balanced?.id, 'balanced');
+      assert.equal(conservative?.id, 'conservative');
+    }
   } finally {
     stub.restore();
   }
@@ -439,19 +633,22 @@ test('prune honours shadowMode by returning the untouched raw output', async () 
     assert.equal(result.processedOutput, LOG);
     assert.equal(result.shadow, true);
     assert.ok(result.reductionPercentage > 0);
+    assert.equal(result.judgePath, 'local');
   } finally {
     stub.restore();
   }
 });
 
-test('prune falls back to the local candidate when the gateway fails', async () => {
+test('a failing segment judgment falls back to the local candidate and records why', async () => {
   const stub = stubFetch(() => ({ status: 500, statusText: 'Internal Server Error' }));
   try {
-    const result = await backend().prune({ rawOutput: LOG, intent: 'find the test failure' });
+    const result = await judgingBackend(1).prune({ rawOutput: LOG, intent: 'find the test failure' });
     const expected = pickLocalPruneCandidate(buildPruneCandidates(LOG, 'find the test failure'));
     assert.equal(result.processedOutput, expected?.text);
     assert.ok(result.processedOutput.includes('AssertionError: expected 3 to equal 4'));
     assert.ok(result.processedOutput.length < LOG.length);
+    assert.equal(result.judgePath, 'local');
+    assert.ok((result.fallbackReason ?? '').length > 0, 'the fallback reason must be observable');
     assert.equal(result.shadow, false);
   } finally {
     stub.restore();
@@ -481,6 +678,7 @@ test('prune skips the gateway when there is nothing to choose between', async ()
     assert.equal(stub.calls.length, 0);
     assert.equal(result.processedOutput, short);
     assert.equal(result.reductionPercentage, 0);
+    assert.equal(result.judgePath, 'local');
   } finally {
     stub.restore();
   }
