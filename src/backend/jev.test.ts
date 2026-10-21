@@ -11,6 +11,7 @@ import {
   assemblePruneCandidate,
   buildPruneCandidates,
   buildScoredPruneCandidates,
+  compressByTemplate,
   detectStagnationLocally,
   normalizeSystemOneEndpoint,
   pickLocalPruneCandidate,
@@ -711,6 +712,23 @@ function everyLineCarries(word: string, lineCount = 205, width = 70): string {
   }).join('\n');
 }
 
+/**
+ * The 200-line progress payload reported at 14533 characters.
+ *
+ * Every line carries `progress`, so naming that word in the INTENT forces every
+ * line to survive segment judging: the scored budgets reproduce the payload and
+ * template compression is the only remaining way to shrink it.
+ */
+function incidentProgressFixture(): string {
+  const lines = Array.from({ length: 200 }, (_, index) => `[===] progress ${String(index).padStart(3, '0')} ${'x'.repeat(52)}`);
+  const deficit = 14533 - lines.join('\n').length;
+  assert.ok(deficit >= 0, 'the fixture base is already longer than the incident payload');
+  lines[0] = `${lines[0] as string}${'x'.repeat(deficit)}`;
+  const raw = lines.join('\n');
+  assert.equal(raw.length, 14533, 'the fixture no longer matches the reported payload size');
+  return raw;
+}
+
 test('the scored-candidate chooser never lets a non-shrinking balanced candidate hide a smaller budget', () => {
   const raw = 'y'.repeat(1000);
   const candidate = (id: PruneCandidate['id'], text: string, keptSegments: number): PruneCandidate => ({
@@ -736,6 +754,13 @@ test('the scored-candidate chooser never lets a non-shrinking balanced candidate
   ]);
   assert.equal(balancedFirst.candidate?.id, 'balanced', 'the documented default is tried first');
 
+  const conservativeLast = pickScoredPruneCandidate(raw, [
+    candidate('aggressive', raw, 2),
+    candidate('balanced', raw, 5),
+    candidate('conservative', 'c'.repeat(700), 8)
+  ]);
+  assert.equal(conservativeLast.candidate?.id, 'conservative', 'the widest budget is still tried before giving up');
+
   const none = pickScoredPruneCandidate(raw, [
     candidate('aggressive', raw, 2),
     candidate('balanced', raw, 5),
@@ -754,53 +779,73 @@ test('an unreadable distribution is counted, not scored as high', () => {
   );
 });
 
-test('forced lines can make every scored candidate the size of the payload, so template compression runs instead', async () => {
-  const stub = stubFetch(replySegments(() => 0.5));
+test('a judgment that keeps every segment returns the payload untouched instead of template-compressing it', async () => {
+  const stub = stubFetch(replySegments(() => 0.95));
   try {
-    const raw = everyLineCarries('results');
-    // The INTENT names "results", so every line is a forced line: segment
-    // selection cannot drop one, and all three budgets reproduce the payload.
-    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'results' });
+    const raw = incidentProgressFixture();
+    assert.ok(compressByTemplate(raw).length < raw.length, 'the fixture is one template compression can shrink');
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'progress' });
 
-    const segments = segmentPruneOutput(raw, 'results');
-    const scores = new Map(segments.map((segment) => [segment.index, 0.5]));
+    const segments = segmentPruneOutput(raw, 'progress');
+    const scores = new Map(segments.map((segment) => [segment.index, 0.95]));
     for (const candidate of buildScoredPruneCandidates(raw, segments, scores)) {
-      assert.equal(candidate.text.length, raw.length, `${candidate.id} keeps every forced line`);
+      assert.ok(candidate.text.length >= raw.length, `${candidate.id} keeps every forced line`);
     }
 
-    assert.equal(result.judgePath, 'fallback', 'a non-reducing judgment degrades instead of silently returning the payload');
-    assert.equal(result.compression, 'template');
-    assert.ok(result.prunedChars < result.originalChars, 'the template compressor reduced what the budgets could not');
-    assert.match(result.fallbackReason ?? '', /no scored candidate is smaller/);
-    assert.equal(result.aggressiveChars, raw.length);
-    assert.equal(result.balancedChars, raw.length);
-    assert.equal(result.conservativeChars, raw.length);
+    assert.equal(result.processedOutput, raw, 'the model judged every segment worth keeping, so nothing is cut');
+    assert.equal(result.prunedChars, result.originalChars);
+    assert.equal(result.compression, 'none', 'no template compression is applied over the judgment');
+    assert.equal(result.judgePath, 'segmented', 'the judgment itself ran');
+    assert.equal(result.fallbackReason, 'judged: every segment was kept');
+    assert.doesNotMatch(result.processedOutput, /similar lines omitted/, 'the template compressor was not used');
     assert.equal(result.scoredSegments, segments.length, 'every judged segment really scored');
-    assert.equal(result.autoKeptSegments, 0, 'nothing was kept because it lacked a score');
-    assert.equal(result.unparsedScoreAnswers, 0);
-    assert.ok((result.keptSegments ?? 0) > 0, 'the kept-segment count still explains the non-reduction');
-    assert.ok(result.processedOutput.includes('similar lines omitted'), 'the template compression really ran');
   } finally {
     stub.restore();
   }
 });
 
-test('when neither a scored candidate nor template compression reduces, the response says compression none', async () => {
+test('a judgment over a payload only template compression could shrink is still returned untouched', async () => {
   const stub = stubFetch(replySegments(() => 0.5));
   try {
-    // Every line is a diagnostic line, so the template compressor must keep it
-    // verbatim too: this is the one payload shape nothing can shrink.
+    // Every line is a diagnostic line, so segment selection keeps them all.
     const raw = everyLineCarries('warn');
     const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'errors' });
 
     assert.equal(result.processedOutput, raw, 'the payload is returned untouched');
     assert.equal(result.prunedChars, result.originalChars);
     assert.equal(result.compression, 'none', 'the refusal is explicit, never silent');
-    assert.match(result.fallbackReason ?? '', /template compression did not reduce it/);
-    assert.match(result.fallbackReason ?? '', /no scored candidate is smaller/);
-    assert.equal(result.balancedChars, raw.length);
-    assert.ok((result.keptSegments ?? 0) > 0, 'the kept count names how much the judge tried to keep');
+    assert.equal(result.fallbackReason, 'judged: every segment was kept');
     assert.equal(result.judgePath, 'segmented', 'the judgment itself did run');
+    assert.doesNotMatch(result.processedOutput, /similar lines omitted/, 'the template compressor was not used');
+    assert.ok((result.keptSegments ?? 0) > 0, 'the kept count names how much the judge tried to keep');
+    assert.equal(result.balancedChars, raw.length);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a partially readable judgment is still a valid judgment and is not template-compressed over', async () => {
+  const stub = stubFetch((call) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(call.body.questions ?? {})) {
+      const index = Number(id.slice('prune-seg-'.length));
+      // Half the segments parse; the other half is the named-key shape that
+      // cannot be read. A usable score anywhere keeps this a real judgment.
+      answers[id] = index % 2 === 0 ? scoreAnswer(0.95) : { type: 'score', probabilities: { omit: 0.1, keep: 0.9 } };
+    }
+    return { json: envelope(answers) };
+  });
+  try {
+    const raw = everyLineCarries('results');
+    const result = await judgingBackend(1).prune({ rawOutput: raw, intent: 'results' });
+
+    assert.ok((result.scoredSegments ?? 0) > 0, 'some segment scores were usable');
+    assert.ok((result.unparsedScoreAnswers ?? 0) > 0, 'some answers were unreadable');
+    assert.equal(result.processedOutput, raw, 'the readable judgment is honoured as a keep-everything verdict');
+    assert.equal(result.compression, 'none');
+    assert.equal(result.fallbackReason, 'judged: every segment was kept');
+    assert.equal(result.judgePath, 'segmented');
+    assert.doesNotMatch(result.processedOutput, /similar lines omitted/, 'the template compressor was not used');
   } finally {
     stub.restore();
   }

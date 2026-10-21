@@ -81,11 +81,12 @@ export interface PruneResponse {
   /** Why the segmented path fell back to the local candidates, when it did. */
   fallbackReason?: string;
   /**
-   * How the returned text was reduced when the judging path degraded.
+   * How the returned text was reduced, when it was.
    *
-   * `none` means the judgment ran and every candidate it built — including the
-   * template compressor — was at least as large as the payload, so the original
-   * was returned untouched because nothing could reduce it.
+   * `none` means the returned text is the payload: a judgment that ran scored
+   * every segment and kept everything (honoured as-is), or the degraded path's
+   * template compression could not reduce it either. `fallbackReason` and
+   * `judgePath` tell the two apart.
    */
   compression?: 'segmented' | 'local' | 'template' | 'none';
   /** Segments handed to System One in one request (0 when the local path ran). */

@@ -1058,7 +1058,8 @@ export interface ScoredPrunePick {
  * original; the tighter and then the wider budget are tried before giving up,
  * so a smaller aggressive candidate is never thrown away by the balanced one.
  * A candidate that does not reduce the payload is never returned as the text:
- * the caller decides whether the template compressor can still reduce it.
+ * the caller treats that outcome as a judgment that kept everything, unless the
+ * judgment produced no usable score at all.
  * @param rawOutput - the original output the candidates were built from.
  * @param candidates - the scored candidates, in any order.
  * @returns the reducing text plus the candidate that produced it, or the raw
@@ -1607,25 +1608,14 @@ export class JevDecisionBackend implements DecisionBackend {
           keptSegments: pick.candidate.keptSegments
         });
       }
-      // The judgment kept as much as the payload: every dropped line was forced,
-      // or most segments carried no readable score and were kept whole. Template
-      // compression does not read scores, so it can still reduce what the scored
-      // budgets could not; only when it cannot either is the original returned,
-      // and then the response says so instead of failing silently.
-      const fallback = this.fallbackPruneText(raw, intent, req.maxTokens);
-      if (fallback.text.length < raw.length) {
-        return this.pruneResponse(raw, fallback.text, req.shadowMode, start, {
-          judgePath: 'fallback',
-          fallbackReason: pick.reason,
-          compression: fallback.compression,
-          ...observation,
-          ...sizes,
-          ...(balanced === undefined ? {} : { keptSegments: balanced.keptSegments })
-        });
-      }
+      // The judgment kept as much as the payload: every segment was scored and
+      // kept whole. That is the model's decision, not a service failure, so the
+      // payload is returned untouched instead of being template-compressed over
+      // it. Only a judgment with no usable score at all (handled above) and a
+      // failed call (below) fall back to template compression.
       return this.pruneResponse(raw, raw, req.shadowMode, start, {
         judgePath: 'segmented',
-        fallbackReason: `${pick.reason ?? 'no candidate is smaller than the payload'}; template compression did not reduce it either`,
+        fallbackReason: 'judged: every segment was kept',
         compression: 'none',
         ...observation,
         ...sizes,
