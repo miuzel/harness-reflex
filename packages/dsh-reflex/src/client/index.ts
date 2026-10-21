@@ -27,7 +27,12 @@ import { EFFORT_ROW_SLOT, registerEffortRow, ComposerEffortIndicator, type UiCon
 export { ComposerEffortIndicator };
 import type { ConfigFormLike } from './store';
 
-/** Package id this bundle is loaded under; also its `__ModuleLoader__.load` id. */
+/**
+ * Stable settings key this entry registers under (bundle-config slot and panel
+ * namespace). Deliberately not the npm package name: the bundle's
+ * `__ModuleLoader__.load` id is derived from `package.json` instead, so a
+ * package rename never moves the user's saved settings.
+ */
 export const CLIENT_ID = 'dsh-reflex';
 
 /** Settings namespace candidates, most specific first. */
