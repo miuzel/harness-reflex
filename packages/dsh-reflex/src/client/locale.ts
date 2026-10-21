@@ -299,6 +299,15 @@ export const zh = {
   chipBackendTitleUnsetKey:
     'System One 决策后端当前为 {backend}；未声明 API Key 环境变量，插件会使用环境默认密钥或降级到本地兜底。可在「System 1 后端」页配置连接。',
 
+  statusLabel: 'Reflex 运行状态：{routing}；{effort}；{backend}。悬停或聚焦查看完整说明。',
+  statusRoutingActive: '路由已启用（{candidates} 候选）',
+  statusRoutingInactive: '路由未启用',
+  statusEffortSet: '推理强度 {level}',
+  statusEffortUnset: '推理强度未设置',
+  statusBackendOk: '后端 {backend} 正常',
+  statusBackendMissingKey: '后端 {backend} 缺少 API Key，将降级',
+  statusBackendDegraded: '后端 {backend} 不可用，已降级',
+
   // In-panel user guide: the body is the repository document itself, embedded
   // at build time by `scripts/embed-user-guide.mjs`.
   guideTitle: 'Harness Reflex 使用说明',
@@ -623,6 +632,15 @@ export const en: Record<keyof typeof zh, string> = {
     'System One decision backend is {backend}; API key env {env} is missing (apiKeyEnv: empty), so decisions degrade to the local fallback. Set that env var or change the backend on the "System 1 backend" page.',
   chipBackendTitleUnsetKey:
     'System One decision backend is {backend}; no API key env is declared, so the plugin uses the environment default key or degrades to the local fallback. Configure the connection on the "System 1 backend" page.',
+
+  statusLabel: 'Reflex status: {routing}; {effort}; {backend}. Hover or focus for the full explanation.',
+  statusRoutingActive: 'routing enabled ({candidates} candidates)',
+  statusRoutingInactive: 'routing disabled',
+  statusEffortSet: 'reasoning effort {level}',
+  statusEffortUnset: 'reasoning effort not set',
+  statusBackendOk: 'backend {backend} healthy',
+  statusBackendMissingKey: 'backend {backend} missing its API key, will degrade',
+  statusBackendDegraded: 'backend {backend} unavailable, degraded',
 
   // In-panel user guide; see the Chinese dictionary for the embedding contract.
   guideTitle: 'Harness Reflex user guide',

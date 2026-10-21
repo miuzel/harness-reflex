@@ -1156,13 +1156,28 @@ test('the backend page reports a missing key variable', async () => {
   mounted.unmount();
 });
 
-//#region header chips
+//#region header status icon
 
-/** The header badges: their visible label and their hover/focus explanation. */
-function chipViews(tree: unknown): { text: string; title: string }[] {
-  return elements(tree)
-    .filter((element) => element.type === 'span' && typeof element.props.title === 'string' && (element.props.title as string).length > 0)
-    .map((element) => ({ text: textOf(element), title: element.props.title as string }));
+/** The single status button of the rendered header, if any. */
+function statusButtons(tree: unknown): Element[] {
+  return elements(tree).filter(
+    (element) => element.type === 'button' && typeof element.props['data-reflex-status'] === 'string'
+  );
+}
+
+/** Resolve an element's inline style as a plain record. */
+function styleOf(element: Element | undefined): Record<string, unknown> {
+  return (element?.props.style as Record<string, unknown> | undefined) ?? {};
+}
+
+/** The title row: the nowrap header div that holds the h3 and the status icon. */
+function titleRow(tree: unknown): Element | undefined {
+  return elements(tree).find(
+    (element) =>
+      element.type === 'div' &&
+      styleOf(element)['flexWrap'] === 'nowrap' &&
+      elements(element).some((child) => child.type === 'h3')
+  );
 }
 
 /** Facts whose snapshot leaves the reasoning effort unset. */
@@ -1174,82 +1189,145 @@ function factsWithUnsetEffort(apiKeyPresent: boolean): PanelRuntimeFacts {
   };
 }
 
-test('header chips name their subject and explain the active state', async () => {
+test('the three long text badges collapse into one fixed-size status icon', async () => {
   const { form } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    const icons = statusButtons(mounted.tree);
+    assert.equal(icons.length, 1, 'the header must show exactly one status icon');
+    const icon = icons[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'ok');
 
-  const chips = chipViews(mounted.tree);
-  assert.equal(chips.length, 3, 'the header must show exactly three badges');
-  const [routing, effort, backend] = chips;
-  assert.equal(routing?.text, '路由 · 已启用（1 候选）');
-  assert.ok(routing?.title.includes('虚拟 Provider 路由已启用'), 'routing badge does not say what it is');
-  assert.ok(routing?.title.includes('「虚拟 Provider」页'), 'routing badge does not say where to change it');
-  assert.equal(effort?.text, '推理强度 · reflex');
-  assert.ok(effort?.title.includes('推理强度'), 'effort badge does not say what it is');
-  assert.ok(effort?.title.includes('「推理强度」页'), 'effort badge does not say where to change it');
-  assert.equal(backend?.text, '后端 · jev');
-  assert.ok(backend?.title.includes('System One 决策后端'), 'backend badge does not say what it is');
-  assert.ok(backend?.title.includes('apiKeyEnv: set'), 'backend badge drops the key status');
-  assert.ok(backend?.title.includes('「System 1 后端」页'), 'backend badge does not say where to change it');
-  mounted.unmount();
+    const iconStyle = styleOf(icon);
+    assert.equal(iconStyle.width, '18px', 'the icon width is not fixed');
+    assert.equal(iconStyle.height, '18px', 'the icon height is not fixed');
+    assert.equal(iconStyle.flex, '0 0 auto', 'the icon can be squeezed by the title');
+    assert.match(String(iconStyle.color), /state-success/, 'a healthy state is not a success tone');
+
+    const row = titleRow(mounted.tree);
+    assert.ok(row !== undefined, 'the header has no title row');
+    assert.equal(styleOf(row)['flexWrap'], 'nowrap', 'the title row still wraps');
+    assert.equal(styleOf(row)['minWidth'], 0, 'the title row cannot shrink below its content');
+
+    const title = elements(mounted.tree).find((element) => element.type === 'h3');
+    assert.ok(title !== undefined, 'the header lost its title');
+    assert.equal(styleOf(title)['whiteSpace'], 'nowrap', 'the title can still wrap');
+    assert.equal(styleOf(title)['overflow'], 'hidden', 'the title has no overflow guard');
+
+    // The old long labels are gone from the rendered text.
+    const body = textOf(mounted.tree);
+    assert.ok(!body.includes('路由 · 未启用'), 'the routing text badge is still rendered');
+    assert.ok(!body.includes('推理强度 · 未设置'), 'the effort text badge is still rendered');
+    assert.ok(!body.includes('后端 · '), 'the backend text badge is still rendered');
+  } finally {
+    mounted.unmount();
+  }
 });
 
-test('disabled routing and unset effort state the reason instead of only the negation', async () => {
+test('the status icon is focusable and explains routing, effort, and backend', async () => {
   const { form } = settingsForm(AUTHORED);
-  const mounted = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form });
+  const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    const icon = statusButtons(mounted.tree)[0]!;
+    assert.equal(icon.type, 'button', 'the status icon is not a button');
 
-  const chips = chipViews(mounted.tree);
-  assert.equal(chips.length, 3, 'the header must show exactly three badges');
-  const [routing, effort, backend] = chips;
-  assert.equal(routing?.text, '路由 · 未启用');
-  assert.ok(routing?.title.includes('routing.enabled=false'), 'routing badge does not name the disabled switch');
-  assert.ok(routing?.title.includes('候选池为空'), 'routing badge does not name the empty pool');
-  assert.ok(routing?.title.includes('「虚拟 Provider」页'), 'routing badge does not say where to enable it');
-  assert.equal(effort?.text, '推理强度 · 未设置');
-  assert.ok(effort?.title.includes('不干预'), 'unset effort does not say the plugin stays passive');
-  assert.ok(effort?.title.includes('模型默认档位'), 'unset effort does not say what applies instead');
-  assert.ok(effort?.title.includes('「推理强度」页'), 'unset effort does not say where to choose one');
-  assert.equal(backend?.text, '后端 · jev');
-  assert.ok(backend?.title.includes('缺少 REFLEX_TEST_KEY'), 'missing key is not named');
-  assert.ok(backend?.title.includes('apiKeyEnv: empty'), 'missing key status is not shown');
-  assert.ok(backend?.title.includes('降级'), 'missing key does not warn about degradation');
-  mounted.unmount();
+    const label = String(icon.props['aria-label'] ?? '');
+    assert.match(label, /Reflex 运行状态/, 'the icon has no status label');
+    assert.match(label, /路由已启用/, 'the label drops the routing fact');
+    assert.match(label, /推理强度 reflex/, 'the label drops the effort fact');
+    assert.match(label, /后端 jev 正常/, 'the label drops the backend fact');
+
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('\n'), 'the explanation is not multi-line');
+    assert.ok(title.includes('虚拟 Provider 路由已启用'), 'the explanation does not describe routing');
+    assert.ok(title.includes('「虚拟 Provider」页'), 'the explanation does not say where to change routing');
+    assert.ok(title.includes('推理强度'), 'the explanation does not describe reasoning effort');
+    assert.ok(title.includes('「推理强度」页'), 'the explanation does not say where to change effort');
+    assert.ok(title.includes('System One 决策后端'), 'the explanation does not describe the backend');
+    assert.ok(title.includes('apiKeyEnv: set'), 'the explanation drops the key status');
+    assert.ok(title.includes('「System 1 后端」页'), 'the explanation does not say where to configure the backend');
+  } finally {
+    mounted.unmount();
+  }
 });
 
-test('the English header chips mirror the subjects and explanations', async () => {
+test('the icon distinguishes healthy, missing-key, and degraded states', async () => {
   const { form } = settingsForm(AUTHORED);
-  const mounted = await mountPanel({ facts: facts(true), form, language: 'en' });
 
-  const chips = chipViews(mounted.tree);
-  const [routing, effort, backend] = chips;
-  assert.equal(routing?.text, 'Routing · enabled (candidates: 1)');
-  assert.ok(routing?.title.includes('Virtual Provider routing is enabled'));
-  assert.ok(routing?.title.includes('"Virtual Provider" page'));
-  assert.equal(effort?.text, 'Reasoning effort · reflex');
-  assert.ok(effort?.title.includes('"Reasoning effort" page'));
-  assert.equal(backend?.text, 'Backend · jev');
-  assert.ok(backend?.title.includes('apiKeyEnv: set'));
-  assert.ok(backend?.title.includes('"System 1 backend" page'));
-  mounted.unmount();
+  const healthy = await mountPanel({ facts: facts(true), form });
+  try {
+    const icon = statusButtons(healthy.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'ok');
+    assert.equal(textOf(icon).trim(), '●', 'the healthy glyph is not distinctive');
+  } finally {
+    healthy.unmount();
+  }
+
+  const missingKey = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form });
+  try {
+    const icon = statusButtons(missingKey.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'warn', 'a missing key is not a warning state');
+    assert.match(String(styleOf(icon).color), /state-warn/, 'a missing key is not drawn in the warning tone');
+    assert.equal(textOf(icon).trim(), '!', 'the warning glyph is not distinctive');
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('缺少 REFLEX_TEST_KEY'), 'the warning state does not name the missing key');
+    assert.ok(title.includes('降级'), 'the warning state does not warn about degradation');
+    assert.match(String(icon.props['aria-label'] ?? ''), /缺少 API Key/);
+  } finally {
+    missingKey.unmount();
+  }
+
+  const degradedFacts: PanelRuntimeFacts = {
+    ...facts(true),
+    systemOneHealth: { available: false, lastFailureReason: 'fetch failed', consecutiveFailures: 2 }
+  };
+  const degraded = await mountPanel({ facts: degradedFacts, form });
+  try {
+    const icon = statusButtons(degraded.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'error', 'a degraded backend is not an error state');
+    assert.match(String(styleOf(icon).color), /state-error/, 'a degraded backend is not drawn in the error tone');
+    assert.equal(textOf(icon).trim(), '×', 'the error glyph is not distinctive');
+    assert.match(String(icon.props['aria-label'] ?? ''), /不可用/);
+    // g-016: the explicit degradation banner and the error icon appear together.
+    const banner = degradedBanner(degraded.tree);
+    assert.ok(banner !== undefined, 'the degradation banner disappeared with the icon change');
+  } finally {
+    degraded.unmount();
+  }
 });
 
-test('the English header chips explain the inactive, unset, and degraded states', async () => {
+test('the English status icon mirrors the label, title, and three states', async () => {
   const { form } = settingsForm(AUTHORED);
-  const mounted = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form, language: 'en' });
+  const healthy = await mountPanel({ facts: facts(true), form, language: 'en' });
+  try {
+    const icon = statusButtons(healthy.tree)[0]!;
+    const label = String(icon.props['aria-label'] ?? '');
+    assert.match(label, /Reflex status/, 'the English label is missing');
+    assert.match(label, /routing enabled/, 'the English label drops routing');
+    assert.match(label, /reasoning effort reflex/, 'the English label drops effort');
+    assert.match(label, /backend jev healthy/, 'the English label drops the backend');
 
-  const chips = chipViews(mounted.tree);
-  const [routing, effort, backend] = chips;
-  assert.equal(routing?.text, 'Routing · disabled');
-  assert.ok(routing?.title.includes('routing.enabled=false'));
-  assert.ok(routing?.title.includes('pools are empty'));
-  assert.equal(effort?.text, 'Reasoning effort · not set');
-  assert.ok(effort?.title.includes('does not intervene'));
-  assert.ok(effort?.title.includes('model default'));
-  assert.equal(backend?.text, 'Backend · jev');
-  assert.ok(backend?.title.includes('is missing'));
-  assert.ok(backend?.title.includes('apiKeyEnv: empty'));
-  assert.ok(backend?.title.includes('degrade'));
-  mounted.unmount();
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('"Virtual Provider" page'), 'the English explanation omits the routing page');
+    assert.ok(title.includes('"Reasoning effort" page'), 'the English explanation omits the effort page');
+    assert.ok(title.includes('"System 1 backend" page'), 'the English explanation omits the backend page');
+    assert.ok(title.includes('apiKeyEnv: set'), 'the English explanation drops the key status');
+  } finally {
+    healthy.unmount();
+  }
+
+  const missingKey = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form, language: 'en' });
+  try {
+    const icon = statusButtons(missingKey.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'warn');
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('is missing'), 'the English warning does not name the missing key');
+    assert.ok(title.includes('apiKeyEnv: empty'), 'the English warning drops the key status');
+    assert.ok(title.includes('degrade'), 'the English warning does not warn about degradation');
+    assert.match(String(icon.props['aria-label'] ?? ''), /missing its API key/);
+  } finally {
+    missingKey.unmount();
+  }
 });
 
 //#endregion

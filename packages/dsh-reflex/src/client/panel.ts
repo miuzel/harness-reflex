@@ -919,20 +919,32 @@ export function levelTone(level: string): string {
   }
 }
 
-/** One badge the header shows. */
-export interface PanelChip {
-  id: string;
-  /** Copy key, or a literal value that has no translation (a provider name, a level). */
-  text: string;
-  /** `true` when {@link text} is a copy key rather than literal text. */
-  translated: boolean;
-  tone: string;
-  /** Literal hover/focus copy, for a chip whose explanation needs no translation. */
-  title?: string;
-  /** Copy key for the explanation: what it is, why it is in this state, where to change it. */
-  titleKey?: string;
-  /** Values interpolated into a translated {@link text} / {@link titleKey}. */
+/** Tone family of the single header status icon. */
+export type PanelStatusState = 'ok' | 'warn' | 'error';
+
+/** One translated fragment: a copy key plus its interpolation values. */
+export interface PanelStatusFragment {
+  key: string;
   values?: Record<string, string>;
+}
+
+/**
+ * The single status icon the header shows in place of the old text badges.
+ *
+ * The icon packs the same three facts (routing, reasoning effort, backend) into
+ * one fixed-size button whose width never follows the copy, so a long provider
+ * name or an unset value cannot widen the title row.
+ */
+export interface PanelStatus {
+  state: PanelStatusState;
+  /** Design-token name the icon is drawn in. */
+  tone: string;
+  /** Short fragments summarised in the icon's `aria-label`. */
+  routing: PanelStatusFragment;
+  effort: PanelStatusFragment;
+  backend: PanelStatusFragment;
+  /** Full explanations, one per line, for the icon's hover/focus title. */
+  lines: PanelStatusFragment[];
 }
 
 /** Live snapshot as the panel consumes it; a loose shape by design. */
@@ -1076,48 +1088,69 @@ export function systemOneDegraded(snapshot: PanelSnapshotLike | null): SystemOne
   };
 }
 
-/** Badges describing one snapshot. */
-export function panelChips(snapshot: PanelSnapshotLike | null): PanelChip[] {
-  if (snapshot === null) return [];
-  const chips: PanelChip[] = [];
+/**
+ * Project one snapshot into the header status icon.
+ *
+ * State precedence is degradation → missing key → healthy: an unreachable
+ * backend is the strongest signal, a missing key is a warning, and everything
+ * else (including a backend that publishes no health) reads as healthy.
+ * @param snapshot - the live snapshot.
+ * @returns the icon state and its translated fragments, or `undefined` while
+ *   no snapshot has arrived.
+ */
+export function panelStatus(snapshot: PanelSnapshotLike | null): PanelStatus | undefined {
+  if (snapshot === null) return undefined;
+
   const routing = snapshot.routing ?? {};
   const routingActive = routing.active === true;
   const candidates = formatInteger(routing.candidates ?? 0);
-  chips.push({
-    id: 'routing',
-    text: routingActive ? 'chipRoutingActive' : 'chipRoutingInactive',
-    translated: true,
-    tone: routingActive ? '--dsw-alias-state-success-primary' : '--dsw-alias-label-tertiary',
-    titleKey: routingActive ? 'chipRoutingTitleActive' : 'chipRoutingTitleInactive',
-    values: { candidates }
-  });
+
   const setting = snapshot.effort?.setting;
   const effortUnset = setting === null || setting === undefined || setting === '';
-  chips.push({
-    id: 'effort',
-    text: effortUnset ? 'chipEffortUnset' : 'chipEffortSet',
-    translated: true,
-    tone: effortUnset ? '--dsw-alias-label-tertiary' : levelTone(setting),
-    titleKey: effortUnset ? 'chipEffortTitleUnset' : 'chipEffortTitleSet',
-    ...(effortUnset ? {} : { values: { level: String(setting) } })
-  });
+
   const backend = snapshot.systemOne;
   const backendName = String(backend?.active ?? backend?.backend ?? '');
   const apiKeyEnv = backend?.apiKeyEnv;
-  chips.push({
-    id: 'backend',
-    text: 'chipBackend',
-    translated: true,
-    tone: '--dsw-alias-label-secondary',
-    titleKey:
-      apiKeyEnv === undefined
-        ? 'chipBackendTitleUnsetKey'
-        : backend?.apiKeyPresent === true
-          ? 'chipBackendTitle'
-          : 'chipBackendTitleMissing',
-    values: apiKeyEnv === undefined ? { backend: backendName } : { backend: backendName, env: apiKeyEnv }
-  });
-  return chips;
+  const degraded = backend?.health !== undefined && backend.health.available === false;
+  const missingKey = !degraded && backend?.apiKeyPresent === false;
+
+  const state: PanelStatusState = degraded ? 'error' : missingKey ? 'warn' : 'ok';
+  const tone =
+    state === 'error'
+      ? '--dsw-alias-state-error-primary'
+      : state === 'warn'
+        ? '--dsw-alias-state-warn-primary'
+        : '--dsw-alias-state-success-primary';
+
+  const routingLine: PanelStatusFragment = routingActive
+    ? { key: 'chipRoutingTitleActive', values: { candidates } }
+    : { key: 'chipRoutingTitleInactive' };
+  const effortLine: PanelStatusFragment = effortUnset
+    ? { key: 'chipEffortTitleUnset' }
+    : { key: 'chipEffortTitleSet', values: { level: String(setting) } };
+  const backendLine: PanelStatusFragment =
+    apiKeyEnv === undefined
+      ? { key: 'chipBackendTitleUnsetKey', values: { backend: backendName } }
+      : backend?.apiKeyPresent === true
+        ? { key: 'chipBackendTitle', values: { backend: backendName, env: apiKeyEnv } }
+        : { key: 'chipBackendTitleMissing', values: { backend: backendName, env: apiKeyEnv } };
+
+  const backendFragment: PanelStatusFragment = degraded
+    ? { key: 'statusBackendDegraded', values: { backend: backendName } }
+    : missingKey
+      ? { key: 'statusBackendMissingKey', values: { backend: backendName } }
+      : { key: 'statusBackendOk', values: { backend: backendName } };
+
+  return {
+    state,
+    tone,
+    routing: routingActive
+      ? { key: 'statusRoutingActive', values: { candidates } }
+      : { key: 'statusRoutingInactive' },
+    effort: effortUnset ? { key: 'statusEffortUnset' } : { key: 'statusEffortSet', values: { level: String(setting) } },
+    backend: backendFragment,
+    lines: [routingLine, effortLine, backendLine]
+  };
 }
 
 /** A ledger row rendered for the table. */

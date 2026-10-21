@@ -29,10 +29,11 @@ import {
   ledgerRows,
   levelTone,
   overviewMetrics,
-  panelChips,
+  panelStatus,
   recommendedToolSwitches,
   systemOneDegraded,
   type PanelDraft,
+  type PanelStatusState,
   type ToolAdvice
 } from './panel';
 import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab } from './store';
@@ -90,10 +91,36 @@ const S = {
     color: token('--dsw-alias-state-warn-primary', '#fbbf24'),
     fontSize: '12px'
   },
-  titleRow: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
-  title: { fontSize: '15px', fontWeight: 600, margin: 0 },
+  titleRow: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'nowrap', minWidth: 0 },
+  title: { fontSize: '15px', fontWeight: 600, margin: 0, flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   subtitle: { color: token('--dsw-alias-label-tertiary', '#8a8a8a'), fontSize: '12px' },
-  chips: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginLeft: 'auto' },
+  /**
+   * The one compact status icon.
+   *
+   * A fixed 18×18 target keeps the title row's geometry independent of the copy
+   * inside the tooltip; `flex: 0 0 auto` and `marginLeft: auto` pin it to the
+   * right without ever letting it push the title into a wrap.
+   */
+  statusButton: {
+    appearance: 'none',
+    flex: '0 0 auto',
+    width: '18px',
+    height: '18px',
+    minWidth: '18px',
+    minHeight: '18px',
+    padding: 0,
+    marginLeft: 'auto',
+    borderRadius: '999px',
+    border: `1px solid ${token('--dsw-alias-border-l2', 'rgba(255,255,255,.18)')}`,
+    background: token('--dsw-alias-bg-layer-2', 'rgba(255,255,255,.04)'),
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'help',
+    font: 'inherit',
+    lineHeight: 1
+  },
+  statusGlyph: { fontSize: '11px', fontWeight: 700, lineHeight: 1 },
   chip: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -292,7 +319,6 @@ const S = {
   notice: { fontSize: '12px', color: token('--dsw-alias-state-success-primary', '#4ade80') },
   mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px' },
   empty: { color: token('--dsw-alias-label-dimmed', '#6b6b6b'), fontSize: '12px', padding: '6px 0' },
-  chipDot: { width: '6px', height: '6px', borderRadius: '50%', background: 'currentColor', display: 'inline-block' },
   swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 } as const;
 
@@ -523,13 +549,35 @@ function adaptiveLevelOptions(): { value: string; label: string }[] {
   return ADAPTIVE_EFFORT_LEVELS.map((value) => ({ value, label: value }));
 }
 
-/** Header: identity, live chips, and the write actions. */
+/** One-character glyph that keeps the three icon states distinguishable without colour. */
+function statusGlyph(state: PanelStatusState): string {
+  switch (state) {
+    case 'error':
+      return '×';
+    case 'warn':
+      return '!';
+    default:
+      return '●';
+  }
+}
+
+/** Header: identity, one compact status icon, and the write actions. */
 function Header(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
   const { t, state, store } = props;
-  const chips = panelChips(state.snapshot);
+  const status = panelStatus(state.snapshot);
   const degraded = systemOneDegraded(state.snapshot);
   const degradedReason = degraded === undefined || degraded.reason.length === 0 ? t('systemOneDegradedUnknown') : degraded.reason;
   const canWrite = state.writable && state.configStatus === 'ready';
+  const statusLabel =
+    status === undefined
+      ? ''
+      : interpolate(t('statusLabel'), {
+          routing: interpolate(t(status.routing.key), status.routing.values ?? {}),
+          effort: interpolate(t(status.effort.key), status.effort.values ?? {}),
+          backend: interpolate(t(status.backend.key), status.backend.values ?? {})
+        });
+  const statusTitle =
+    status === undefined ? '' : status.lines.map((line) => interpolate(t(line.key), line.values ?? {})).join('\n');
   return h(
     'header',
     { style: S.header },
@@ -537,21 +585,19 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
       'div',
       { style: S.titleRow },
       h('h3', { style: S.title }, t('title')),
-      h(
-        'div',
-        { style: S.chips },
-        ...chips.map((chip) => {
-          const values = chip.values ?? {};
-          const label = chip.translated ? interpolate(t(chip.text), values) : chip.text;
-          const title = chip.titleKey === undefined ? chip.title ?? '' : interpolate(t(chip.titleKey), values);
-          return h(
-            'span',
-            { key: chip.id, style: { ...S.chip, color: token(chip.tone, 'inherit') }, title },
-            h('span', { style: S.chipDot }),
-            label
-          );
-        })
-      )
+      status === undefined
+        ? null
+        : h(
+            'button',
+            {
+              type: 'button',
+              'data-reflex-status': status.state,
+              'aria-label': statusLabel,
+              title: statusTitle,
+              style: { ...S.statusButton, color: token(status.tone, 'inherit') }
+            },
+            h('span', { 'aria-hidden': 'true', style: S.statusGlyph }, statusGlyph(status.state))
+          )
     ),
     h('span', { style: S.subtitle }, t('subtitle')),
     degraded === undefined
