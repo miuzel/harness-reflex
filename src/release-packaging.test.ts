@@ -82,6 +82,10 @@ function importedHostPackages(dir: string, extensions: RegExp): Set<string> {
   const found = new Set<string>();
   for (const file of walk(join(dir, 'dist'), 'dist')) {
     if (!extensions.test(file)) continue;
+    // Test bundles are excluded from the tarball (`files` in the plugin
+    // manifest), so a host package a *test* imports is not a runtime promise to
+    // consumers. The guards below are about what ships.
+    if (/\.test\.(?:js|cjs|mjs|d\.ts)$/.test(file)) continue;
     const text = readFileSync(join(dir, file), 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
     for (const match of text.matchAll(/(?:require\(|from\s+|import\()\s*["']([^"']+)["']/g)) {
       const spec = match[1] as string;

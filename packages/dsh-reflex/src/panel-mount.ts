@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage } from 'node:http';
 
 import { resolveApiKey, routingActive } from './config.js';
+import { formatTargetName } from './router.js';
 import type { ReflexRuntime } from './bridge.js';
 import {
   buildPanelSnapshot,
@@ -106,11 +107,17 @@ export function panelFacts(
   const modelCatalog = ctx ? catalogCache.get(ctx) : undefined;
 
   const systemOneHealth = runtime.systemOneHealth();
+  // `panelPools` and the fallback read the router, whose policy is live: the
+  // loader commits a routing edit without remounting the plugin, so what the
+  // panel reports is the value the next request will actually use.
+  const pools = panelPools(runtime);
+  const fallback = runtime.modelRouter.fallback;
 
   return {
     config: runtime.config,
     backendName: runtime.backendName,
-    pools: panelPools(runtime),
+    pools,
+    routingFallback: fallback === undefined ? null : formatTargetName(fallback),
     routingActive: routingActive(runtime.config),
     // Copied, not aliased: the runtime republishes its surface on every
     // `tools/change`, and a snapshot must not follow it after the fact.

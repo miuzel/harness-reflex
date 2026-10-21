@@ -25,8 +25,8 @@ import type {
   StagnationCheckResponse
 } from './vendor/harness-reflex/index.js';
 
-import type { ResolvedReflexConfig } from './config.js';
-import { resolveApiKey } from './config.js';
+import type { ReflexConfig, ResolvedReflexConfig } from './config.js';
+import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { InterventionEngine } from './interventions.js';
 import { VirtualModelRouter } from './router.js';
@@ -75,11 +75,13 @@ export class ReflexRuntime {
   readonly routeService: ReflexRouter;
   readonly screenService: ReflexScreenService;
   /**
-   * System 1 virtual→physical model router of this activation. It owns the
-   * configured pools and writes one `model-route` ledger entry per decision;
-   * the plugin installs it on the LLM runtime and dispatches through it.
+   * System 1 virtual→physical model router this activation routes through. It
+   * owns the configured pools and writes one `model-route` ledger entry per
+   * decision; the plugin installs it on the LLM runtime and dispatches through
+   * it. With several live activations the process-wide route has one shared
+   * router, and {@link adoptModelRouter} points this runtime at it.
    */
-  readonly modelRouter: VirtualModelRouter;
+  #modelRouter: VirtualModelRouter;
   /**
    * Per-turn adaptive reasoning-effort policy. It writes one `effort-decision`
    * ledger entry per decided turn and publishes each decision to
@@ -92,14 +94,37 @@ export class ReflexRuntime {
   #disposed = false;
   #surface: readonly string[] = [];
   #interventions?: InterventionEngine;
+  /**
+   * The config the Host resolved for this activation, kept as it was passed in.
+   *
+   * With the Cordis loader this object holds schema-declared *volatile
+   * references*: a config-only update mutates those references in place and
+   * dispatches `loader/volatile-update` instead of remounting the plugin, so
+   * this is the only handle that sees the new values. A programmatic caller
+   * passes a plain object, in which case there is nothing to watch.
+   */
+  readonly #source: unknown;
+  /** Snapshot identities of {@link #source} at the last applied refresh. */
+  #mark: unknown[] = [];
+  /** Whether {@link #source} actually exposes volatile references. */
+  readonly #watchable: boolean;
+  #warn: (message: string) => void;
 
   /**
    * @param config - resolved plugin configuration.
-   * @param dependencies - test seams for the ledger, backend, and routing clock.
+   * @param dependencies - test seams for the ledger, backend, and routing clock,
+   *   plus the raw config (whose volatile references carry live updates) and a
+   *   diagnostic sink.
    */
   constructor(
     config: ResolvedReflexConfig,
-    dependencies: { backend?: DecisionBackend; ledger?: DecisionLedger; now?: () => number } = {}
+    dependencies: {
+      backend?: DecisionBackend;
+      ledger?: DecisionLedger;
+      now?: () => number;
+      configSource?: unknown;
+      warn?: (message: string) => void;
+    } = {}
   ) {
     this.config = config;
     this.backend = dependencies.backend ?? createBackend(config);
@@ -110,7 +135,12 @@ export class ReflexRuntime {
     this.stagnationService = new StagnationDetector(this.backend, this.ledger);
     this.routeService = new ReflexRouter(this.backend, this.ledger);
     this.screenService = new ReflexScreenService(this.backend, this.ledger);
-    this.modelRouter = new VirtualModelRouter({
+    this.#source = dependencies.configSource;
+    this.#warn = dependencies.warn ?? (() => {});
+    const initialMark = dependencies.configSource === undefined ? [] : volatileSnapshots(dependencies.configSource);
+    this.#mark = initialMark;
+    this.#watchable = initialMark.length > 0;
+    this.#modelRouter = new VirtualModelRouter({
       virtualProvider: config.routing.virtualProvider,
       models: config.routing.models,
       backendName: this.backend.name,
@@ -118,7 +148,10 @@ export class ReflexRuntime {
       route: (goal, candidates, topK, input) =>
         this.routeService.selectBest(goal, candidates, topK, { record: false, ...(input ?? {}) }),
       ...(config.routing.fallback ? { fallback: config.routing.fallback } : {}),
-      ...(dependencies.now ? { now: dependencies.now } : {})
+      ...(dependencies.now ? { now: dependencies.now } : {}),
+      // The loader commits a config-only update without remounting the plugin;
+      // this is how every routing decision and panel read sees the new policy.
+      refresh: () => { this.refreshIfChanged(); }
     });
     this.effortStatusFeed = new EffortStatusFeed();
     this.effort = new EffortInterceptor({
@@ -137,6 +170,24 @@ export class ReflexRuntime {
   /** Name of the active decision backend, for diagnostics and tests. */
   get backendName(): string {
     return this.backend.name;
+  }
+
+  /** The routing policy this activation routes through (live). */
+  get modelRouter(): VirtualModelRouter {
+    return this.#modelRouter;
+  }
+
+  /**
+   * Route through the process-wide router another activation registered.
+   *
+   * A reload can leave one provider registration shared by two activations. The
+   * shared router is where the live pools and fallback live, so this runtime must
+   * read (and refresh) that one — a private copy would show the panel, and route
+   * requests, on a policy nobody applies.
+   * @param router - the shared router the virtual provider dispatches through.
+   */
+  adoptModelRouter(router: VirtualModelRouter): void {
+    this.#modelRouter = router;
   }
 
   /**
@@ -355,6 +406,55 @@ export class ReflexRuntime {
     return this.#disposed;
   }
 
+  /**
+   * Re-read this activation's routing policy from its live config.
+   *
+   * Called when the Host reports a config commit (`loader/volatile-update`) and
+   * lazily by the router before each decision. Only the routing policy is
+   * refreshable this way: the pools and the fallback are values the router reads
+   * per decision, so replacing them is enough to make an edit effective on the
+   * next request without a restart. Surfaces built once at activation (the
+   * registered tool set, the intervention listeners, the backend, the adaptive
+   * effort surface) need a real remount and are deliberately left alone here.
+   * @returns whether a new policy was applied.
+   */
+  refresh(): boolean {
+    if (this.#source === undefined || this.#disposed) return false;
+    let resolved: ResolvedReflexConfig;
+    try {
+      resolved = resolveConfig(this.#source as ReflexConfig);
+    } catch (error) {
+      this.#warn(
+        `dsh-reflex: the updated configuration cannot be applied to routing (${(error as Error).message}); keeping the previous pools and fallback`
+      );
+      return false;
+    }
+    this.#modelRouter.updatePolicy({
+      models: resolved.routing.models,
+      ...(resolved.routing.fallback ? { fallback: resolved.routing.fallback } : {})
+    });
+    this.#mark = volatileSnapshots(this.#source);
+    return true;
+  }
+
+  /**
+   * Refresh only when the loader actually committed a new config value.
+   *
+   * The volatile references hand out a new snapshot object on every commit, so
+   * an identity comparison over them is O(config blocks) and never runs the
+   * schema again for an unchanged config.
+   * @returns whether a new policy was applied.
+   */
+  refreshIfChanged(): boolean {
+    if (!this.#watchable || this.#source === undefined || this.#disposed) return false;
+    const next = volatileSnapshots(this.#source);
+    const previous = this.#mark;
+    const unchanged =
+      next.length === previous.length && next.every((snapshot, index) => snapshot === previous[index]);
+    if (unchanged) return false;
+    return this.refresh();
+  }
+
   /** Release the runtime. Called from the plugin's `ctx.effect` cleanup. */
   dispose(): void {
     if (this.#disposed) return;
@@ -423,7 +523,13 @@ export function createBackend(
  */
 export function createReflexRuntime(
   config: ResolvedReflexConfig,
-  dependencies: { backend?: DecisionBackend; ledger?: DecisionLedger; now?: () => number } = {}
+  dependencies: {
+    backend?: DecisionBackend;
+    ledger?: DecisionLedger;
+    now?: () => number;
+    configSource?: unknown;
+    warn?: (message: string) => void;
+  } = {}
 ): ReflexRuntime {
   return new ReflexRuntime(config, dependencies);
 }

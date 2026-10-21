@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 
-import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, type ReflexConfig } from './config.js';
+import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig } from './config.js';
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
 import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
@@ -25,6 +25,22 @@ import { installActualProjection } from './actual-projection.js';
  * @module dsh-reflex
  */
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * The loader committed new values into this activation's volatile config
+     * references without remounting the plugin.
+     *
+     * Routing pools and the fallback are read per request, so the activation
+     * only has to re-resolve them to make a settings edit effective; nothing
+     * else about the running activation is re-created.
+     * @param paths - changed config paths as key arrays.
+     * @mode emit
+     */
+    'loader/volatile-update'(paths: readonly (readonly string[])[]): void;
+  }
+}
+
 /** Cordis plugin name. */
 export const name = 'dsh-reflex';
 
@@ -36,7 +52,7 @@ export const name = 'dsh-reflex';
  */
 export const inject = ['tools', 'llm', 'commands'];
 
-export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
+export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
 export type { ReflexToolsConfig, ResolvedToolsConfig } from './config.js';
 export {
   INTERVENTION_CAPABILITIES,
@@ -214,13 +230,29 @@ export function apply(ctx: Context, config?: ReflexConfig): void {
  */
 export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime {
   const resolved = resolveConfig(config);
-  const runtime = createReflexRuntime(resolved);
+  // `config` is kept as passed: when the Host is the Cordis loader it carries
+  // schema-declared volatile references, and those are the only place a
+  // config-only update (no remount) can be observed at all.
+  const runtime = createReflexRuntime(resolved, {
+    configSource: config,
+    warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
+  });
   installActualProjection(ctx);
   const toolNames = reflexToolNames(resolved);
   runtime.noteToolSurface(toolNames);
 
   ctx.effect(() => {
     const disposers = defineReflexTools(runtime, resolved).map((definition) => ctx.tools.register(definition));
+
+    // A config-only settings save does not remount this plugin: the loader
+    // commits the new values into the volatile references and dispatches this
+    // event to the owning fiber. Routing pools and the fallback are read per
+    // request, so re-resolving them here is what makes an edited member model or
+    // fallback effective on the next request instead of after a restart.
+    const stopConfigWatch = ctx.on('loader/volatile-update', () => {
+      if (runtime.disposed) return;
+      runtime.refresh();
+    });
 
     // The registry is process-wide, so the published surface is re-derived on
     // every change instead of assumed static.
@@ -273,6 +305,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     }
 
     return () => {
+      stopConfigWatch();
       stopObserving();
       stopRouting();
       unregisterLedger();
@@ -318,6 +351,10 @@ function installRouting(ctx: Context, runtime: ReflexRuntime, maxTaskChars: numb
     maxTaskChars,
     warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
   });
+  // A second activation of this plugin joins the process-wide route; its live
+  // policy is then the shared router's, so the panel and the dispatch path of
+  // this activation must both read that one.
+  runtime.adoptModelRouter(installation.router);
 
   return () => installation.dispose();
 }

@@ -103,13 +103,53 @@ export interface ModelRoutingInstallation {
 const NOOP = (): void => {};
 
 /**
- * Virtual routes already owned in this process, keyed by the LLM runtime that
- * holds them. A DSH deployment can activate this plugin more than once (one
- * activation per tool prefix); provider routes are process-wide, so the first
- * activation registers and the rest reuse its policy instead of colliding with
- * `DUPLICATE_ADAPTER`.
+ * One process-wide virtual route this plugin has registered.
+ *
+ * `owners` counts the activations that still route through it. Two activations
+ * exist at once when a reload is applied as "create the new activation, then
+ * dispose the old one" (or with two entries of the same plugin). The provider
+ * route must survive the first release in that ordering, and the newest
+ * activation's policy must be the one in force — otherwise the new activation
+ * routes on the old, about-to-be-released pools and then loses the route
+ * entirely once the old activation disposes.
+ *
+ * There is deliberately one shared {@link ReflexVirtualAdapter} whose router all
+ * owners route through: two `agent/request` listeners wrapping the same
+ * waterfall cannot hold two different policies, because the outer listener sees
+ * an already-rewritten config and must agree with the inner one.
  */
-const OWNED_ROUTES = new WeakMap<LlmRuntime, Map<string, ReflexVirtualAdapter>>();
+interface OwnedRoute {
+  /** The registered adapter, shared by every owner. */
+  adapter: ReflexVirtualAdapter;
+  /** Live activations routing through this adapter. */
+  owners: number;
+  /** Unregister the provider route, called when the last owner goes away. */
+  handle: () => void;
+}
+
+/**
+ * Stable process-wide identity of one LLM runtime.
+ *
+ * The service handle a context hands out (`ctx.llm`) is a fresh tracing wrapper
+ * on every read, so it must never be a map key: two activations would each see
+ * "no route yet" and the second would collide with `DUPLICATE_ADAPTER`. The
+ * wrapper's owning root context is stable for every read of the same runtime.
+ * @param llm - the runtime handle the activation was given.
+ * @returns a key that is the same object for every activation on that runtime.
+ */
+function routeScope(llm: LlmRuntime): object {
+  const root = (llm as unknown as { ctx?: { root?: object } }).ctx?.root;
+  return root ?? (llm as unknown as object);
+}
+
+/**
+ * Virtual routes already owned in this process, keyed by the root context of
+ * the LLM runtime that holds them. A DSH deployment can activate this plugin
+ * more than once (one activation per tool prefix); provider routes are
+ * process-wide, so the first activation registers and the rest join its route
+ * instead of colliding with `DUPLICATE_ADAPTER`.
+ */
+const OWNED_ROUTES = new WeakMap<object, Map<string, OwnedRoute>>();
 
 /** Most agent-scoped tasks retained for routing; bounded so a long session cannot grow without limit. */
 const MAX_TRACKED_AGENTS = 64;
@@ -231,7 +271,7 @@ function isAdaptiveMarker(value: string | undefined): boolean {
 
 /** Whether a provider is a virtual route owned by this plugin on this runtime. */
 function ownedVirtualProvider(llm: LlmRuntime, provider: string): boolean {
-  return OWNED_ROUTES.get(llm)?.has(provider) === true;
+  return OWNED_ROUTES.get(routeScope(llm))?.has(provider) === true;
 }
 
 /** What {@link installAdaptiveEffortSurface} installed. */
@@ -510,8 +550,9 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
 
   const surface = installAdaptiveEffortSurface(ctx, llm, options.effort.setting, options.effort.enabled);
 
-  const owned = OWNED_ROUTES.get(llm) ?? new Map<string, ReflexVirtualAdapter>();
-  OWNED_ROUTES.set(llm, owned);
+  const scope = routeScope(llm);
+  const owned = OWNED_ROUTES.get(scope) ?? new Map<string, OwnedRoute>();
+  OWNED_ROUTES.set(scope, owned);
 
   /**
    * Whether these listeners may rewrite a request's route. Registering the
@@ -520,19 +561,39 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
    * must not steal the policy of the activation that does own the route.
    */
   let routes = false;
-  const reuse = owned.get(options.router.virtualProvider);
+  const existing = owned.get(options.router.virtualProvider);
   let adapter: ReflexVirtualAdapter | undefined;
   let router = options.router;
   let release: (() => void) | undefined;
+  /** Whether this call created the provider registration (not merely joined it). */
+  let created = false;
 
   if (options.route === false || !router.hasPools) {
     // Deliberately silent: a deployment that configured no pool asked for the
     // tool surface only, and the effort layer may still be configured.
-  } else if (reuse) {
-    router = reuse.router;
+  } else if (existing) {
+    // Join the live route and make this activation's policy the one in force.
+    // Adopting the shared router (rather than routing on a private copy) is what
+    // keeps every wrapping listener in agreement; updating its policy is what
+    // makes a reload whose new activation is created before the old one is
+    // disposed take effect. The owner count keeps the route registered until the
+    // last activation goes away.
+    existing.owners += 1;
+    router = existing.adapter.router;
+    router.updatePolicy({
+      models: options.router.models,
+      ...(options.router.fallback ? { fallback: options.router.fallback } : {})
+    });
     routes = true;
+    release = () => {
+      existing.owners -= 1;
+      if (existing.owners > 0) return;
+      if (owned.get(router.virtualProvider) === existing) owned.delete(router.virtualProvider);
+      existing.handle();
+      try { (llm as any).emitAdaptersUpdated?.(); } catch {}
+    };
     warn(
-      `dsh-reflex: virtual route "${router.virtualProvider}" is already registered in this process; this activation reuses its pool policy`
+      `dsh-reflex: virtual route "${router.virtualProvider}" is already registered in this process; this activation joins it with its own pool policy`
     );
   } else if (llm.listProviders().some((provider) => provider.id === router.virtualProvider)) {
     warn(
@@ -555,24 +616,34 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
     });
     let handle;
     try {
-      handle = llm.registerAdapter([router.virtualProvider], adapter);
+      // Registered on the *root* context on purpose: the provider route is
+      // process-wide, and provider registrations are disposed with the fiber
+      // that created them. A registration on this activation's fiber would
+      // disappear the moment this activation is released — even while another
+      // activation is still routing through the same adapter. The release below
+      // is what actually withdraws the route, once the last owner is gone.
+      handle = ctx.root.llm.registerAdapter([router.virtualProvider], adapter);
     } catch (error) {
       warn(
         `dsh-reflex: could not register the virtual provider "${router.virtualProvider}" (${(error as Error).message}); System 1 model routing stays off`
       );
       return { router, registered: false, dispose: NOOP };
     }
-    owned.set(router.virtualProvider, adapter);
+    const entry: OwnedRoute = { adapter, owners: 1, handle };
+    owned.set(router.virtualProvider, entry);
+    created = true;
     routes = true;
     release = () => {
-      owned.delete(router.virtualProvider);
-      handle();
+      entry.owners -= 1;
+      if (entry.owners > 0) return;
+      if (owned.get(router.virtualProvider) === entry) owned.delete(router.virtualProvider);
+      entry.handle();
       try { (llm as any).emitAdaptersUpdated?.(); } catch {}
     };
     try { (llm as any).emitAdaptersUpdated?.(); } catch {}
   }
 
-  const registered = release !== undefined;
+  const registered = created;
   const probe = createReasoningProbe(llm, rawProbe);
   const disposers: Array<() => void> = [];
   /** Detachers of the per-agent pseudo-switch filters installed lazily. */
@@ -586,6 +657,17 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         markAgentLoopRequest(options);
       }
       return next();
+    })
+  );
+
+  // The pools a virtual model advertises are read from the live router, so a
+  // committed routing edit changes what the model picker must show. The runtime
+  // refreshes the router first (its listener is registered before this one);
+  // this only republishes the catalog. A Host without the loader event simply
+  // never calls it.
+  disposers.push(
+    ctx.on('loader/volatile-update', () => {
+      try { (llm as any).emitAdaptersUpdated?.(); } catch {}
     })
   );
 

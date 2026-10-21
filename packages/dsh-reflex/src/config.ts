@@ -727,6 +727,36 @@ export function plainConfig(value: any): any {
 }
 
 /**
+ * Collect the snapshot of every volatile config reference reachable from one
+ * loader-resolved config.
+ *
+ * A config-only update in the Cordis loader never remounts the plugin: the
+ * schemastery `volatile` marks tell the loader to commit the new values into the
+ * running fiber's references and dispatch `loader/volatile-update`. Every
+ * reference hands out a fresh snapshot object from `get()` when it is committed,
+ * so comparing these snapshots by identity answers "did the live config change?"
+ * without re-validating the whole document, and without the loader itself.
+ *
+ * @param value - a resolved config, raw config, or one of its blocks.
+ * @param out - collector for the snapshot identities.
+ * @returns the snapshots, in a stable traversal order; empty for a plain config.
+ */
+export function volatileSnapshots(value: unknown, out: unknown[] = []): unknown[] {
+  if (value === null || typeof value !== 'object') return out;
+  const reference = value as { get?: unknown };
+  if (typeof reference.get === 'function') {
+    out.push((reference.get as () => unknown)());
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) volatileSnapshots(item, out);
+    return out;
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) volatileSnapshots(child, out);
+  return out;
+}
+
+/**
  * Validate an authored config and fill in every default.
  * @param config - deployment config (already resolved by the loader, or raw).
  * @returns the fully-populated configuration.

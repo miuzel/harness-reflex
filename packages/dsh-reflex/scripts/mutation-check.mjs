@@ -73,6 +73,7 @@ const MUTATIONS = [
     // the intervention hooks, the panel and the runtime mounted after unload.
     from: [
       '    return () => {',
+      '      stopConfigWatch();',
       '      stopObserving();',
       '      stopRouting();',
       '      unregisterLedger();',
@@ -83,6 +84,15 @@ const MUTATIONS = [
       '    };'
     ].join('\n'),
     to: ['    return () => {', '      stopObserving();', '    };'].join('\n')
+  },
+  {
+    name: 'config-refresh-frozen',
+    area: 'live routing configuration',
+    file: 'src/bridge.ts',
+    // A settings save is committed into the running activation; losing the
+    // policy swap leaves the router on the activation-time pools and fallback.
+    from: '    this.#modelRouter.updatePolicy({',
+    to: '    if (false) this.#modelRouter.updatePolicy({'
   },
   {
     name: 'no-root-argument-check',

@@ -183,6 +183,16 @@ export interface VirtualModelRouterOptions {
   backendName?: string;
   /** Injectable clock, for deterministic latency in tests. */
   now?: () => number;
+  /**
+   * Refresh this router's live policy before it is read or used.
+   *
+   * A Host that commits a config-only update into the running plugin (the
+   * Cordis loader's volatile path) never remounts it, so the router must be able
+   * to re-read its pools and fallback on its own. The callback is expected to be
+   * cheap when nothing changed: it is consulted by every routing decision and by
+   * the panel projection, and a throwing callback must never block a decision.
+   */
+  refresh?: () => void;
 }
 
 /** Longest task text carried into a ledger entry. */
@@ -330,8 +340,11 @@ export function buildCacheAffinityInstruction(facts: CacheAffinityFacts): string
  */
 export class VirtualModelRouter {
   readonly virtualProvider: string;
-  readonly models: ModelPools;
-  readonly fallback?: PhysicalTarget;
+
+  #models: ModelPools;
+  #fallback?: PhysicalTarget;
+  #refresh?: () => void;
+  #refreshing = false;
 
   #route: VirtualModelRouterOptions['route'];
   #ledger?: DecisionLedger;
@@ -344,8 +357,9 @@ export class VirtualModelRouter {
    */
   constructor(options: VirtualModelRouterOptions) {
     this.virtualProvider = options.virtualProvider;
-    this.models = options.models;
-    this.fallback = options.fallback;
+    this.#models = options.models;
+    this.#fallback = options.fallback;
+    this.#refresh = options.refresh;
     this.#route = options.route;
     this.#ledger = options.ledger;
     this.#backendName = options.backendName ?? 'system-one';
@@ -354,6 +368,62 @@ export class VirtualModelRouter {
       options.stickyMargin === undefined || !Number.isFinite(options.stickyMargin)
         ? DEFAULT_STICKY_MARGIN
         : Math.max(0, options.stickyMargin);
+  }
+
+  /**
+   * The virtual model pools currently in force.
+   *
+   * Deliberately a live read: the deployment's virtual-provider page edits a
+   * config the Host commits *without* remounting the plugin, so a router that
+   * kept the activation-time pools would route on a configuration the panel no
+   * longer shows.
+   * @returns the pools in authored order.
+   */
+  get models(): ModelPools {
+    this.#ensureFresh();
+    return this.#models;
+  }
+
+  /**
+   * The physical fallback currently in force.
+   * @returns the configured target, or `undefined` (fail closed).
+   */
+  get fallback(): PhysicalTarget | undefined {
+    this.#ensureFresh();
+    return this.#fallback;
+  }
+
+  /**
+   * Replace the policy this router routes with.
+   *
+   * Used by the runtime when the Host commits a config-only update (pools and
+   * fallback are the routing policy) and when a later activation takes the
+   * process-wide route over. The decision seam, ledger and clock stay those of
+   * the activation that owns this router.
+   * @param policy - the new pools and fallback.
+   */
+  updatePolicy(policy: { models: ModelPools; fallback?: PhysicalTarget }): void {
+    this.#models = policy.models;
+    this.#fallback = policy.fallback;
+  }
+
+  /**
+   * Re-read the live policy, at most once per read when nothing changed.
+   *
+   * Re-entrancy is guarded: the refresh callback updates this router through
+   * {@link updatePolicy}, which never reads the getters that call back here.
+   */
+  #ensureFresh(): void {
+    const refresh = this.#refresh;
+    if (refresh === undefined || this.#refreshing) return;
+    this.#refreshing = true;
+    try {
+      refresh();
+    } catch {
+      // A config probe must never be able to veto a request or a panel read.
+    } finally {
+      this.#refreshing = false;
+    }
   }
 
   /**
@@ -371,12 +441,13 @@ export class VirtualModelRouter {
 
   /** Virtual model ids in configured order. */
   get modelIds(): string[] {
-    return Object.keys(this.models);
+    this.#ensureFresh();
+    return Object.keys(this.#models);
   }
 
   /** Whether any virtual model has a usable candidate pool. */
   get hasPools(): boolean {
-    return this.modelIds.some((model) => (this.models[model] ?? []).length > 0);
+    return this.modelIds.some((model) => (this.#models[model] ?? []).length > 0);
   }
 
   /**
@@ -385,7 +456,8 @@ export class VirtualModelRouter {
    * @returns the pool, or `undefined` when the id is unknown.
    */
   poolFor(model: string): readonly ModelPoolEntry[] | undefined {
-    return this.models[model];
+    this.#ensureFresh();
+    return this.#models[model];
   }
 
   /**
@@ -394,7 +466,8 @@ export class VirtualModelRouter {
    * @returns a one-line description for catalog surfaces.
    */
   describe(model: string): string {
-    const pool = this.models[model] ?? [];
+    this.#ensureFresh();
+    const pool = this.#models[model] ?? [];
     if (pool.length === 0) return `System 1 virtual model (no physical candidates configured)`;
     const targets = pool.map((entry) => {
       const note = entry.description ? ` (${entry.description})` : '';
@@ -410,6 +483,7 @@ export class VirtualModelRouter {
    * @throws ReflexRoutingError when the pool cannot answer and no fallback is configured.
    */
   async routeModel(request: { provider: string; model: string } & RouteContext): Promise<RouteDecision> {
+    this.#ensureFresh();
     const started = this.#now();
     const task = request.task?.trim();
     const { currentName, contextChars, contextTokens } = affinityOf(request);
@@ -424,7 +498,7 @@ export class VirtualModelRouter {
       return this.#degrade('INVALID_MODEL', `virtual model id must be non-empty`, request, started);
     }
 
-    const pool = this.models[request.model];
+    const pool = this.#models[request.model];
     if (pool === undefined) {
       return this.#degrade(
         'UNKNOWN_MODEL',
@@ -577,16 +651,16 @@ export class VirtualModelRouter {
     started: number,
     ranked?: RouteResponse
   ): RouteDecision {
-    if (!this.fallback) {
+    if (!this.#fallback) {
       throw new ReflexRoutingError(
         code,
         `${diagnosis}; configure routing.fallback or a candidate pool for "${request.model}"`
       );
     }
-    if (this.owns(this.fallback.provider)) {
+    if (this.owns(this.#fallback.provider)) {
       throw new ReflexRoutingError(
         'ILLEGAL_TARGET',
-        `routing.fallback "${formatTargetName(this.fallback)}" points back into the virtual provider "${this.virtualProvider}"`
+        `routing.fallback "${formatTargetName(this.#fallback)}" points back into the virtual provider "${this.virtualProvider}"`
       );
     }
 
@@ -602,16 +676,16 @@ export class VirtualModelRouter {
               : 'fallback-illegal-target';
 
     const affinity = affinityOf(request);
-    const chosen = formatTargetName(this.fallback);
+    const chosen = formatTargetName(this.#fallback);
 
     return this.#record(
       {
         virtualProvider: request.provider,
         virtualModel: request.model,
-        target: this.fallback,
+        target: this.#fallback,
         reason,
         degraded: true,
-        candidateCount: ranked?.rankedCandidates.length ?? this.models[request.model]?.length ?? 0,
+        candidateCount: ranked?.rankedCandidates.length ?? this.#models[request.model]?.length ?? 0,
         candidates: ranked?.rankedCandidates.map((candidate) => ({
           name: candidate.name,
           score: candidate.score,

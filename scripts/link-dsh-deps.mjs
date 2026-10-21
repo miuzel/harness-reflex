@@ -32,6 +32,9 @@ const pluginRoot = path.join(repoRoot, 'packages', 'dsh-reflex');
 /** Modules the plugin resolves from the Host at build/test time. */
 const HOST_MODULES = [
   '@deepseek-ai/cordis',
+  // The loader is used by `live-config.test.ts` to reproduce the real
+  // config-only commit path; it is a Host module, never a runtime dependency.
+  '@deepseek-ai/cordis-plugin-loader',
   '@deepseek-ai/cosmokit',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-client-modules',

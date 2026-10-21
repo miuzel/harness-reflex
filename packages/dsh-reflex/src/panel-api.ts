@@ -268,6 +268,17 @@ export interface PanelRuntimeFacts {
   backendName: string;
   /** Ordered pools as the deployment authored them. */
   pools: PanelPoolView[];
+  /**
+   * The physical fallback currently in force, `provider:model`.
+   *
+   * Read from the live router, not from the resolved config: a settings edit is
+   * committed into the running activation without a remount, so the config the
+   * activation resolved at startup is exactly the stale value the panel must not
+   * report as effective. `null` means the live policy has no fallback (fail
+   * closed); `undefined` means the caller did not supply a live fact and the
+   * activation's resolved config is the best available answer.
+   */
+  routingFallback?: string | null;
   /** Whether the virtual provider route is installed. */
   routingActive: boolean;
   /**
@@ -290,6 +301,18 @@ export interface PanelRuntimeFacts {
   modelCatalog?: PanelModelGroup[];
   /** Timestamp of the snapshot; defaults to now. */
   now?: number;
+}
+
+/**
+ * The fallback the panel must report.
+ * @param facts - gathered runtime facts.
+ * @returns the live fallback when one was supplied, else the activation's.
+ */
+function fallbackOf(facts: PanelRuntimeFacts): string | undefined {
+  if (facts.routingFallback === null) return undefined;
+  if (facts.routingFallback !== undefined) return facts.routingFallback;
+  const fallback = facts.config.routing.fallback;
+  return fallback === undefined ? undefined : `${fallback.provider}:${fallback.model}`;
 }
 
 /** Narrow one open `details` value to projected scalar fields. */
@@ -395,9 +418,7 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       maxTaskChars: config.routing.maxTaskChars,
       candidates: facts.pools.reduce((total, pool) => total + pool.entries.length, 0),
       pools: facts.pools.map((pool) => ({ model: pool.model, entries: pool.entries.map(clonePoolEntry) })),
-      ...(config.routing.fallback === undefined
-        ? {}
-        : { fallback: `${config.routing.fallback.provider}:${config.routing.fallback.model}` })
+      ...(fallbackOf(facts) === undefined ? {} : { fallback: fallbackOf(facts) })
     },
     effort: {
       setting: config.effort.setting ?? null,
