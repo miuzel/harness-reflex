@@ -13,8 +13,8 @@
   把 `reflex-auto` / `reflex-fast` 这类虚拟模型按其物理候选池用 System 1 毫秒级映射到真实
   provider/model（主代理与 subagent 都走同一条链路），每条决策写入台账 `type:'model-route'`。
   新增源码模块 `src/{router,virtual-adapter,routing}.ts`。
-- 新增**每轮自适应思考等级（reasoning effort）拦截**：`effort.reasoningEffort` 可配 `'reflex'`（或其别名
-  `'auto'`）作为「按本轮意图自适应」的触发标记，也可配 `off/low/medium/high` 把等级钉死。标记生效时，
+- 新增**每轮自适应思考等级（reasoning effort）拦截**：`effort.reasoningEffort` 只接受 `'reflex'`（或其别名
+  `'auto'`）作为「按本轮意图自适应」的触发标记；留空 = 不干预，具体档位由模型选择器决定。标记生效时，
   `agent/request` 会用 `agent/pre-step` 捕获的本轮任务文本问 System 1（毫秒级、无生成开销）本轮该用哪一档，
   再把结果投影到物理模型声明的词表后改写 API 请求参数。新增源码模块 `src/{effort,session-audit}.ts`。
 
@@ -96,8 +96,9 @@ agent/request ─ next() 得到调用配置 → 路由决策（若配置了候�
   requested = config.reasoningEffort
   ① requested 是 'reflex'/'auto' → 本轮自适应（trigger:'request'）
   ② requested 未设置且部署配了标记 → 本轮自适应（trigger:'config'）
-  ③ requested 未设置且部署钉死了等级 → 只做投影（trigger:'fixed-config'），不算决策、不写台账
-  ④ requested 是具体等级（low/medium/high…）→ 透明直通：只做投影，不覆盖调用方的选择
+  ③ requested 是具体等级（low/medium/high…）→ 透明直通：只做投影，不覆盖调用方的选择
+  配置里的 reasoningEffort 只接受留空或 reflex/auto：具体档位属于模型选择器，
+  不再存在「配置钉死等级」的路径（旧配置在 resolveConfig 被拒绝并提示迁移）
         ↓
   自适应时：System 1 choice（4 个候选 = 4 个等级）→ 置信度 ≥ effort.minConfidence(默认 0.3) 采纳
             否则退回确定性线索投票（tier 词表 + 长度形状规则），并在状态里记 degradedReason
@@ -178,10 +179,11 @@ DSH Web GUI (loader)
 
 ### 每轮自适应思考等级（g-003）
 
-16. **触发标记与等级同一字段**：`effort.reasoningEffort` 接受 `reflex`/`auto`（触发标记）以及
-    `off/minimal/low/medium/high/max`（钉死的等级）；`effort.fallback`（默认 `medium`）是线索投票的兜底档，
-    `effort.minConfidence`（默认 0.3）是采纳 System 1 的最低置信度。校验在 `resolveConfig` 里做，
-    从请求侧传来的标记也会 `trim + toLowerCase` 归一（`resolveEffortSetting`）。
+16. **配置只回答「要不要自适应」**：`effort.reasoningEffort` 只接受 `reflex`/`auto`（触发标记）或留空；
+    具体档位（`off/minimal/low/medium/high/max`）属于模型选择器，写进配置会被 `resolveConfig` 拒绝并
+    提示迁移位置，而不是被静默忽略。`effort.fallback`（默认 `medium`）是线索投票的兜底档，
+    `effort.minConfidence`（默认 0.3）是采纳 System 1 的最低置信度。从请求侧传来的标记也会
+    `trim + toLowerCase` 归一（`resolveEffortSetting`）。
 17. **只在 `agent/request` 决策，且用 pre-step 捕获的任务文本**：`agent/pre-step` 是本轮任务文本进入系统的
     地方，`agent/request` 的 `next()` 返回值才是循环真正会派发的配置。因此决策依据是「本轮文本」而不是
     「已解析的配置」，改写点也在配置上——日志头、`prepareCall`、真正派发三处看到的等级一致。
@@ -202,8 +204,8 @@ DSH Web GUI (loader)
     `EffortStatusFeed`（按 agent 存最近一条状态 + `statusLine`）、`ctx.emit('reflex/effort')` 事件
     与 Session 审计记录——GUI 状态栏的最终呈现需要另配前端半边，本目标不含。
 22. **一次决策只写一处台账**：只有真正的自适应决策（`system-one` / `cue-fallback`）写
-    `type:'effort-decision'`；钉死的等级属于配置而非决策，因此不写台账（也不会被统计成「System 1 省了多少」）。
-    状态发布与台账是两条独立的 best-effort 路径，互不牵连。
+    `type:'effort-decision'`；调用方在请求里显式给出的具体等级属于透明直通，不是决策，因此不写台账
+    （也不会被统计成「System 1 省了多少」）。状态发布与台账是两条独立的 best-effort 路径，互不牵连。
 
 ### 客户端设置面板（g-004）
 
@@ -355,8 +357,8 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 - **标记只在 agent loop 路径被解释**：`agent/request` 是本层的拦截点。绕过它直接构造
   `ctx.llm.stream({reasoningEffort:'reflex'})` 的调用不会被自适应，虚拟适配器只会把它当作未知等级
   投影到目标模型的 `defaultEffort`。这是刻意的边界（一次请求一次决策，避免双重决策/双重审计）。
-- **钉死的等级不写台账**：`effort.reasoningEffort` 配成具体等级时只做投影与改写，不产生
-  `effort-decision` 台账、不发状态事件（它不是决策）。需要审计「实际使用的等级」时应配标记而不是钉死。
+- **具体等级不写台账**：调用方在请求里显式给出具体等级时只做投影与改写，不产生
+  `effort-decision` 台账、不发状态事件（它不是决策）。需要审计「实际使用的等级」时应使用 `reflex` 标记触发自适应。
 - **任务文本来源**：决策用的是 `agent/pre-step` 收到的用户消息文本（截断到 `routing.maxTaskChars`）；
   多轮/多模态（图片）输入只有文本块参与打分，图片内容不参与。
 - **路由仍是「每步」决策，但默认不换模型**：同一 agent 的每一次 `agent/request` 都会重新决策（毫秒级、

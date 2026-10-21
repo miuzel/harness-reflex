@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { isAgentLoopRequest, markAgentLoopRequest, type ContentBlock, type LlmCallConfig, type LlmRuntime, type UserMessage } from '@deepseek-ai/dsh-llm';
 
 import type { EffortInterceptor, EffortResolution, ReflexEffortStatus } from './effort.js';
-import { formatEffortStatusLine, isEffortLevel } from './effort.js';
+import { formatEffortStatusLine } from './effort.js';
 import { appendEffortRecord } from './session-audit.js';
 import { resolveAdaptiveIntent } from './adaptive-intent.js';
 import type { PhysicalTarget, ReasoningProbe, RouteContext, VirtualModelRouter } from './router.js';
@@ -672,8 +672,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         rememberTarget(facts, payload.agent, decision.target);
       }
 
-      const isPinnedConfig = !effortOff && requested === undefined && isEffortLevel(options.effort.setting);
-      if (!isAdaptive && !isPinnedConfig) {
+      if (!isAdaptive) {
         if (effortOff) {
           // Transparent pass-through: the request keeps the caller's own level
           // (never aligned, never snapped onto the routed model's vocabulary),
@@ -818,9 +817,10 @@ function rememberStep(facts: Map<string, AgentRoutingFacts>, agent: Agent, text:
 /**
  * Remember one turn's decision so its later steps cost nothing.
  *
- * Only an *adaptive* decision is cached: a pinned level needs no decision at
- * all, and caching it would turn a user's explicit choice into a per-step replay
- * of a value the request already carries.
+ * Only an *adaptive* decision is cached: a request that carries its own
+ * concrete level needs no decision at all, and caching it would turn the
+ * caller's explicit choice into a per-step replay of a value the request
+ * already carries.
  *
  * @param facts - the per-installation facts map.
  * @param agent - the requesting agent.

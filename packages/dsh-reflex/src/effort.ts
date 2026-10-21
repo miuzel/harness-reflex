@@ -2,7 +2,10 @@
  * Adaptive reasoning-effort interception for one agent turn.
  *
  * A deployment may configure `reasoningEffort: 'reflex'` (alias `'auto'`), or an
- * upstream caller may put either marker on the request itself. Neither marker is
+ * upstream caller may put either marker on the request itself. A deployment can
+ * no longer pin a concrete level: fixed depth belongs to the model selector, so
+ * configuration only answers "should adaptive effort run at all?". Neither
+ * marker is
  * a physical effort id, so the `agent/request` waterfall cannot forward it: this
  * module turns the marker into a per-turn decision taken by the System 1 choice
  * backend (keyword heuristics offline, the Jev endpoint in production) and
@@ -33,7 +36,7 @@ export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'max'] 
 /** One selectable reasoning effort. */
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
-/** Levels the adaptive decision and the deployment pin may choose from. */
+/** Levels the adaptive decision may choose from. */
 export const ADAPTIVE_EFFORT_LEVELS = ['off', 'low', 'medium', 'high'] as const;
 
 /** One level the adaptive decision may return. */
@@ -50,10 +53,11 @@ export const EFFORT_TRIGGERS = ['reflex', 'auto'] as const;
 export type EffortTrigger = (typeof EFFORT_TRIGGERS)[number];
 
 /**
- * What a deployment may put in `reasoningEffort`: a trigger marker (decide per
- * turn) or one concrete level (pin every request that carries no effort).
+ * What a deployment may put in `reasoningEffort`: only a trigger marker (decide
+ * per turn). A concrete level is a model-selector choice, never a deployment
+ * setting — pinning depth from configuration is not supported.
  */
-export type ReasoningEffortSetting = EffortTrigger | EffortLevel;
+export type ReasoningEffortSetting = EffortTrigger;
 
 /** Where one turn's effort came from. */
 export type EffortSource = 'system-one' | 'cue-fallback';
@@ -62,7 +66,7 @@ export type EffortSource = 'system-one' | 'cue-fallback';
 export type EffortOutcome = 'supported' | 'snapped' | 'cleared' | 'unknown' | 'passthrough';
 
 /** What asked for the decision. */
-export type EffortTriggerKind = 'request' | 'config' | 'fixed-config';
+export type EffortTriggerKind = 'request' | 'config';
 
 /** Characters of the turn input handed to System 1 as the question. */
 export const EFFORT_QUESTION_CHARS = 600;
@@ -172,7 +176,7 @@ export interface EffortResolution {
   /** Whether the caller must rewrite `reasoningEffort`. */
   changed: boolean;
   outcome: EffortOutcome;
-  /** Set when this turn's effort was decided (adaptive or pinned by config). */
+  /** Set when this turn's effort was decided by an adaptive trigger. */
   trigger?: EffortTriggerKind;
   /** The adaptive decision, when one was taken. */
   decision?: EffortDecision;
@@ -222,11 +226,6 @@ export interface ReflexEffortStatus {
 /** Whether a value is the adaptive trigger marker. */
 export function isEffortTrigger(value: string | undefined): value is EffortTrigger {
   return value !== undefined && (EFFORT_TRIGGERS as readonly string[]).includes(value);
-}
-
-/** Whether a value is one concrete level of the ladder. */
-export function isEffortLevel(value: string | undefined): value is EffortLevel {
-  return value !== undefined && (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
 /** Whether a value is a level the adaptive decision itself may return. */
@@ -755,7 +754,7 @@ export function levelOfChoiceOption(option: string): AdaptiveEffortLevel | undef
 
 /** Options of {@link EffortInterceptor}. */
 export interface EffortInterceptorOptions {
-  /** Deployment `reasoningEffort`: a trigger marker or one pinned level. */
+  /** Deployment `reasoningEffort`: the adaptive trigger marker. */
   setting?: ReasoningEffortSetting;
   /**
    * Deployment `effort.enabled` switch; `false` makes the whole interceptor
@@ -845,18 +844,6 @@ export class EffortInterceptor {
 
     if (isEffortTrigger(requested)) return this.#decideTurn('request', context);
     if (requested === undefined && isEffortTrigger(this.setting)) return this.#decideTurn('config', context);
-
-    if (requested === undefined && isEffortLevel(this.setting)) {
-      // A pinned deployment level is not a decision: no System 1 round trip, no
-      // cue vote, no ledger entry, and no status to report — it only has to be
-      // projected onto the physical route the request will reach.
-      const projection = await projectEffort(this.setting, context.target, context.probe);
-      return {
-        ...projection,
-        changed: projection.effort !== undefined,
-        trigger: 'fixed-config'
-      };
-    }
 
     // Anything else is the caller's own business: an explicit concrete level is
     // passed through untouched, and only alignment onto the routed target's
@@ -1143,9 +1130,8 @@ function buildEffortStatus(
 export function formatEffortStatusLine(status: Omit<ReflexEffortStatus, 'line'> & { line?: string }): string {
   const applied = status.applied ?? 'none';
   const evidence = status.source === 'system-one' ? `system-one ${status.confidence.toFixed(2)}` : `cue-fallback ${status.confidence.toFixed(2)}`;
-  const pinned = status.trigger === 'fixed-config' ? ' fixed' : '';
   const affinity = status.heldForCache ? ' (cache affinity)' : '';
-  return `reflex effort: ${status.level} → ${applied} (${evidence}, ${status.latencyMs}ms)${pinned} ${status.provider}:${status.model}${affinity}`;
+  return `reflex effort: ${status.level} → ${applied} (${evidence}, ${status.latencyMs}ms) ${status.provider}:${status.model}${affinity}`;
 }
 
 /**

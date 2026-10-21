@@ -126,6 +126,19 @@ test('both guide revisions document the same thirteen sections', () => {
   assert.match(zh, /\p{Script=Han}/u, 'the Chinese guide carries no Chinese text');
 });
 
+test('both guides document the two effort policies and send fixed depth to the model selector', () => {
+  const zh = readFileSync(PATHS.zh, 'utf8');
+  const en = readFileSync(PATHS.en, 'utf8');
+  // The narrowed configuration only answers "should adaptive effort run?".
+  assert.ok(zh.includes('模型选择器'), 'the Chinese guide does not point fixed depth at the model selector');
+  assert.ok(en.includes('model selector'), 'the English guide does not point fixed depth at the model selector');
+  assert.ok(zh.includes('不干预'), 'the Chinese guide does not name the no-intervention policy');
+  assert.ok(en.includes('never intervene'), 'the English guide does not name the no-intervention policy');
+  // The removed promise must not survive: configuration never pins a level.
+  assert.equal(zh.includes('= 钉死档位'), false, 'the Chinese guide still documents a pinned configuration level');
+  assert.equal(en.includes('= pinned level'), false, 'the English guide still documents a pinned configuration level');
+});
+
 //#endregion
 
 //#region the committed artifact

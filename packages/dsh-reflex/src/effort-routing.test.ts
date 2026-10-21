@@ -377,28 +377,29 @@ test('an aborted request spends no decision and writes no record', async () => {
   }
 });
 
-test('a pinned deployment projects its level onto every route', async () => {
-  const host = await createReflexHost({
-    backend: 'mock',
-    routing: { models: { 'reflex-auto': [{ provider: 'deepseek', model: 'reasoner', description: 'deep' }] } },
-    effort: { reasoningEffort: 'medium' }
-  });
+test('a deployment with no adaptive policy leaves a bare request byte-identical', async () => {
+  // No `effort` block at all: the plugin must behave exactly as if this feature
+  // were not installed. A physical target keeps routing out of the comparison.
+  const host = await createReflexHost({ backend: 'mock' });
   try {
     registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
-    const agent = fakeAgent({ id: 'session-fixed' });
+    const seen: ReflexEffortStatus[] = [];
+    host.ctx.on('reflex/effort', (status) => seen.push(status));
+    const { agent, session } = agentWithSession('session-unset');
+    const original: LlmCallConfig = { provider: 'deepseek', model: 'reasoner' };
 
-    const config = await dispatchAgentRequest(host.ctx, agent, {
-      task: TASK_TRIVIAL,
-      config: { provider: 'reflex', model: 'reflex-auto' }
-    });
+    const config = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, config: original });
 
-    assert.equal(config.provider, 'deepseek');
-    assert.equal(config.reasoningEffort, 'low', 'medium is projected onto the declared vocabulary');
+    assert.deepEqual(config, original, 'a request that named no effort must come back unchanged');
+    assert.equal('reasoningEffort' in config, false, 'the plugin must not invent an effort');
     assert.equal(
       host.runtime.ledger.getEntries().filter((entry) => entry.type === 'effort-decision').length,
       0,
-      'a pinned level is configuration, not a System 1 decision'
+      'no adaptive decision may be taken without a configured policy'
     );
+    assert.deepEqual(effortRecordsOf(session.ownEvents()), [], 'no audit record may be written');
+    assert.equal(seen.length, 0, 'no effort status may be published');
+    assert.equal(host.runtime.effortStatus('session-unset'), undefined, 'the status feed must stay empty');
   } finally {
     await host.dispose();
   }

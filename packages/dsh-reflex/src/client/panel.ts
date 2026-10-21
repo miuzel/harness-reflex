@@ -8,35 +8,27 @@
  * moves data in and out of it, so the page's behaviour is testable without a
  * DOM, a browser, or a Host.
  *
- * The level vocabularies below deliberately restate the Host's (`EFFORT_LEVELS`,
- * `ADAPTIVE_EFFORT_LEVELS`, `EFFORT_TRIGGERS`). A browser bundle may not
- * value-import another module across the client boundary, so the copy is checked
- * against the Host's own constants by `client-contract.test.ts` instead of being
- * shared — drift fails the build rather than the page.
+ * The adaptive-level vocabulary below deliberately restates the Host's
+ * `ADAPTIVE_EFFORT_LEVELS`. A browser bundle may not value-import another module
+ * across the client boundary, so the copy is checked against the Host's own
+ * constants by `client-contract.test.ts` instead of being shared — drift fails
+ * the build rather than the page. There is deliberately no concrete-level list
+ * here: configuration offers only "leave untouched" and the adaptive policy.
  *
  * @module dsh-reflex/client/panel
  */
 
-/** Effort levels a `reasoningEffort` may pin, mirroring the Host vocabulary. */
-export const EFFORT_LEVELS: readonly string[] = ['off', 'minimal', 'low', 'medium', 'high', 'max'];
-
 /** Levels the adaptive controller may choose from, mirroring the Host vocabulary. */
 export const ADAPTIVE_EFFORT_LEVELS: readonly string[] = ['off', 'low', 'medium', 'high'];
-
-/**
- * `reasoningEffort` sentinels that ask for a per-turn decision, mirroring the
- * Host. `auto` is a legacy alias of `reflex`: it stays in this recognised set so
- * an authored document that still carries it parses, but the page offers only
- * {@link ADAPTIVE_EFFORT_POLICY} — two names for one behaviour would read as two
- * choices.
- */
-export const EFFORT_TRIGGERS: readonly string[] = ['reflex', 'auto'];
 
 /** The single adaptive entry the panel offers; the `auto` alias folds onto it. */
 export const ADAPTIVE_EFFORT_POLICY = 'reflex';
 
-/** Effort policies the panel offers: leave untouched, adapt per turn, or pin a level. */
-export const EFFORT_POLICIES: readonly string[] = ['', ADAPTIVE_EFFORT_POLICY, ...EFFORT_LEVELS];
+/**
+ * Effort policies the panel offers: leave untouched, or adapt per turn. A
+ * concrete level is a model-selector choice and is deliberately absent.
+ */
+export const EFFORT_POLICIES: readonly string[] = ['', ADAPTIVE_EFFORT_POLICY];
 
 /**
  * Fold the legacy `auto` alias onto the panel's canonical adaptive sentinel.
@@ -96,7 +88,7 @@ export interface RoutingDraft {
 
 /** Editable draft of the effort block. */
 export interface EffortDraft {
-  /** Draft of `reasoningEffort`: '', a sentinel, or a pinned level. */
+  /** Draft of `reasoningEffort`: '' or the adaptive policy. */
   setting: string;
   fallback: string;
   minConfidence: string;

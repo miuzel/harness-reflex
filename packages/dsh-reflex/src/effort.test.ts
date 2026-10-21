@@ -11,7 +11,6 @@ import {
   buildEffortChoice,
   classifyByCues,
   formatEffortStatusLine,
-  isEffortLevel,
   isEffortTrigger,
   levelOfChoiceOption,
   projectEffort,
@@ -113,7 +112,7 @@ function accuracyReport(label: string, got: readonly AdaptiveEffortLevel[]): str
   return `${label}: ${hits}/${INTENTS.length} (${(hits / INTENTS.length).toFixed(2)})${misses.length === 0 ? '' : `; misses: ${misses.join('; ')}`}`;
 }
 
-test('the marker vocabulary is exactly reflex/auto plus the effort ladder', () => {
+test('the marker vocabulary is exactly reflex/auto', () => {
   assert.deepEqual([...EFFORT_TRIGGERS], ['reflex', 'auto']);
   assert.deepEqual([...ADAPTIVE_EFFORT_LEVELS], ['off', 'low', 'medium', 'high']);
 
@@ -121,10 +120,6 @@ test('the marker vocabulary is exactly reflex/auto plus the effort ladder', () =
   assert.equal(isEffortTrigger('auto'), true);
   assert.equal(isEffortTrigger('high'), false);
   assert.equal(isEffortTrigger(undefined), false);
-  assert.equal(isEffortLevel('medium'), true);
-  assert.equal(isEffortLevel('minimal'), true, 'the full ladder is a legal pinned level');
-  assert.equal(isEffortLevel('reflex'), false);
-  assert.equal(isEffortLevel('Medium'), false);
 });
 
 test('the cue fail-safe classifies the intent table without a backend', () => {
@@ -308,23 +303,6 @@ test('a configured marker decides a request that carries none', async () => {
   assert.equal(ledger.getEntries().filter((entry) => entry.type === 'effort-decision').length, 1);
 });
 
-test('a pinned configuration level is projected but never audited as a decision', async () => {
-  const { effort, ledger, feed } = interceptor({ setting: 'high' });
-
-  const resolution = await effort.resolve(context({ requested: undefined, task: 'anything at all' }));
-
-  assert.equal(resolution.changed, true);
-  assert.equal(resolution.effort, 'high');
-  assert.equal(resolution.trigger, 'fixed-config');
-  assert.equal(resolution.decision, undefined, 'a pin is not a System 1 decision');
-  assert.equal(resolution.status, undefined);
-  assert.equal(ledger.getEntries().length, 0, 'a pin must not be counted as an adaptive decision');
-  assert.equal(feed.latest(), undefined);
-
-  const cleared = await effort.resolve(context({ requested: undefined, probe: probeOf({ kind: 'none' }) }));
-  assert.deepEqual(cleared, { changed: false, outcome: 'cleared', trigger: 'fixed-config' });
-});
-
 test('System 1 failures degrade to the deterministic cue vote', async () => {
   const failing = interceptor({
     setting: 'reflex',
@@ -428,13 +406,13 @@ test('the status feed buckets by agent and can be cleared', () => {
   assert.equal(feed.statusLine('a'), undefined);
 });
 
-test('the status line renders the pinned marker', () => {
+test('the status line renders the decided level without a pin marker', () => {
   assert.equal(
     formatEffortStatusLine({
       level: 'high',
       applied: 'high',
       outcome: 'supported',
-      trigger: 'fixed-config',
+      trigger: 'request',
       source: 'system-one',
       confidence: 0.5,
       latencyMs: 2,
@@ -442,7 +420,7 @@ test('the status line renders the pinned marker', () => {
       model: 'reasoner',
       at: 0
     }),
-    'reflex effort: high → high (system-one 0.50, 2ms) fixed deepseek:reasoner'
+    'reflex effort: high → high (system-one 0.50, 2ms) deepseek:reasoner'
   );
   assert.equal(
     formatEffortStatusLine({

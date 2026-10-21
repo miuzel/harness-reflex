@@ -236,15 +236,26 @@ intent and context before each real API request, asks System 1 for the
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; `off`/`minimal`/`low`/`medium`/`high`/`max` = pinned level; unset = never intervene |
+| `effort.reasoningEffort` | unset | `reflex` / `auto` = per-turn adaptive; unset = never intervene, the plugin never touches `reasoningEffort`; a concrete level is chosen in the model selector, not in configuration |
 | `effort.fallback` | `medium` | Deterministic cue vote used when System 1 is unavailable or below the confidence floor |
 | `effort.minConfidence` | `0.55` | Decisions below this confidence go to the fallback instead |
 | `effort.enabled` | `true` | `false` turns the whole layer off: no judgment, no audit, no injected `reflex` level |
 
+Configuration answers exactly one question: **should adaptive effort run at all?**
+
+- **blank (the default) = never intervene**: the plugin never rewrites
+  `reasoningEffort` and produces no decision or audit record, so the request
+  behaves exactly as if this feature were not installed;
+- **`reflex` (alias `auto`) = adaptive**: every turn is decided by System 1;
+- **to fix the thinking depth**: choose a concrete level in the model selector.
+  Configuration no longer accepts
+  `off`/`minimal`/`low`/`medium`/`high`/`max`; writing one is rejected at startup
+  with the migration hint instead of being silently ignored.
+
 **Behaviour contract.**
 
-- An `reasoningEffort` pinned explicitly by the caller always stays transparent;
-  the plugin never overrides it.
+- A concrete `reasoningEffort` chosen explicitly by the caller on the request
+  always stays transparent; the plugin never overrides it.
 - A target model that does not support thinking levels degrades safely instead
   of receiving the parameter verbatim.
 - Every turn writes one audit record (`plugin:dsh-reflex/effort`) containing the
@@ -268,8 +279,9 @@ difference being that the policy is still written down). With it off:
 - **no injected level**: the level this plugin injected (`reflex` / `auto`) is
   revoked from the model selector, which keeps only the adapter's own levels and
   its declared default;
-- **concrete levels pass through verbatim**: a caller-pinned `high`, `medium` and
-  so on is not even aligned onto the routed model's vocabulary;
+- **concrete levels pass through verbatim**: a `high`, `medium` and so on chosen
+  explicitly by the caller on the request is not even aligned onto the routed
+  model's vocabulary;
 - **the marker still cannot leak**: if an old session or a hand-built call still
   carries this plugin's marker, it is **deleted at the physical adapter
   boundary** rather than translated into a level, so the provider's own default
@@ -427,7 +439,7 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | --- | --- |
 | Overview | Decision count, tokens saved, average latency, gate pass/fail, latest adaptive decision |
 | Virtual provider | Routing switch, provider name, pool editing and ordering, fallback target |
-| Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence, **adaptive-effort switch** |
+| Reasoning effort | Policy (never intervene / Reflex adaptive), fallback level, minimum confidence, **adaptive-effort switch** |
 | Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
 | Tools | A per-capability switch for each of the five capabilities (four on, `route` off by default), each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`), with a line pointing the ledger at `/reflex-ledger` |
 | System 1 backend | Implementation, base URL, model id, API-key variable name, timeout; plus the tool-name prefix, prune threshold, ledger JSONL path and calibration-curve path |
@@ -638,13 +650,14 @@ stdio MCP `tools/list` for real.
 | The panel is read-only | The DSH settings document is not writable; disabled writes are expected in that mode |
 | A virtual model errors instead of dispatching | The pool is empty and `routing.fallback` is unset; add candidates or a fallback target |
 | Text is not routed as expected | Check `routing.enabled`, the virtual model id spelling, and whether the agent actually requested that virtual model |
-| Reasoning effort never changes | The policy is unset (no intervention), or the caller pinned `reasoningEffort` explicitly |
+| Reasoning effort never changes | The policy is unset (no intervention), or the caller chose a concrete `reasoningEffort` explicitly on the request |
 | System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page |
 | The in-panel guide is stale | `USER_GUIDE.md` changed without a rebuild; run `npm run build:all` |
 | A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`). `prune`/`detect_stagnation`/`status_ledger` are not tools any more and are refused by the validator |
 | `reflex_route` is missing from the default tool list | Expected: `route` is off by default; switch it on in the Tools page (or set `tools: { enabled: { route: true } }`) |
 | Looking for a `reflex_status_ledger` tool to read the ledger | The ledger is a command now: type `/reflex-ledger` (the stdio MCP side still has the tool of that name) |
 | The model selector still offers `reflex` after adaptive effort was switched off | That level was injected by the previous load; make sure the configuration is in effect and reload the plugin to revoke the injection |
+| Saving the configuration reports that only blank or reflex is supported | The old configuration still writes a concrete level; remove it (or use `reflex`). To fix the depth, choose a concrete level in the model selector |
 | Saving Interventions grew the configuration with defaults | Expected: that group is written back whole, so the mode and every budget are saved as shown |
 
 ---

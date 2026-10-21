@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import type { LedgerEntry, LedgerSummary } from './vendor/harness-reflex/index.js';
 
 import { INTERVENTION_CAPABILITIES, INTERVENTION_MODES, INTERVENTION_SETTINGS, Config, resolveConfig, type ReflexConfig } from './config.js';
-import { ADAPTIVE_EFFORT_LEVELS, EFFORT_LEVELS } from './effort.js';
+import { ADAPTIVE_EFFORT_LEVELS } from './effort.js';
 import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 import {
   PANEL_ROUTES,
@@ -833,15 +833,16 @@ test('an invalid draft is reported and never written', async () => {
   mounted.unmount();
 });
 
-test('the effort page offers one adaptive option and every level the Host accepts', async () => {
+test('the effort page offers exactly the two configured-effort choices', async () => {
   const { form } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(true), form });
   openTab(mounted.tree, '推理强度');
   const tree = await mounted.runtime.flush();
 
   const options = optionsOf(tree, '推理强度策略');
-  // One adaptive entry, named rather than raw, and no second `auto` alias.
-  assert.deepEqual(options, ['', 'reflex', ...EFFORT_LEVELS]);
+  // Leave untouched plus the one adaptive entry, named rather than raw: a
+  // concrete level is a model-selector choice, never a deployment setting.
+  assert.deepEqual(options, ['', 'reflex']);
   assert.ok(!options.includes('auto'), 'the auto alias is still offered as its own option');
   const labels = optionLabelsOf(tree, '推理强度策略');
   assert.ok(labels[1]?.includes('Reflex'), `the adaptive option is not named: ${labels[1] ?? '(missing)'}`);
@@ -863,7 +864,7 @@ test('a legacy auto setting folds onto the adaptive option and is saved as refle
   let tree = await mounted.runtime.flush();
 
   // ...and the page shows it as the one adaptive entry, never as raw "auto".
-  assert.deepEqual(optionsOf(tree, '推理强度策略'), ['', 'reflex', ...EFFORT_LEVELS]);
+  assert.deepEqual(optionsOf(tree, '推理强度策略'), ['', 'reflex']);
   assert.equal(String(selectOf(tree, '推理强度策略').props.value), 'reflex');
 
   // Editing the group writes the canonical sentinel back.
@@ -894,13 +895,13 @@ test('the effort copy explains non-intervention and the injected adaptive level 
       assert.ok(wrapper !== undefined, 'the effort setting field is not rendered');
       const note = textOf(helpNoteOf(wrapper).note);
       const labels = optionLabelsOf(tree, language === 'zh' ? '推理强度策略' : 'Effort policy');
-      assert.equal(labels[0], language === 'zh' ? '不干预（不设置 reasoningEffort）' : 'Leave untouched (never set reasoningEffort)');
+      assert.equal(labels[0], language === 'zh' ? '不干预' : 'Leave untouched');
       assert.ok(labels[1]?.includes(language === 'zh' ? '自适应' : 'adaptive'), `the adaptive option lacks its meaning: ${labels[1] ?? ''}`);
 
       const required =
         language === 'zh'
-          ? ['不改写 reasoningEffort', '可以主动选中', 'Reflex (Auto)', '原样下发', '取决于目标模型声明的档位集合']
-          : ['never rewrites reasoningEffort', 'can still choose', 'Reflex (Auto)', 'dispatched as written', 'depends on the levels the target model declares'];
+          ? ['不改写 reasoningEffort', '行为与未安装该功能一致', 'System 1', '模型选择器', '具体档位']
+          : ['never rewrites reasoningEffort', 'as if this feature were not installed', 'System 1', 'model selector', 'concrete level'];
       for (const phrase of required) assert.ok(note.includes(phrase), `${language} help lacks "${phrase}": ${note}`);
       // The on-page hint carries the same "nothing is rewritten" promise.
       assert.ok(

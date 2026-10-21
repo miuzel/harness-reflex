@@ -118,7 +118,6 @@ export {
   effortRank,
   formatEffortStatusLine,
   isAdaptiveEffortLevel,
-  isEffortLevel,
   isEffortTrigger,
   levelOfChoiceOption,
   projectEffort,

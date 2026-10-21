@@ -11,6 +11,7 @@ import {
   type ReflexConfig
 } from './config.js';
 import * as plugin from './index.js';
+import { EFFORT_LEVELS } from './effort.js';
 import { createReflexHost } from './testing.js';
 import { REFLEX_TOOL_DEFAULT_ENABLED, REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
 import type { ReflexLedgerResult } from './bridge.js';
@@ -104,44 +105,54 @@ test('resolveConfig validates and fills every field', () => {
   assert.equal(resolved.tools.enabled.choice, true, 'the other four stay on');
 });
 
-test('Config accepts the reflex/auto marker and every effort level', () => {
+test('Config accepts only the reflex/auto marker for adaptive effort', () => {
   assert.equal(plainConfig(Config({})).effort?.reasoningEffort, undefined);
   assert.deepEqual(plainConfig(Config({ effort: {} })).effort, { enabled: true, fallback: 'medium', minConfidence: 0.3 });
   assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'reflex' } })).effort?.reasoningEffort, 'reflex');
   assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'auto' } })).effort?.reasoningEffort, 'auto');
-  assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'low' } })).effort?.reasoningEffort, 'low');
-  assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'medium' } })).effort?.reasoningEffort, 'medium');
-  assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'high' } })).effort?.reasoningEffort, 'high');
-  assert.equal(plainConfig(Config({ effort: { reasoningEffort: 'off' } })).effort?.reasoningEffort, 'off');
   assert.equal(plainConfig(Config({ effort: { fallback: 'low', minConfidence: 0.5 } })).effort?.fallback, 'low');
 
+  for (const level of EFFORT_LEVELS) {
+    assert.throws(
+      () => Config({ effort: { reasoningEffort: level } } as unknown as ReflexConfig),
+      /effort\.reasoningEffort/,
+      `the schema must no longer accept the concrete level ${level}`
+    );
+  }
   assert.throws(() => Config({ effort: { reasoningEffort: 'turbo' } } as unknown as ReflexConfig), 'an unknown level is refused');
   assert.throws(() => Config({ effort: { fallback: 'max' } } as unknown as ReflexConfig), 'the fallback stays adaptive');
   assert.throws(() => Config({ effort: { minConfidence: 2 } } as unknown as ReflexConfig), 'confidence is a fraction');
 });
 
-test('resolveConfig normalizes the effort marker and refuses a broken block', () => {
+test('resolveConfig normalizes the marker and sends concrete levels to the model selector', () => {
   assert.deepEqual(resolveConfig({ effort: { reasoningEffort: 'auto' } }).effort, {
     enabled: true,
     setting: 'auto',
     fallback: 'medium',
     minConfidence: 0.3
   });
-  assert.deepEqual(resolveConfig({ effort: { reasoningEffort: 'high', fallback: 'low', minConfidence: 0 } }).effort, {
+  assert.deepEqual(resolveConfig({ effort: { fallback: 'low', minConfidence: 0 } }).effort, {
     enabled: true,
-    setting: 'high',
     fallback: 'low',
     minConfidence: 0
   });
   assert.equal(resolveEffortSetting('  REFLEX '), 'reflex', 'the programmatic seam normalizes what the schema rejects');
   assert.equal(resolveEffortSetting(undefined), undefined);
   assert.throws(() => Config({ effort: { reasoningEffort: 'AUTO' } } as unknown as ReflexConfig), 'the YAML schema is exact');
-  assert.throws(() => resolveEffortSetting('turbo'), /effort\.reasoningEffort must be one of/);
 
-  assert.throws(
-    () => resolveConfig({ effort: { reasoningEffort: 'turbo' } } as unknown as ReflexConfig),
-    /effort\.reasoningEffort expected/
-  );
+  for (const level of EFFORT_LEVELS) {
+    assert.throws(
+      () => resolveConfig({ effort: { reasoningEffort: level } } as unknown as ReflexConfig),
+      (error: unknown) => {
+        assert.match(String((error as Error).message), /模型选择器/, `the refusal of ${level} must say where depth moved`);
+        assert.match(String((error as Error).message), /reflex/, `the refusal of ${level} must name the legal values`);
+        return true;
+      }
+    );
+    assert.throws(() => resolveEffortSetting(level), /模型选择器/, `the programmatic seam must refuse ${level}`);
+  }
+  assert.throws(() => resolveEffortSetting('turbo'), /模型选择器/);
+
   assert.throws(
     () => resolveConfig({ effort: { fallback: 'max' } } as unknown as ReflexConfig),
     /effort\.fallback expected/

@@ -84,7 +84,7 @@ dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex �
 | `routing.models` | `{}` | 虚拟模型 → 物理候选池，例如 `reflex-auto: [{provider: deepseek, model: reasoner, description: ..., tags: [...]}]` |
 | `routing.fallback` | 省略 | 池无法回答时的降级目标（`provider:model`）；省略即 **Fail-Closed**（报错而不是乱派发） |
 | `routing.maxTaskChars` | `400` | 每个 agent 参与打分的任务文本上限（进台账时截断到 160 字符） |
-| `effort.reasoningEffort` | 省略 | `reflex`（别名 `auto`）= 每轮按任务自适应思考等级；也可钉死成 `off/minimal/low/medium/high/max`。省略 = 不干预 |
+| `effort.reasoningEffort` | 省略 | `reflex`（别名 `auto`）= 每轮按任务自适应思考等级；省略 = 不干预，插件完全不碰 `reasoningEffort`。想固定思考深度请在模型选择器里选具体档位，配置不再接受 `off/minimal/low/medium/high/max` |
 | `effort.fallback` | `medium` | System 1 不可用/低于置信度下限时，确定性线索投票的兜底档 |
 | `effort.minConfidence` | `0.3` | 采纳 System 1 答案的最低置信度（低于此值退回线索投票） |
 
@@ -100,7 +100,7 @@ dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex �
       virtualProvider: reflex
       fallback: deepseek:chat          # 可选；省略则池为空时报错（Fail-Closed）
       effort:
-        reasoningEffort: reflex       # 每轮按任务自适应；省略则完全不干预思考等级
+        reasoningEffort: reflex       # 每轮按任务自适应；省略则完全不干预思考等级（具体档位请在模型选择器里选）
         fallback: medium              # System 1 不可用时的兜底档
       models:
         reflex-auto:

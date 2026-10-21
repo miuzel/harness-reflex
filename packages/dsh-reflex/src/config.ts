@@ -1,6 +1,6 @@
 import z from '@deepseek-ai/schemastery';
 
-import { ADAPTIVE_EFFORT_LEVELS, EFFORT_LEVELS, EFFORT_TRIGGERS, type AdaptiveEffortLevel, type ReasoningEffortSetting } from './effort.js';
+import { ADAPTIVE_EFFORT_LEVELS, EFFORT_TRIGGERS, type AdaptiveEffortLevel, type ReasoningEffortSetting } from './effort.js';
 import { parseFallback, type ModelPoolEntry, type ModelPools, type PhysicalTarget } from './router.js';
 // Runtime import, not a type-only one: the tool vocabulary is owned by the
 // registry module, and validating `tools.enabled` against a second copy of the
@@ -227,9 +227,10 @@ export interface ReflexEffortConfig {
    */
   enabled?: boolean;
   /**
-   * `'reflex'`/`'auto'` makes every turn decide its own effort through System 1;
-   * one concrete level (`off`/`low`/`medium`/`high`) pins requests that carry no
-   * effort of their own. Omitted = the plugin never touches `reasoningEffort`.
+   * `'reflex'`/`'auto'` makes every turn decide its own effort through System 1.
+   * Omitted = the plugin never touches `reasoningEffort`, exactly as if this
+   * feature were not installed. A concrete level is rejected: fixed depth is a
+   * model-selector choice, not a deployment setting.
    */
   reasoningEffort?: ReasoningEffortSetting;
   /** Level used when no cue matches and System 1 cannot decide. Default `medium`. */
@@ -315,8 +316,8 @@ export interface ResolvedEffortConfig {
   /** Whether adaptive effort may decide anything; `true` unless authored otherwise. */
   enabled: boolean;
   /**
-   * The adaptive trigger marker or the pinned level; `undefined` (the default)
-   * leaves `reasoningEffort` entirely to the caller.
+   * The adaptive trigger marker; `undefined` (the default) leaves
+   * `reasoningEffort` entirely to the caller.
    */
   setting?: ReasoningEffortSetting;
   /** Level used when neither System 1 nor the cue classifier has evidence. */
@@ -413,9 +414,9 @@ const EffortSchema = z.object({
     .default(true)
     .description('Whether adaptive reasoning effort may run. Default true; false withdraws the plugin-injected adaptive level.'),
   reasoningEffort: z
-    .union([...EFFORT_TRIGGERS, ...EFFORT_LEVELS])
+    .union([...EFFORT_TRIGGERS])
     .description(
-      'Per-turn adaptive marker ("reflex", alias "auto"), or one pinned level. Omit to leave reasoningEffort to the caller.'
+      'Per-turn adaptive marker ("reflex", alias "auto"). Omit to leave reasoningEffort to the caller; a concrete level belongs in the model selector.'
     ),
   fallback: z
     .union([...ADAPTIVE_EFFORT_LEVELS])
@@ -733,6 +734,14 @@ export function plainConfig(value: any): any {
  */
 export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
   const unwrapped = plainConfig(config ?? {});
+  const authoredEffort = (unwrapped as { effort?: { reasoningEffort?: unknown } } | null | undefined)?.effort;
+  const authoredReasoning =
+    authoredEffort !== null && typeof authoredEffort === 'object'
+      ? (authoredEffort as { reasoningEffort?: unknown }).reasoningEffort
+      : undefined;
+  // Check the authored policy *before* the schema: a legacy concrete level then
+  // gets the migration hint below instead of the schema's generic union error.
+  if (typeof authoredReasoning === 'string') resolveEffortSetting(authoredReasoning);
   const validated = plainConfig(Config(unwrapped)) as ReflexConfig;
   const routing = validated.routing ?? {};
   const effort = validated.effort ?? {};
@@ -856,22 +865,25 @@ export function resolveToolsConfig(authored: ReflexToolsConfig | undefined): Res
 /**
  * Validate one authored `reasoningEffort` value.
  *
- * The loader already restricts it to the schema's union; this repeats the check
- * because {@link resolveConfig} is also the entry point for a programmatic
- * caller, and a typo there must fail loudly instead of silently disabling the
- * interceptor.
+ * Configuration only answers "should adaptive effort run at all?": the loader
+ * restricts it to the trigger markers, and this repeats the check because
+ * {@link resolveConfig} is also the entry point for a programmatic caller. A
+ * concrete level is not a typo to ignore — it is an obsolete setting, so the
+ * error says where that choice moved instead of silently dropping it.
  *
  * @param value - authored setting.
- * @returns the normalized setting, or `undefined` when nothing was configured.
- * @throws Error when the value is neither a trigger marker nor a level.
+ * @returns the normalized trigger, or `undefined` when nothing was configured.
+ * @throws Error when the value is not `reflex`/`auto` (including a concrete level).
  */
 export function resolveEffortSetting(value: string | undefined): ReasoningEffortSetting | undefined {
   if (value === undefined) return undefined;
   const setting = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if ((EFFORT_TRIGGERS as readonly string[]).includes(setting) || (EFFORT_LEVELS as readonly string[]).includes(setting)) {
+  if ((EFFORT_TRIGGERS as readonly string[]).includes(setting)) {
     return setting as ReasoningEffortSetting;
   }
-  throw new Error(`effort.reasoningEffort must be one of ${[...EFFORT_TRIGGERS, ...EFFORT_LEVELS].join(', ')} (got "${String(value)}")`);
+  throw new Error(
+    `effort.reasoningEffort 只支持留空或 reflex（别名 auto）；要固定思考深度请在模型选择器里选择具体档位 (got "${String(value)}")`
+  );
 }
 
 /**

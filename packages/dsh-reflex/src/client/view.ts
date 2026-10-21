@@ -18,7 +18,6 @@ import {
   ADAPTIVE_EFFORT_LEVELS,
   ADAPTIVE_EFFORT_POLICY,
   BACKEND_CHOICES,
-  EFFORT_LEVELS,
   INTERVENTION_CAPABILITIES,
   INTERVENTION_MODES,
   INTERVENTION_SETTINGS,
@@ -536,12 +535,11 @@ function LevelChip(props: { level: string; label?: string }): ReactNode {
   );
 }
 
-/** Options of an effort-policy select: leave untouched, one adaptive entry, then pinned levels. */
+/** Options of an effort-policy select: leave untouched, or adapt per turn. */
 function effortPolicyOptions(t: Translate): { value: string; label: string }[] {
   return [
     { value: '', label: t('effortUnset') },
-    { value: ADAPTIVE_EFFORT_POLICY, label: t('effortAdaptive') },
-    ...EFFORT_LEVELS.map((value) => ({ value, label: value }))
+    { value: ADAPTIVE_EFFORT_POLICY, label: t('effortAdaptive') }
   ];
 }
 
