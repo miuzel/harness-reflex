@@ -53,8 +53,8 @@ npm install ./harness-reflex-0.1.0.tgz
 
 | 包 | 文件 | SHA256 |
 |---|---|---|
-| 插件 | `dsh-system-one-0.1.0.tgz` | `f21c1acd8685276e02e8c618601dcdf5f484e54c65fe05a263d91434bf98748c` |
-| 核心/MCP | `harness-reflex-0.1.0.tgz` | `476d344432a54fff3d991c437e3d3137cf5f9d8d9143dbfa42e735237c92200e` |
+| 插件 | `dsh-system-one-0.1.0.tgz` | `138a18fbc698ea9a06be43a3caf88b5658bfdade154a71ba279b66e78e66d553` |
+| 核心/MCP | `harness-reflex-0.1.0.tgz` | `2fba3b7e20a29f0b76ca085f5731d1f80dbacb6ea0ee71e3168197271f1e1a38` |
 
 ## 从 0.1.0-alpha.2 升级
 
