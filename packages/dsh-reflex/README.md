@@ -1,4 +1,4 @@
-# @miuzel/dsh-reflex — Harness Reflex 的 DSH Host 插件
+# dsh-system-one — Harness Reflex 的 DSH Host 插件
 
 把仓库根目录的 **Harness Reflex（System One 决策运行时）** 以 **DSH Cordis Host 插件**的形式挂进 `dsh`
 进程内：不再经过 stdio MCP 子进程，5 个 `reflex_*` 能力直接注册到 `ctx.tools`（默认注册其中 4 个，
@@ -11,7 +11,7 @@
 路由**上下文感知且带会话粘性**：每次决策都会拿到本会话已累积的上下文规模与当前物理模型，提示词里写明
 「保留当前模型可省缓存、非必要不切」，名次相近时守住已经在用的模型，只有明显更合适才切换。
 
-- 插件包名：`@miuzel/dsh-reflex`（scoped；npm 上未加 scope 的 `dsh-reflex` 已被第三方占用）
+- 插件包名：`dsh-system-one`（非 scoped；`dsh-reflex` 已被第三方占用，故改用此名）
 - Cordis 插件 id：`dsh-reflex`（`src/index.ts` 导出的 `name`，不是 npm 包名）；
   浏览器 bundle 的 `__ModuleLoader__` id 则由 `package.json` 的 `name` 派生（DSH loader 按包名注册）
 - Cordis 插件入口：`apply(ctx, config)`（另导出 `applyReflex(ctx, config)` 返回运行时实例，便于测试/审计）
@@ -29,7 +29,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `package.json` | 插件元数据：`name`/`exports`/`dsh.bundle.patch`/peerDependencies |
-| `cordis.patch.yml` | Bundle patch：`- insert: [{ id: dsh-reflex, name: '@miuzel/dsh-reflex' }]`（`id` 是稳定的组合条目 id，`name` 是 npm 模块名） |
+| `cordis.patch.yml` | Bundle patch：`- insert: [{ id: dsh-reflex, name: 'dsh-system-one' }]`（`id` 是稳定的组合条目 id，`name` 是 npm 模块名） |
 | `locale/{zh,en}.json` | `dsh plugin` 列表里显示的标题与描述 |
 | `tsconfig.json` | 独立编译配置（`src/` → `dist/`） |
 | `src/config.ts` | `ReflexConfig` 类型 + schemastery `Config` 模式 + `resolveConfig` |
@@ -71,7 +71,7 @@ DSH_HOST_MODULES=/path/to/dsh/node_modules npm run build:all
 
 ```bash
 # 从发布 tarball 安装（同版本重装必须 --force）
-dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-system-one-0.1.0.tgz
 # 开发时也可以直接装目录（会链接当前构建）
 dsh plugin --profile web add ./packages/dsh-reflex
 ```
@@ -98,7 +98,7 @@ dsh plugin --profile web add ./packages/dsh-reflex
 
 ```yaml
 - id: dsh-reflex
-  name: '@miuzel/dsh-reflex'
+  name: 'dsh-system-one'
   config:
     backend: mock
     toolPrefix: reflex_
@@ -224,8 +224,8 @@ npm run test:mutation    # 负向对照：注入故障，要求被测试或编�
 - 仓库内开发时，`scripts/link-dsh-deps.mjs` 把 `harness-reflex` 与 Host 模块软链进
   `packages/dsh-reflex/node_modules/`（`--check` 在未就绪时退出码 1，不触碰 registry）；**发布形态不依赖任何
   `harness-reflex` 版本范围**：`npm run build:all` 会把根包源码编译进 `dist/vendor/harness-reflex`，tarball
-  自包含，安装时只需 Host 提供的 peer 模块。插件 tarball 采用 scoped 包的标准命名
-  `release/miuzel-dsh-reflex-<version>.tgz`（见根 [`README.md`](../../README.md) 的发布产物一节）。
+  自包含，安装时只需 Host 提供的 peer 模块。插件 tarball 采用 npm 标准命名
+  `release/dsh-system-one-<version>.tgz`（见根 [`README.md`](../../README.md) 的发布产物一节）。
 - `dist/` 是构建产物（已 gitignore），提交进版本库的是 TS 源码与插件元数据。
 - `ledgerPath` 默认不落盘，是为了避免 Host 在用户项目里产生 `.reflex/` 垃圾文件；需要审计时显式配置。
 - 路由决策的任务文本来自 `agent/pre-step` 的用户消息文本块（多模态输入只有文本参与打分）；每次

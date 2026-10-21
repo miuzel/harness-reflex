@@ -198,7 +198,7 @@ test('the repository keeps release archives out of the package root', () => {
 //#region the plugin package
 
 test('the plugin manifest ships the browser half and the guide it renders', () => {
-  assert.equal(plugin.name, '@miuzel/dsh-reflex');
+  assert.equal(plugin.name, 'dsh-system-one');
   assert.equal(plugin.version, root.version, 'the two packages release in lockstep');
   assert.equal(plugin.exports?.['./client'], './client.js');
   assert.ok((plugin.files ?? []).includes('client.js'), 'the browser half is not in the allow-list');
@@ -248,7 +248,7 @@ test('the plugin declares every host package its build imports', () => {
 });
 
 test('the packed tarball is self-contained with no unpublishable dependencies', () => {
-  // @miuzel/dsh-reflex vendors harness-reflex directly into dist/vendor so that it
+  // dsh-system-one vendors harness-reflex directly into dist/vendor so that it
   // installs cleanly in private DSH profiles without needing a public npm publication.
   assert.equal(plugin.dependencies?.['harness-reflex'], undefined, 'the plugin should not depend on unreleased harness-reflex');
   assert.ok(existsSync(join(pluginDir, 'dist', 'vendor', 'harness-reflex', 'index.js')), 'the vendored runtime must be compiled into dist/');
@@ -278,7 +278,7 @@ test('a packed release directory is internally consistent', () => {
   // not that the packed release is broken: the pack run is what asserts presence
   // (`release-pack.mjs` fails on a missing artifact). Jumping to the checks below
   // would compare the old artifacts against the new version and report a lie.
-  const artifacts = [`harness-reflex-${root.version}.tgz`, `miuzel-dsh-reflex-${plugin.version}.tgz`];
+  const artifacts = [`harness-reflex-${root.version}.tgz`, `dsh-system-one-${plugin.version}.tgz`];
   if (artifacts.some((artifact) => !existsSync(join(releaseDir, artifact)))) {
     assert.ok(true, `not packed for this version yet: ${artifacts.join(', ')}`);
     return;
@@ -292,7 +292,7 @@ test('a packed release directory is internally consistent', () => {
   assert.deepEqual(report.failures, [], `the last pack run reported failures: ${JSON.stringify(report.failures)}`);
   assert.ok(report.checks.length >= 20, 'the pack run recorded too few checks to be meaningful');
   assert.ok(
-    report.artifacts.some((artifact) => artifact.file === `miuzel-dsh-reflex-${plugin.version}.tgz`),
+    report.artifacts.some((artifact) => artifact.file === `dsh-system-one-${plugin.version}.tgz`),
     'the report does not cover the plugin tarball'
   );
 });

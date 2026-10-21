@@ -97,7 +97,7 @@ test('both guide revisions document the same thirteen sections', () => {
   const required = [
     'npm run build:all',
     'dsh plugin --profile web add',
-    '@miuzel/dsh-reflex',
+    'dsh-system-one',
     'settings.section',
     'client.js',
     'USER_GUIDE.md',

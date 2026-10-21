@@ -1,6 +1,6 @@
 # Harness Reflex User Guide (v0.1.0)
 
-> This is the complete manual for the **`@miuzel/dsh-reflex` plugin** and the
+> This is the complete manual for the **`dsh-system-one` plugin** and the
 > **`harness-reflex` core package**. The same text is embedded into
 > `packages/dsh-reflex/client.js`, so it can be read directly in the DSH
 > settings panel under the **“Guide”** tab (it follows the DSH interface
@@ -24,7 +24,7 @@ It ships in two forms that share one decision engine but expose **different tool
 | Form | Package | Harness | Transport |
 | --- | --- | --- | --- |
 | stdio MCP server | `harness-reflex` | Claude Code, Codex CLI, AGY | MCP JSON-RPC child process |
-| DSH Host plugin | `@miuzel/dsh-reflex` | DeepSeek Harness (`dsh`) | In-process `ctx.tools` / Cordis hooks |
+| DSH Host plugin | `dsh-system-one` | DeepSeek Harness (`dsh`) | In-process `ctx.tools` / Cordis hooks |
 
 The MCP surface exposes eight tools; the DSH surface registers five switchable
 tools (four by default), while pruning, stagnation detection and the ledger are
@@ -42,7 +42,7 @@ and each surface's actual tool definitions for argument and validation boundarie
 └───────────────┬──────────────────────────────────┬───────────────────┘
                 │ stdio MCP                        │ in-process DSH Cordis
 ┌───────────────▼──────────────────┐  ┌────────────▼───────────────────┐
-│ harness-reflex core (dist/)      │  │ @miuzel/dsh-reflex plugin      │
+│ harness-reflex core (dist/)      │  │ dsh-system-one plugin          │
 │  gate · prune · stagnation       │◄─┤  src/bridge.ts  ReflexRuntime  │
 │  route · screen · score          │  │  src/tools.ts   5 switchable    │
 │  ledger · calibrate              │  │  src/router.ts  virtual provider│
@@ -92,7 +92,7 @@ node dist/cli/index.js setup all      # or claude | codex | agy
 
 # 3) install as a DSH plugin (in-process integration, recommended)
 #    release tarball: --force is required to reinstall the same version
-dsh plugin --profile web add --force ./release/miuzel-dsh-reflex-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-system-one-0.1.0.tgz
 ```
 
 Every step of `npm run build:all` is required:
@@ -371,7 +371,7 @@ the documented default and needs no extra configuration.
 Retrieval is a read of the session events under that locator:
 
 ```ts
-import { readPrunedOriginal } from '@miuzel/dsh-reflex';
+import { readPrunedOriginal } from 'dsh-system-one';
 
 const record = readPrunedOriginal(session.ownEvents(), locator);
 record?.text;    // the original, byte for byte
@@ -535,7 +535,7 @@ the **eight tools frozen since v0.1.0**, while the DSH plugin side registers
 by the automatic intervention layer and by one command instead of occupying the
 model's tool list.
 
-| Capability | MCP tool name (`harness-reflex mcp`) | DSH plugin side (`@miuzel/dsh-reflex`) | Main arguments | Advice |
+| Capability | MCP tool name (`harness-reflex mcp`) | DSH plugin side (`dsh-system-one`) | Main arguments | Advice |
 | --- | --- | --- | --- | --- |
 | Multi-option classification | `reflex_choice` | tool `reflex_choice` | `question`, `options[]`, optional `context` | Suggested for the agent |
 | Continuous rating | `reflex_score` | tool `reflex_score` | `statement`, optional `criteria`, `context` | Suggested for the agent |
@@ -630,7 +630,7 @@ Release artifacts (`release/`):
 | Artifact | Content |
 | --- | --- |
 | `harness-reflex-<version>.tgz` | Root package: `dist/`, `README.md`, `docs/`, `USER_GUIDE.md`, `experiments/` |
-| `miuzel-dsh-reflex-<version>.tgz` | Plugin `@miuzel/dsh-reflex` (scoped-package naming): `dist/`, `client.js` (with this manual embedded), `cordis.patch.yml`, `locale/` |
+| `dsh-system-one-<version>.tgz` | Plugin `dsh-system-one` (npm pack naming): `dist/`, `client.js` (with this manual embedded), `cordis.patch.yml`, `locale/` |
 | `SHA256SUMS` | SHA-256 checksums of the two tarballs |
 | `release-report.json` | The per-check packaging audit (entries, dead links, dependency declarations, install smoke) |
 | `RELEASE-<version>.md` | Release notes: install commands, verification checklist, contents |
@@ -666,7 +666,7 @@ stdio MCP `tools/list` for real.
 
 ## 13. Version and compatibility
 
-- Version: `harness-reflex` and `@miuzel/dsh-reflex` ship together at v0.1.0;
+- Version: `harness-reflex` and `dsh-system-one` ship together at v0.1.0;
 - Node: `>= 18` (root package `engines`); DSH Host dependencies `@deepseek-ai/*@0.2.1-alpha.4`;
 - Host contracts are declared as `peerDependencies`, so the plugin never bundles
   a second copy of Host modules;
