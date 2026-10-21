@@ -23,6 +23,14 @@ export interface JevBackendConfig {
   apiKey?: string;
   model?: string;
   timeoutMs?: number;
+  /**
+   * Character count from which `prune()` judges the payload segment by segment
+   * through System One. Below it the deterministic local candidates are used and
+   * no request is sent. Defaults to 10000 (or
+   * `SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS`); mirrors
+   * `interventions.pruneJudgeMinChars` of the plugin config.
+   */
+  pruneJudgeMinChars?: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -452,13 +460,10 @@ function tokenize(text: string): string[] {
 /** One deterministic pruning of a raw output. */
 export interface PruneCandidate {
   id: 'aggressive' | 'balanced' | 'conservative';
-  /** Human-readable label; doubles as the `score` criterion of the ranking. */
+  /** Human-readable label including the reduction it achieved. */
   label: string;
   text: string;
 }
-
-/** Characters of one candidate carried into the ranking request. */
-const PRUNE_STATE_CHARS = 3000;
 
 const PROGRESS_ART = /\[=+[>\s]|█|^\s*\d+%\s|\[K/;
 const NOISE_LINE = /^\s*(?:npm (?:warn|notice)|Downloading|Fetching|Progress:|added \d+ packages|audited \d+ packages)\b/i;
@@ -510,10 +515,13 @@ function pruneLabel(id: PruneCandidate['id'], originalChars: number, prunedChars
 }
 
 /**
- * Build the deterministic prunings the ranking chooses between.
+ * Build the deterministic prunings used below the judging threshold and as the
+ * fallback when System One cannot judge the segments.
  *
- * The gateway generates no text, so reduction itself is local and deterministic;
- * the model only ranks the candidates by how well each preserves the intent.
+ * These are the legacy line filters: {@link JevDecisionBackend.prune} no longer
+ * uses them as its primary decision for large payloads — the per-segment scores
+ * are — so `PROGRESS_ART`/`NOISE_LINE` are one input among two, never the sole
+ * basis of a reduction.
  * @param rawOutput - the bulk output to reduce.
  * @param intent - what the caller is looking for.
  * @param maxTokens - optional token budget applied to every candidate.
@@ -573,15 +581,310 @@ export function pickLocalPruneCandidate(candidates: readonly PruneCandidate[]): 
   return candidates[Math.floor(candidates.length / 2)] ?? candidates[0];
 }
 
-/** Instruction block of the prune ranking. */
-function buildPruneInstructions(intent: string): string {
+/* -------------------------------------------------------------------------- */
+/* System One segment judging                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Character count from which {@link JevDecisionBackend.prune} judges segments
+ * with System One. Kept in sync with `interventions.pruneJudgeMinChars`.
+ */
+export const PRUNE_JUDGE_MIN_CHARS_DEFAULT = 10000;
+
+/** A scored segment never exceeds this many characters (a single long line stays whole). */
+const PRUNE_SEGMENT_MAX_CHARS = 1600;
+
+/** Upper bound on segments judged by one request; the rest are kept deterministically. */
+export const PRUNE_MAX_JUDGED_SEGMENTS = 40;
+
+/** Prefix of the per-segment question ids of a pruning judgment. */
+export const PRUNE_SEGMENT_QUESTION_PREFIX = 'prune-seg-';
+
+/** Criterion pair of one segment question; index 1 (keep) is the score we read. */
+const PRUNE_KEEP_CRITERIA: readonly string[] = [
+  'omit: repetitive, irrelevant, or safe to drop',
+  'keep: unique, relevant, or diagnostic content'
+];
+
+/**
+ * Share of the original characters each candidate may spend on scored
+ * segments. Forced lines (anchors, diagnostics, intent matches) never compete
+ * with this budget.
+ */
+const PRUNE_SCORED_BUDGET_RATIO: Readonly<Record<PruneCandidate['id'], number>> = {
+  aggressive: 0.25,
+  balanced: 0.5,
+  conservative: 0.7
+};
+
+/**
+ * Lines that must survive verbatim whatever the segment score says: diagnostic
+ * evidence, plus the first and last content lines of the payload. Matched
+ * case-insensitively.
+ */
+const PRUNE_FORCED_LINE =
+  /error|failed|FAIL|warn|exception|traceback|assert|exit code [1-9]|non-zero/i;
+
+/**
+ * Resolve the segment-judging character threshold from an explicit value, then
+ * the environment, then the documented default.
+ * @param value - explicit backend configuration, when supplied.
+ * @returns a non-negative finite character count.
+ */
+export function resolvePruneJudgeMinChars(value?: number): number {
+  const raw = value ?? process.env.SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS;
+  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim().length > 0 ? Number(raw) : NaN;
+  if (Number.isFinite(numeric) && numeric >= 0) return Math.floor(numeric);
+  return PRUNE_JUDGE_MIN_CHARS_DEFAULT;
+}
+
+/** One contiguous run of non-blank lines, the unit System One judges. */
+interface PruneSegment {
+  /** Position in the original output, oldest first. */
+  index: number;
+  /** 0-based inclusive line range in the original output. */
+  startLine: number;
+  endLine: number;
+  /** The segment text exactly as it appears in the output. */
+  text: string;
+  chars: number;
+  /** Absolute line indexes always kept, regardless of the score. */
+  forcedLines: number[];
+}
+
+/** Whether one line carries diagnostic evidence or matches the intent. */
+function isForcedPruneLine(line: string, intentWords: readonly string[]): boolean {
+  if (PRUNE_FORCED_LINE.test(line)) return true;
+  const lower = line.toLowerCase();
+  return intentWords.some((word) => lower.includes(word));
+}
+
+/**
+ * Cut an output into the segments System One judges.
+ *
+ * Paragraphs are separated by blank lines; a paragraph longer than
+ * {@link PRUNE_SEGMENT_MAX_CHARS} is split on line windows, so the model never
+ * sees one oversized block and the local replay can reassemble the exact lines.
+ * Line order and line numbers are preserved: every segment is a half-open view
+ * of the original line array.
+ * @param rawOutput - the bulk output.
+ * @param intent - what the caller is looking for.
+ * @returns segments in original order, with their forced line indexes.
+ */
+export function segmentPruneOutput(rawOutput: string, intent: string): PruneSegment[] {
+  const lines = rawOutput.split('\n');
+  const intentWords = tokenize(intent);
+  const segments: PruneSegment[] = [];
+
+  let firstContent = -1;
+  let lastContent = -1;
+  for (let index = 0; index < lines.length; index++) {
+    if ((lines[index] as string).trim().length === 0) continue;
+    if (firstContent < 0) firstContent = index;
+    lastContent = index;
+  }
+
+  const push = (startLine: number, endLine: number): void => {
+    const forced: number[] = [];
+    for (let line = startLine; line <= endLine; line++) {
+      const text = lines[line] as string;
+      if (line === firstContent || line === lastContent || isForcedPruneLine(text, intentWords)) {
+        forced.push(line);
+      }
+    }
+    const text = lines.slice(startLine, endLine + 1).join('\n');
+    segments.push({ index: segments.length, startLine, endLine, text, chars: text.length, forcedLines: forced });
+  };
+
+  let cursor = 0;
+  while (cursor < lines.length) {
+    while (cursor < lines.length && (lines[cursor] as string).trim().length === 0) cursor++;
+    if (cursor >= lines.length) break;
+    const blockStart = cursor;
+    while (cursor < lines.length && (lines[cursor] as string).trim().length > 0) cursor++;
+    const blockEnd = cursor - 1;
+
+    let windowStart = blockStart;
+    let windowChars = (lines[blockStart] as string).length;
+    for (let line = blockStart + 1; line <= blockEnd; line++) {
+      const length = (lines[line] as string).length + 1;
+      if (windowChars + length > PRUNE_SEGMENT_MAX_CHARS) {
+        push(windowStart, line - 1);
+        windowStart = line;
+        windowChars = (lines[line] as string).length;
+      } else {
+        windowChars += length;
+      }
+    }
+    push(windowStart, blockEnd);
+  }
+  return segments;
+}
+
+/** Instruction block of one segment question. */
+function buildSegmentInstructions(intent: string, segment: PruneSegment, total: number): string {
   const trimmed = intent.trim() || 'extract diagnostics, relevant results and errors';
   return [
-    'Choose the criterion whose candidate text best preserves the information the INTENT asks for while removing noise.',
-    'Prefer the smallest candidate that still contains every line the INTENT needs; never prefer a candidate that lost a relevant diagnostic.',
-    `INTENT: ${trimmed}`
+    'Decide whether one segment of a tool output must be kept to serve the INTENT, or may be omitted as noise.',
+    `INTENT: ${trimmed}`,
+    `SEGMENT: ${String(segment.index + 1)} of ${String(total)} (lines ${String(segment.startLine + 1)}-${String(segment.endLine + 1)}).`,
+    'Score 0 when the segment is repetitive or irrelevant; score 1 when it carries information the INTENT needs.'
   ].join('\n');
 }
+
+/**
+ * Read one segment's keep score (0 = omit, 1 = keep) out of its `score` answer.
+ * The distribution over the two criteria is authoritative; the weighted `score`
+ * is the fallback, and nothing usable reads as `undefined`.
+ * @param answer - the gateway's answer for this segment question.
+ * @returns the keep score in `[0, 1]`, or `undefined` when unusable.
+ */
+export function readSegmentKeepScore(answer: SystemOneScoreAnswer | undefined): number | undefined {
+  if (answer === undefined || answer === null) return undefined;
+  const distribution = readDistribution(answer.probabilities, ['0', '1']);
+  if (distribution !== undefined) return round4(toProbability(distribution.get('1')));
+  const raw = typeof answer.score === 'number' ? answer.score : Number(answer.score);
+  if (!Number.isFinite(raw)) return undefined;
+  return round4(Math.min(1, Math.max(0, raw)));
+}
+
+/**
+ * Pick the segments a budget keeps from their scores.
+ *
+ * Segments without a usable score are an unjudged safety margin and are always
+ * kept; scored segments are taken from the highest score down until the
+ * character budget is spent. Ties follow the original order.
+ * @param segments - all segments of the output.
+ * @param scores - keep score per segment index, absent for unjudged segments.
+ * @param originalChars - character count of the unpruned output.
+ * @param ratio - share of the original characters scored segments may use.
+ * @returns indexes of the segments this candidate keeps in full.
+ */
+export function selectPruneSegments(
+  segments: readonly PruneSegment[],
+  scores: ReadonlyMap<number, number>,
+  originalChars: number,
+  ratio: number
+): Set<number> {
+  const selected = new Set<number>();
+  let used = 0;
+  for (const segment of segments) {
+    if (scores.has(segment.index)) continue;
+    selected.add(segment.index);
+    used += segment.chars;
+  }
+  const budget = Math.floor(originalChars * ratio);
+  const ranked = segments
+    .filter((segment) => scores.has(segment.index))
+    .sort((left, right) => {
+      const difference = (scores.get(right.index) ?? 0) - (scores.get(left.index) ?? 0);
+      return difference !== 0 ? difference : left.index - right.index;
+    });
+  for (const segment of ranked) {
+    // Stop at the budget instead of skipping ahead: a smaller low-score segment
+    // must never slip into the space a higher-score one did not fit.
+    if (used + segment.chars > budget) break;
+    selected.add(segment.index);
+    used += segment.chars;
+  }
+  return selected;
+}
+
+/** Build the marker of one run of omitted segments. */
+function omittedSegmentsMarker(count: number): string {
+  return `… [${String(count)} segments omitted] …`;
+}
+
+/**
+ * Reassemble one candidate in the original line order.
+ *
+ * A selected segment is kept whole; an unselected one keeps only its forced
+ * lines (first/last anchors, diagnostics, intent matches). Consecutive fully
+ * omitted segments collapse into one marker that names how many were dropped.
+ * Blank runs between kept lines collapse to a single blank line.
+ * @param rawOutput - the original output, for its lines.
+ * @param segments - segments in original order.
+ * @param selected - segment indexes kept whole.
+ * @returns the reduced text.
+ */
+export function assemblePruneCandidate(
+  rawOutput: string,
+  segments: readonly PruneSegment[],
+  selected: ReadonlySet<number>
+): string {
+  const lines = rawOutput.split('\n');
+  const out: string[] = [];
+  let omitted = 0;
+  let lastEmitted = -1;
+
+  const emitLine = (lineIndex: number): void => {
+    if (lastEmitted >= 0 && lineIndex > lastEmitted + 1) out.push('');
+    out.push(lines[lineIndex] as string);
+    lastEmitted = lineIndex;
+  };
+  const flushOmitted = (): void => {
+    if (omitted === 0) return;
+    out.push(omittedSegmentsMarker(omitted));
+    omitted = 0;
+  };
+
+  for (const segment of segments) {
+    // A selected segment is kept whole; an unselected one keeps forced lines only.
+    const keepWhole = selected.has(segment.index);
+    const lineIndexes: number[] = [];
+    if (keepWhole) {
+      for (let line = segment.startLine; line <= segment.endLine; line++) lineIndexes.push(line);
+    } else {
+      lineIndexes.push(...segment.forcedLines);
+    }
+    if (lineIndexes.length === 0) {
+      omitted++;
+      continue;
+    }
+    flushOmitted();
+    for (const lineIndex of lineIndexes) emitLine(lineIndex);
+  }
+  flushOmitted();
+  return out.join('\n').trim();
+}
+
+/** Label of one score-driven candidate, including its reduction. */
+function scoredPruneLabel(id: PruneCandidate['id'], originalChars: number, prunedChars: number): string {
+  const strategy: Record<PruneCandidate['id'], string> = {
+    aggressive: 'keeps the segments System One judged essential within a quarter of the original',
+    balanced: 'keeps the segments System One judged essential within half of the original',
+    conservative: 'keeps the segments System One judged essential within most of the original'
+  };
+  const reduction = originalChars > 0 ? Math.round(((originalChars - prunedChars) / originalChars) * 100) : 0;
+  return `candidate "${id}" (${strategy[id]}, ${String(reduction)}% smaller)`;
+}
+
+/**
+ * Build the three System One–scored prunings from one segment judgment.
+ *
+ * The segment keep/drop decision is the model's score; the three ids only
+ * differ in their character budget, so the ranking the engine used to make is
+ * now made per segment.
+ * @param rawOutput - the original output.
+ * @param segments - segments of that output in original order.
+ * @param scores - keep score per segment index.
+ * @param maxTokens - optional hard token ceiling applied to every candidate.
+ * @returns candidates ordered from aggressive to conservative.
+ */
+export function buildScoredPruneCandidates(
+  rawOutput: string,
+  segments: readonly PruneSegment[],
+  scores: ReadonlyMap<number, number>,
+  maxTokens?: number
+): PruneCandidate[] {
+  const ids: PruneCandidate['id'][] = ['aggressive', 'balanced', 'conservative'];
+  return ids.map((id) => {
+    const selected = selectPruneSegments(segments, scores, rawOutput.length, PRUNE_SCORED_BUDGET_RATIO[id]);
+    const text = capToBudget(assemblePruneCandidate(rawOutput, segments, selected), maxTokens);
+    return { id, label: scoredPruneLabel(id, rawOutput.length, text.length), text };
+  });
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Local fallbacks                                                             */
@@ -666,6 +969,8 @@ export class JevDecisionBackend implements DecisionBackend {
   readonly endpoint: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
+  /** Character count from which pruning judges segments through System One. */
+  private readonly pruneJudgeMinChars: number;
 
   constructor(config?: JevBackendConfig) {
     this.endpoint = normalizeSystemOneEndpoint(
@@ -686,6 +991,7 @@ export class JevDecisionBackend implements DecisionBackend {
       process.env.JEV_MODEL ||
       'jev-latest';
     this.timeoutMs = config?.timeoutMs || 10000;
+    this.pruneJudgeMinChars = resolvePruneJudgeMinChars(config?.pruneJudgeMinChars);
   }
 
   /**
@@ -902,54 +1208,140 @@ export class JevDecisionBackend implements DecisionBackend {
   }
 
   /**
-   * Reduce a bulk output to the lines the intent needs, fail-open.
+   * Reduce a bulk output to the segments the intent needs, fail-open.
    *
-   * Reduction is deterministic and local (the gateway generates no text); one
-   * `score` question then ranks the candidates by how well each preserves the
-   * intent, and the winner is returned. Any failure — call, transport, unusable
-   * answer — falls back to the balanced local candidate, so pruning never breaks
-   * the harness and never returns the raw blob just because the network blinked.
+   * Two paths share one contract. A payload below `pruneJudgeMinChars` is
+   * reduced by the deterministic local candidates and sends no request at all.
+   * A payload at/above it is cut into segments, and one `score` question per
+   * segment lets System One decide what to keep; the three budgets only decide
+   * how much of the top-scored material fits. Forced lines (first/last anchors,
+   * diagnostics, intent matches) survive either way. Any failure — call,
+   * transport, unusable answer — falls back to the local candidates, so pruning
+   * never breaks the harness and never returns the raw blob just because the
+   * network blinked.
    * @param req - raw output, intent, budget, shadow flag.
-   * @returns the pruned text plus its reduction metrics.
+   * @returns the pruned text plus its reduction metrics and the path taken.
    */
   async prune(req: PruneRequest): Promise<PruneResponse> {
     const start = performance.now();
     const raw = typeof req.rawOutput === 'string' ? req.rawOutput : '';
     const intent = req.intent ?? '';
-    const candidates = buildPruneCandidates(raw, intent, req.maxTokens);
+    if (raw.length === 0) return this.pruneResponse(raw, raw, req.shadowMode, start, { judgePath: 'local' });
+
+    // The caller's resolved config is authoritative; the backend's own value
+    // (explicit config, then environment, then default) is the fallback.
+    const judgeMinChars = req.pruneJudgeMinChars ?? this.pruneJudgeMinChars;
+    if (raw.length < judgeMinChars) {
+      return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
+        judgePath: 'local'
+      });
+    }
+    return this.pruneWithSegments(req, raw, intent, start);
+  }
+
+  /** The deterministic candidate text, or the raw output when it does not shrink. */
+  private localPruneText(raw: string, intent: string, maxTokens?: number): string {
+    const candidates = buildPruneCandidates(raw, intent, maxTokens);
     const local = pickLocalPruneCandidate(candidates);
-    if (local === undefined) return this.pruneResponse(raw, raw, req.shadowMode, start);
+    if (local === undefined) return raw;
+    return local.text.length < raw.length ? local.text : raw;
+  }
+
+  /** The per-segment System One path, with the local candidates as its fallback. */
+  private async pruneWithSegments(
+    req: PruneRequest,
+    raw: string,
+    intent: string,
+    start: number
+  ): Promise<PruneResponse> {
+    const segments = segmentPruneOutput(raw, intent);
+    if (segments.length <= 1) {
+      // One segment has nothing to choose between; spending a judgment would
+      // only reproduce the whole payload.
+      return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
+        judgePath: 'local',
+        judgedSegments: 0,
+        unjudgedSegments: segments.length
+      });
+    }
+
+    const judged = segments.slice(0, PRUNE_MAX_JUDGED_SEGMENTS);
+    const unjudgedSegments = segments.length - judged.length;
+    const diagnostics = { judgedSegments: judged.length, unjudgedSegments };
 
     try {
-      if (candidates.length < 2) return this.pruneResponse(raw, local.text, req.shadowMode, start);
-
-      const data = await this.postSystemOne(
-        {
-          [PRUNE_QUESTION_ID]: {
-            type: 'score',
-            instructions: buildPruneInstructions(intent),
-            criteria: candidates.map((candidate) => candidate.label)
-          }
-        },
-        {
-          intent,
-          candidates: Object.fromEntries(
-            candidates.map((candidate) => [candidate.id, clip(candidate.text, PRUNE_STATE_CHARS)])
-          )
-        }
-      );
-
-      const index = readScoreIndex(data.answers?.[PRUNE_QUESTION_ID] as SystemOneScoreAnswer | undefined, candidates.length);
-      const chosen = index === undefined ? local : candidates[index] ?? local;
-      return this.pruneResponse(raw, chosen.text, req.shadowMode, start);
-    } catch {
+      const scores = await this.scoreSegments(judged, segments.length, intent);
+      if (scores.size === 0) {
+        return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
+          judgePath: 'local',
+          fallbackReason: 'System One returned no usable segment score',
+          ...diagnostics
+        });
+      }
+      const candidates = buildScoredPruneCandidates(raw, segments, scores, req.maxTokens);
+      const balanced = candidates.find((candidate) => candidate.id === 'balanced') ?? candidates[0];
+      const text = balanced !== undefined && balanced.text.length < raw.length ? balanced.text : raw;
+      return this.pruneResponse(raw, text, req.shadowMode, start, { judgePath: 'segmented', ...diagnostics });
+    } catch (err) {
       // FAIL-OPEN: the deterministic candidate still prunes; the harness never breaks.
-      return this.pruneResponse(raw, local.text, req.shadowMode, start);
+      return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
+        judgePath: 'local',
+        fallbackReason: errorMessage(err),
+        ...diagnostics
+      });
     }
   }
 
+  /**
+   * Judge every segment in one request: one `score` question per segment, with
+   * the segment text and the intent in the shared state.
+   * @param judged - the segments selected for judging, in original order.
+   * @param totalSegments - segment count of the whole output (for the prompt).
+   * @param intent - what the caller is looking for.
+   * @returns keep score per segment index; segments without a usable answer are absent.
+   */
+  private async scoreSegments(
+    judged: readonly PruneSegment[],
+    totalSegments: number,
+    intent: string
+  ): Promise<Map<number, number>> {
+    const questions: Record<string, SystemOneQuestion> = {};
+    const stateSegments: Record<string, string> = {};
+    for (const segment of judged) {
+      const id = `${PRUNE_SEGMENT_QUESTION_PREFIX}${String(segment.index)}`;
+      questions[id] = {
+        type: 'score',
+        instructions: buildSegmentInstructions(intent, segment, totalSegments),
+        criteria: [...PRUNE_KEEP_CRITERIA]
+      };
+      stateSegments[id] = segment.text;
+    }
+
+    const data = await this.postSystemOne(questions, {
+      intent,
+      segments: stateSegments,
+      judgedSegments: judged.length,
+      unjudgedSegments: totalSegments - judged.length,
+      segmentMaxChars: PRUNE_SEGMENT_MAX_CHARS
+    });
+
+    const scores = new Map<number, number>();
+    for (const segment of judged) {
+      const id = `${PRUNE_SEGMENT_QUESTION_PREFIX}${String(segment.index)}`;
+      const score = readSegmentKeepScore(data.answers?.[id] as SystemOneScoreAnswer | undefined);
+      if (score !== undefined) scores.set(segment.index, score);
+    }
+    return scores;
+  }
+
   /** Shape one pruning as the shared prune response. */
-  private pruneResponse(raw: string, text: string, shadow: boolean | undefined, start: number): PruneResponse {
+  private pruneResponse(
+    raw: string,
+    text: string,
+    shadow: boolean | undefined,
+    start: number,
+    meta?: Pick<PruneResponse, 'judgePath' | 'fallbackReason' | 'judgedSegments' | 'unjudgedSegments'>
+  ): PruneResponse {
     const originalChars = raw.length;
     const prunedChars = text.length;
     return {
@@ -960,7 +1352,8 @@ export class JevDecisionBackend implements DecisionBackend {
       reductionPercentage:
         originalChars > 0 ? Number((((originalChars - prunedChars) / originalChars) * 100).toFixed(1)) : 0,
       shadow: Boolean(shadow),
-      latencyMs: elapsed(start)
+      latencyMs: elapsed(start),
+      ...meta
     };
   }
 

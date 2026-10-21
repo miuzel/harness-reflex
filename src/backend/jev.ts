@@ -1228,7 +1228,10 @@ export class JevDecisionBackend implements DecisionBackend {
     const intent = req.intent ?? '';
     if (raw.length === 0) return this.pruneResponse(raw, raw, req.shadowMode, start, { judgePath: 'local' });
 
-    if (raw.length < this.pruneJudgeMinChars) {
+    // The caller's resolved config is authoritative; the backend's own value
+    // (explicit config, then environment, then default) is the fallback.
+    const judgeMinChars = req.pruneJudgeMinChars ?? this.pruneJudgeMinChars;
+    if (raw.length < judgeMinChars) {
       return this.pruneResponse(raw, this.localPruneText(raw, intent, req.maxTokens), req.shadowMode, start, {
         judgePath: 'local'
       });

@@ -55,6 +55,12 @@ export interface PruneRequest {
   intent: string;
   maxTokens?: number;
   shadowMode?: boolean;
+  /**
+   * Character count from which the backend judges segments through System One.
+   * The caller's resolved `interventions.pruneJudgeMinChars`; when omitted the
+   * backend's own configuration/environment/default applies.
+   */
+  pruneJudgeMinChars?: number;
 }
 
 export interface PruneResponse {
@@ -65,6 +71,19 @@ export interface PruneResponse {
   reductionPercentage: number;
   shadow: boolean;
   latencyMs: number;
+  /**
+   * Which judging path produced the candidate: `segmented` ran the per-segment
+   * System One scoring for a payload at/above `interventions.pruneJudgeMinChars`;
+   * `local` used the deterministic candidates (small payload, or a fallback).
+   * Optional so existing response literals stay valid.
+   */
+  judgePath?: 'segmented' | 'local';
+  /** Why the segmented path fell back to the local candidates, when it did. */
+  fallbackReason?: string;
+  /** Segments handed to System One in one request (0 when the local path ran). */
+  judgedSegments?: number;
+  /** Segments beyond the per-request limit, kept deterministically instead. */
+  unjudgedSegments?: number;
 }
 
 export interface ActionStep {

@@ -16,6 +16,11 @@ export interface PruneOptions {
    */
   measureOnly?: boolean;
   minCharsThreshold?: number;
+  /**
+   * Character count from which the backend judges segments through System One.
+   * Resolved from `interventions.pruneJudgeMinChars`; forwarded as-is.
+   */
+  pruneJudgeMinChars?: number;
 }
 
 export class ToolResultPruner {
@@ -49,7 +54,8 @@ export class ToolResultPruner {
       rawOutput: output,
       intent: options?.intent || 'extract diagnostics, relevant results and errors',
       maxTokens: options?.maxTokens,
-      shadowMode: options?.shadowMode
+      shadowMode: options?.shadowMode,
+      ...(options?.pruneJudgeMinChars === undefined ? {} : { pruneJudgeMinChars: options.pruneJudgeMinChars })
     };
 
     let result: PruneResponse;

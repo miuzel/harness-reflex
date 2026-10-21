@@ -13,6 +13,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm';
 
 import { INTERVENTION_MODES, resolveConfig, type ReflexConfig } from './config.js';
 import { applyReflex } from './index.js';
+import { createBackend } from './bridge.js';
 import { reflexToolNames } from './tools.js';
 import {
   applyPruneFloor,
@@ -42,6 +43,7 @@ import {
   PRUNED_ORIGINAL_RECORD_TYPE
 } from './session-audit.js';
 import { createToolContext, fakeAgent, resultText } from './testing.js';
+import { ToolResultPruner } from './vendor/harness-reflex/index.js';
 import type { ActionStep, GateResponse, PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
 
 /**
@@ -1931,14 +1933,17 @@ test('the real pruning service keeps observe and active on one form, one cost, o
 
 test('the engine never lets the service book the reduction it only measured', async () => {
   const delegate = pruneStub((raw) => raw.slice(0, 40));
-  const seen: Array<{ intent?: string; measureOnly?: boolean; shadowMode?: boolean }> = [];
+  const seen: Array<{ intent?: string; measureOnly?: boolean; shadowMode?: boolean; pruneJudgeMinChars?: number }> = [];
   const run = async (mode: 'observe' | 'active') => {
     seen.length = 0;
     const engine = engineFor(
       { mode },
       {
         prune: {
-          prune: async (raw: string, options?: { intent?: string; measureOnly?: boolean; shadowMode?: boolean }) => {
+          prune: async (
+            raw: string,
+            options?: { intent?: string; measureOnly?: boolean; shadowMode?: boolean; pruneJudgeMinChars?: number }
+          ) => {
             seen.push(options ?? {});
             const response = await delegate.prune(raw);
             // Only `shadowMode` withholds the candidate's text; a measure-only caller
@@ -1960,13 +1965,13 @@ test('the engine never lets the service book the reduction it only measured', as
   await run('observe');
   assert.deepEqual(
     seen,
-    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true }],
+    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true, pruneJudgeMinChars: 10000 }],
     'observe installs nothing, so the service may only measure'
   );
   await run('active');
   assert.deepEqual(
     seen,
-    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true }],
+    [{ intent: 'extract diagnostics, relevant results and errors', measureOnly: true, pruneJudgeMinChars: 10000 }],
     'active installs on the floor’s decision, not the service’s, so it measures too'
   );
 });
@@ -2707,4 +2712,92 @@ test('off collects nothing, and the exemption never moves state or budget across
   const third = (await engine.toolCall(strangerExec, async () => ({ kind: 'allow' }))) as { kind: string };
   assert.equal(third.kind, 'deny', 'a fresh agent still reaches its own threshold');
   assert.equal(engine.stateOf('stranger')!.interventions, 1, 'and books its own plan');
+});
+
+// ── prune judging threshold: judgments are spent only on large payloads ─────
+
+/** A payload of blank-line segments, above the default runtime prune threshold. */
+const SEGMENTED_PAYLOAD = Array.from(
+  { length: 8 },
+  (_, index) => `block ${String(index)} ${'x'.repeat(180)}`
+).join('\n\n');
+
+/** Swap in a gateway stub that answers every segment question with one keep score. */
+function segmentGatewayStub(keep = 0.9): { requests: any[]; restore: () => void } {
+  const requests: any[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as any;
+    requests.push(body);
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(body.questions ?? {})) {
+      answers[id] = { type: 'score', score: keep, probabilities: { '0': 1 - keep, '1': keep } };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ model: 'jev-1.13.0', answers }),
+      text: async () => ''
+    };
+  }) as unknown as typeof fetch;
+  return { requests, restore: () => (globalThis.fetch = original) };
+}
+
+/** An active engine whose prune service is the real vendored backend over a stub gateway. */
+function jevEngineFor(pruneJudgeMinChars: number): InterventionEngine {
+  const resolved = resolveConfig({
+    backend: 'jev',
+    systemOne: { baseUrl: 'http://jev.stub/v1/systemone', model: 'jev-latest', timeoutMs: 500 },
+    pruneThreshold: 500,
+    interventions: { mode: 'active', capabilities: { prune: 'active' }, pruneJudgeMinChars }
+  });
+  return new InterventionEngine({
+    config: resolved.interventions,
+    pruneThreshold: resolved.pruneThreshold,
+    stagnation: stagnationStub().service,
+    prune: new ToolResultPruner(createBackend(resolved), undefined, resolved.pruneThreshold),
+    gate: gateStub('contradicted'),
+    retain: retentionStub().retain
+  });
+}
+
+test('the plugin runtime judges segments only at/above pruneJudgeMinChars', async () => {
+  const above = segmentGatewayStub();
+  try {
+    const engine = jevEngineFor(600);
+    const result = resultOf(SEGMENTED_PAYLOAD);
+    await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+
+    assert.equal(above.requests.length, 1, 'one batched segment-judging request');
+    const ids = Object.keys(above.requests[0]!.questions);
+    assert.ok(ids.length > 1, `judgedSegments must be > 0 (got ${String(ids.length)})`);
+    assert.ok(ids.every((id) => /^prune-seg-\d+$/.test(id)), 'every question names a segment');
+  } finally {
+    above.restore();
+  }
+
+  const below = segmentGatewayStub();
+  try {
+    const engine = jevEngineFor(5000);
+    const result = resultOf(SEGMENTED_PAYLOAD);
+    await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+    assert.equal(below.requests.length, 0, 'below the threshold pruning must not reach the gateway');
+  } finally {
+    below.restore();
+  }
+});
+
+test('the configured judging threshold outranks the environment variable', async () => {
+  process.env.SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS = '999999';
+  const stub = segmentGatewayStub();
+  try {
+    const engine = jevEngineFor(600);
+    const result = resultOf(SEGMENTED_PAYLOAD);
+    await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+    assert.equal(stub.requests.length, 1, 'the resolved config wins over the environment');
+  } finally {
+    stub.restore();
+    delete process.env.SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS;
+  }
 });

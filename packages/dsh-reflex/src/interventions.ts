@@ -1718,7 +1718,13 @@ export class InterventionEngine {
         // `details.potentialTokensSaved`) and the intervention record carries what was
         // really installed. The explicit `reflex_prune` tool, which does hand the
         // reduced text back to its caller, keeps booking the reduction it returns.
-        : await this.#prune.prune(text, { intent: this.config.intent, measureOnly: true });
+        : await this.#prune.prune(text, {
+            intent: this.config.intent,
+            measureOnly: true,
+            // Per-segment System One judging starts at this size; below it the
+            // backend's deterministic candidates run and no judgment is spent.
+            pruneJudgeMinChars: this.config.pruneJudgeMinChars
+          });
 
     const originalTokens = estimateTokens(text);
     // One composition, both modes: the floored text the plan describes is the text

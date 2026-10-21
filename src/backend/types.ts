@@ -55,6 +55,12 @@ export interface PruneRequest {
   intent: string;
   maxTokens?: number;
   shadowMode?: boolean;
+  /**
+   * Character count from which the backend judges segments through System One.
+   * The caller's resolved `interventions.pruneJudgeMinChars`; when omitted the
+   * backend's own configuration/environment/default applies.
+   */
+  pruneJudgeMinChars?: number;
 }
 
 export interface PruneResponse {

@@ -375,7 +375,10 @@ export function createBackend(
         ...(baseUrl === undefined ? {} : { baseUrl }),
         ...(apiKey === undefined ? {} : { apiKey }),
         ...(model === undefined ? {} : { model }),
-        ...(timeoutMs === undefined ? {} : { timeoutMs })
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        // The resolved config wins over SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS: the
+        // backend only reads the environment when no explicit value is given.
+        pruneJudgeMinChars: config.interventions.pruneJudgeMinChars
       });
     case 'vllm':
       return new SimpleJevDecisionBackend({
