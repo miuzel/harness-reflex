@@ -5,7 +5,7 @@ import type { Context, Fiber } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
 import { applyReflex, Config } from './index.js';
-import { createReflexRuntime, type ReflexLedgerResult, type ReflexRuntime } from './bridge.js';
+import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { resolveConfig, type ReflexConfig } from './config.js';
 import { createReflexHost, createToolContext, callTool, resultValue, type ReflexTestHost } from './testing.js';
 import { reflexToolNames } from './tools.js';
@@ -31,7 +31,7 @@ function probeTool(name: string) {
 /**
  * Load the plugin the way the Host loader does, capturing the runtime `apply`
  * created so the test can observe disposal from the outside.
- * @param ctx - context carrying `systemPrompt` and `tools`.
+ * @param ctx - context carrying `tools`, `llm`, and `commands`.
  * @param config - deployment config.
  * @returns the plugin fiber and its runtime.
  */
@@ -40,7 +40,7 @@ async function loadReflexFiber(ctx: Context, config: ReflexConfig): Promise<{ fi
   const fiber = await ctx.plugin(
     {
       name: 'dsh-reflex',
-      inject: ['tools', 'llm'],
+      inject: ['tools', 'llm', 'commands'],
       Config,
       apply: (inner: Context, innerConfig: ReflexConfig) => {
         created = applyReflex(inner, innerConfig);
@@ -50,6 +50,19 @@ async function loadReflexFiber(ctx: Context, config: ReflexConfig): Promise<{ fi
   );
   assert.ok(created, 'apply must run while the plugin loads');
   return { fiber, runtime: created };
+}
+
+/**
+ * Whether the context currently answers for a command name.
+ *
+ * The registry types its scope argument as an `Agent`; this plugin registers
+ * into the global layer, which is the view `undefined` selects.
+ * @param ctx - context carrying the command registry.
+ * @param name - command name, without the leading slash.
+ * @returns whether the name is registered.
+ */
+function hasCommand(ctx: Context, name: string): boolean {
+  return ctx.commands.find(undefined as never, name) !== undefined;
 }
 
 /** Count how many times the runtime republished its tool surface. */
@@ -124,8 +137,8 @@ test('a second activation after a full unload rebuilds a working surface', async
     const choice = await callTool(ctx, 'reflex_choice', { question: 'Pick', options: ['a', 'b'] });
     assert.equal(choice.isError, false);
 
-    const ledger = resultValue<ReflexLedgerResult>(await callTool(ctx, 'reflex_status_ledger', {}));
-    assert.equal(ledger.summary.totalCalls, 1, 'the second activation starts from a clean ledger');
+    assert.equal(second.runtime.statusLedger({}).summary.totalCalls, 1, 'the second activation starts from a clean ledger');
+    assert.ok(hasCommand(ctx, 'reflex-ledger'), 'and it rebuilds the ledger command it owns');
 
     await second.fiber.dispose();
     assert.equal(ctx.tools.get('reflex_choice'), undefined);
@@ -146,11 +159,17 @@ test('two activations on one context own disjoint surfaces and release in any or
     assert.ok(ctx.tools.get('beta_choice'));
     assert.deepEqual([...alpha.runtime.toolSurface], reflexToolNames(resolveConfig({ backend: 'mock', toolPrefix: 'alpha_' })));
 
+    // The command name is context-global while tools are per activation: the
+    // first activation owns it, the second leaves the registry alone, and the
+    // ledger it answers for is the owner's.
+    assert.ok(hasCommand(ctx, 'reflex-ledger'), 'the first activation registers the ledger command');
+
     await alpha.fiber.dispose();
     assert.equal(ctx.tools.get('alpha_choice'), undefined);
     assert.ok(ctx.tools.get('beta_choice'), 'the surviving activation keeps its tools');
     assert.equal(alpha.runtime.disposed, true);
     assert.equal(beta.runtime.disposed, false);
+    assert.equal(hasCommand(ctx, 'reflex-ledger'), false, 'the owner released the name with itself');
 
     await beta.fiber.dispose();
     assert.equal(ctx.tools.get('beta_choice'), undefined);

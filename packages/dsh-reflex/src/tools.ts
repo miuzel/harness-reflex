@@ -4,36 +4,51 @@ import type { ReflexRuntime } from './bridge.js';
 import type { ResolvedReflexConfig } from './config.js';
 
 /**
- * The eight reflex capabilities, in the order they are registered. Every name
- * matches the corresponding `harness-reflex` stdio MCP tool so one mental model
- * covers both surfaces.
+ * The five reflex capabilities this plugin registers, in registration order.
+ * Every name matches the corresponding `harness-reflex` stdio MCP tool so one
+ * mental model covers both surfaces.
+ *
+ * Pruning, stagnation detection, and the ledger are *not* here: the automatic
+ * intervention layer calls those services directly, and the ledger has the
+ * `/reflex-ledger` command, so a model-facing tool for them only spends a
+ * judgment on work the plugin already does. They remain part of the stdio MCP
+ * surface, which has no plugin hooks behind it.
  */
-export const REFLEX_TOOL_SUFFIXES = [
-  'choice',
-  'score',
-  'route',
-  'screen',
-  'gate',
-  'prune',
-  'detect_stagnation',
-  'status_ledger'
-] as const;
+export const REFLEX_TOOL_SUFFIXES = ['choice', 'score', 'route', 'screen', 'gate'] as const;
 
 /** One reflex capability name (without the deployment prefix). */
 export type ReflexToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
+
+/**
+ * Whether one suffix is registered when the deployment says nothing about it.
+ *
+ * `route` is the exception: it ranks candidates against a goal but never blocks
+ * work, so the agent usually answers the question itself and the default
+ * activation does not spend a registry slot on it. An explicit
+ * `tools.enabled.route: true` turns it on, and the panel shows it as the one
+ * switch that starts off.
+ */
+export const REFLEX_TOOL_DEFAULT_ENABLED: Record<ReflexToolSuffix, boolean> = {
+  choice: true,
+  score: true,
+  route: false,
+  screen: true,
+  gate: true
+};
 
 /**
  * The suffixes this activation actually registers, in registration order.
  *
  * Reads the resolved switch block rather than the authored one, so the tool
  * names, the tool definitions, and `runtime.toolSurface` all derive from the
- * same answer. A suffix is off only when it was explicitly switched off: an
- * omitted entry — and a config resolved before this block existed — stays on.
+ * same answer. {@link resolveToolsConfig} fills every suffix with
+ * {@link REFLEX_TOOL_DEFAULT_ENABLED}, so an omitted entry takes that default
+ * rather than an unconditional "on".
  * @param config - resolved plugin configuration.
  * @returns the enabled suffixes.
  */
 export function enabledReflexToolSuffixes(config: ResolvedReflexConfig): ReflexToolSuffix[] {
-  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] !== false);
+  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] ?? REFLEX_TOOL_DEFAULT_ENABLED[suffix]);
 }
 
 /**
@@ -229,80 +244,6 @@ export function defineReflexTools(runtime: ReflexRuntime, config: ResolvedReflex
       }) {
         assertDeclaredArguments(name('gate'), ['assertions', 'evidence', 'strictness'], args);
         return toJsonValue(await runtime.gate(args));
-      }
-    }),
-
-    defineTool({
-      name: name('prune'),
-      description:
-        'Prune bulky tool output (verbose logs, build traces, directory trees) down to the lines the intent needs, and report the token savings. Use it on long stdout instead of re-reading it into context; it fails open, so it never loses the diagnostics.',
-      parameters: {
-        rawOutput: { type: 'string', required: true, description: 'The long tool output to prune.' },
-        intent: { type: 'string', description: 'What you are looking for, e.g. "compiler error" or "failing test".' },
-        shadowMode: { type: 'boolean', description: 'Measure the reduction without truncating the text.' }
-      },
-      output: JSON_OUTPUT,
-      async execute(args: { rawOutput: string; intent?: string; shadowMode?: boolean }) {
-        assertDeclaredArguments(name('prune'), ['rawOutput', 'intent', 'shadowMode'], args);
-        return toJsonValue(await runtime.prune(args));
-      }
-    }),
-
-    defineTool({
-      name: name('detect_stagnation'),
-      description:
-        'Record the action you just took and check whether the run is stagnating: repeated retries, oscillation between identical edits, or zero progress. Call it after a second consecutive failure to get an interruption and a corrective suggestion. Pass `history` when the run began before this activation.',
-      parameters: {
-        recentAction: {
-          type: 'object',
-          additionalProperties: false,
-          description: 'The action just taken.',
-          properties: {
-            tool: { type: 'string', required: true, description: 'Tool that was executed.' },
-            input: { type: 'string', required: true, description: 'Input provided to the tool.' },
-            output: { type: 'string', description: 'Tool output or a summary of it.' },
-            error: { type: 'string', description: 'Error message when the action failed.' }
-          }
-        },
-        goal: { type: 'string', description: 'Current overall goal.' },
-        history: {
-          type: 'array',
-          description:
-            'Earlier steps of the run, oldest first, when this activation did not record them itself (a resumed or delegated run). Treated as earlier than the steps recorded here.',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              tool: { type: 'string', required: true, description: 'Tool that was executed.' },
-              input: { type: 'string', required: true, description: 'Input provided to the tool.' },
-              output: { type: 'string', description: 'Tool output or a summary of it.' },
-              error: { type: 'string', description: 'Error message when the action failed.' }
-            }
-          }
-        }
-      },
-      output: JSON_OUTPUT,
-      async execute(args: {
-        goal?: string;
-        recentAction?: { tool: string; input: string; output?: string; error?: string };
-        history?: ReadonlyArray<{ tool: string; input: string; output?: string; error?: string }>;
-      }) {
-        assertDeclaredArguments(name('detect_stagnation'), ['recentAction', 'goal', 'history'], args);
-        return toJsonValue(await runtime.detectStagnation(args));
-      }
-    }),
-
-    defineTool({
-      name: name('status_ledger'),
-      description:
-        'Read the System One decision ledger for this activation: call counts by type, latency, net tokens saved, cost avoided, gate pass/fail, and stagnation alerts. Use it to audit how much the reflex tools have actually saved.',
-      parameters: {
-        includeEntries: { type: 'boolean', description: 'Attach the ten most recent decision entries.' }
-      },
-      output: JSON_OUTPUT,
-      async execute(args: { includeEntries?: boolean }) {
-        assertDeclaredArguments(name('status_ledger'), ['includeEntries'], args);
-        return toJsonValue(await runtime.statusLedger(args));
       }
     })
   ] as ToolDefinition[];

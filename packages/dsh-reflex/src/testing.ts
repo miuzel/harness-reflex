@@ -13,6 +13,7 @@ import LlmRuntime, {
 } from '@deepseek-ai/dsh-llm';
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
+import CommandRuntime from '@deepseek-ai/dsh-commands';
 
 import { apply, applyReflex, Config, inject, name as pluginName } from './index.js';
 import type { ReflexRuntime } from './bridge.js';
@@ -33,10 +34,11 @@ function callId(id: string): CallId {
 /**
  * Test harness for the reflex Host plugin.
  *
- * It boots a real Cordis application with the three services the plugin depends
- * on (`systemPrompt` for the tool registry, then `tools` itself, plus `llm` for
- * the virtual provider route), so tests exercise the production registration,
- * validation, routing, and disposal paths rather than a stand-in.
+ * It boots a real Cordis application with every service the plugin depends on
+ * (`systemPrompt` for the tool registry, then `tools` itself, `llm` for the
+ * virtual provider route, and `commands` for `/reflex-ledger`), so tests
+ * exercise the production registration, validation, routing, and disposal paths
+ * rather than a stand-in.
  *
  * @module dsh-reflex/testing
  */
@@ -46,7 +48,7 @@ export const reflexPlugin = { name: pluginName, inject, Config, apply };
 
 /** A booted application with the reflex tools registered. */
 export interface ReflexTestHost {
-  /** Root context carrying `systemPrompt`, `tools`, and `llm`. */
+  /** Root context carrying `systemPrompt`, `tools`, `llm`, and `commands`. */
   readonly ctx: Context;
   /** Runtime returned by {@link apply}. */
   readonly runtime: ReflexRuntime;
@@ -57,7 +59,7 @@ export interface ReflexTestHost {
 }
 
 /**
- * Boot Cordis with `systemPrompt`, `tools`, and `llm` loaded.
+ * Boot Cordis with `systemPrompt`, `tools`, `llm`, and `commands` loaded.
  * @returns the root context, ready for `apply` or `ctx.plugin`.
  */
 export async function createToolContext(): Promise<Context> {
@@ -65,6 +67,7 @@ export async function createToolContext(): Promise<Context> {
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(ToolRuntime);
   await ctx.plugin(LlmRuntime);
+  await ctx.plugin(CommandRuntime);
   return ctx;
 }
 

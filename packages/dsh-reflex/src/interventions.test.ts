@@ -13,6 +13,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm';
 
 import { INTERVENTION_MODES, resolveConfig, type ReflexConfig } from './config.js';
 import { applyReflex } from './index.js';
+import { reflexToolNames } from './tools.js';
 import {
   applyPruneFloor,
   countTrailingFailures,
@@ -922,8 +923,10 @@ test('the plugin runtime releases the intervention engine with everything else',
   }
 });
 
-test('the frozen eight tools are never judged, refused, or re-pruned', async () => {
-  const names = ['reflex_choice', 'reflex_score', 'reflex_route', 'reflex_screen', 'reflex_gate', 'reflex_prune', 'reflex_detect_stagnation', 'reflex_status_ledger'];
+test('every tool this plugin registers is never judged, refused, or re-pruned', async () => {
+  // Derived from the vocabulary rather than written out, so the exemption keeps
+  // covering exactly the surface a deployment registers.
+  const names = reflexToolNames(resolveConfig({ backend: 'mock', tools: { enabled: { route: true } } }));
   const engine = engineFor({ mode: 'active', capabilities: { stagnation: 'active', prune: 'active', gate: 'active' } }, {
     ownTools: names
   });
@@ -2355,7 +2358,12 @@ test('the reader the guide documents is an export of the package root, and retur
   assert.equal(surface.reader, 'function', 'readPrunedOriginal is reachable from the package root');
   assert.equal(surface.locatorBuilder, 'function', 'and so is the locator builder a decision record needs');
   assert.equal(surface.recordType, PRUNED_ORIGINAL_RECORD_TYPE);
-  assert.equal(surface.tools.length, 8, 'the public surface still advertises exactly the frozen eight tools');
+  assert.deepEqual(
+    surface.tools,
+    reflexToolNames(resolveConfig({ backend: 'mock' })),
+    'the public surface advertises the default four tools (route stays opt-in)'
+  );
+  assert.equal(surface.tools.length, 4, 'and pruning and the ledger are not on the tool surface');
 
   // 2. The same function through the declared entry, doing the real retrieval.
   const publicModule = (await import(pathToFileURL(declaredEntry()).href)) as { readPrunedOriginal?: typeof readPrunedOriginal };

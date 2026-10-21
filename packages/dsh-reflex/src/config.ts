@@ -6,7 +6,7 @@ import { parseFallback, type ModelPoolEntry, type ModelPools, type PhysicalTarge
 // registry module, and validating `tools.enabled` against a second copy of the
 // list is exactly the drift this import removes. `./tools.js` imports this
 // module for types only, so no runtime cycle exists.
-import { REFLEX_TOOL_SUFFIXES, type ReflexToolSuffix } from './tools.js';
+import { REFLEX_TOOL_DEFAULT_ENABLED, REFLEX_TOOL_SUFFIXES, type ReflexToolSuffix } from './tools.js';
 
 /**
  * Deployment configuration for the reflex plugin.
@@ -217,13 +217,17 @@ export interface ReflexEffortConfig {
 /**
  * Authored per-tool switches, indexed by tool *suffix* rather than tool name.
  *
- * The suffix is what a user writes (`choice`, `detect_stagnation`, …); the
- * registered name is `toolPrefix` + suffix, so a switch keyed by name would
- * break the moment a deployment renames its prefix. An omitted suffix stays
- * enabled, and every suffix — including `status_ledger` — can be turned off.
+ * The suffix is what a user writes (`choice`, `route`, …); the registered name
+ * is `toolPrefix` + suffix, so a switch keyed by name would break the moment a
+ * deployment renames its prefix. An omitted suffix takes
+ * {@link REFLEX_TOOL_DEFAULT_ENABLED} — on for every suffix except `route` —
+ * and every suffix can be turned either way explicitly.
  */
 export interface ReflexToolsConfig {
-  /** Suffix → enabled. Omitted entries default to `true`; unknown keys are rejected. */
+  /**
+   * Suffix → enabled. Omitted entries take the documented default (`route` is
+   * the one suffix that starts off); unknown keys are rejected.
+   */
   enabled?: Partial<Record<ReflexToolSuffix, boolean>>;
 }
 
@@ -409,7 +413,9 @@ const ToolsSchema = z
     enabled: z
       .dict(z.boolean())
       .default({})
-      .description(`Suffix → enabled (${REFLEX_TOOL_SUFFIXES.join(', ')}). Omitted suffixes stay enabled.`)
+      .description(
+        `Suffix → enabled (${REFLEX_TOOL_SUFFIXES.join(', ')}). Omitted suffixes keep their documented default (${REFLEX_TOOL_SUFFIXES.filter((suffix) => !REFLEX_TOOL_DEFAULT_ENABLED[suffix]).join(', ') || 'none'} off, the rest on).`
+      )
   })
   .volatile();
 
@@ -735,7 +741,10 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
  * Both failure modes are answered here, not by the schema: an unknown suffix
  * (a typo, or a tool this build does not ship) and a non-boolean value. A
  * deployment that cannot be honoured fails at resolution time rather than
- * half-registering its tools.
+ * half-registering its tools. The suffix vocabulary is this build's, so a
+ * switch for a capability that is no longer a tool — `prune`,
+ * `detect_stagnation`, `status_ledger` — is refused here instead of being
+ * carried as a key that reads as "on" and registers nothing.
  *
  * A programmatic caller that passes the switch map itself (instead of wrapping
  * it in `enabled`) is rejected too: silently reading it as "nothing authored"
@@ -775,7 +784,10 @@ export function resolveToolsConfig(authored: ReflexToolsConfig | undefined): Res
     if (value !== undefined && typeof value !== 'boolean') {
       throw new Error(`tools.enabled.${suffix} must be a boolean (got "${String(value)}")`);
     }
-    enabled[suffix] = value ?? true;
+    // Omitted entries take the per-suffix default instead of an unconditional
+    // "on": `route` is off unless the deployment asks for it, and the panel,
+    // the registry, and this resolver must all agree on that one table.
+    enabled[suffix] = value ?? REFLEX_TOOL_DEFAULT_ENABLED[suffix];
   }
   return { enabled };
 }

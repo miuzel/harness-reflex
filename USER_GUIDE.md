@@ -66,7 +66,8 @@ System Two 生成式推理的前提下，用毫秒级的概率判定完成门禁
 | `src/client/*` | 浏览器半边：槽位注册、中英文案、Markdown 渲染、面板视图 |
 
 启动顺序：DSH 载入插件 → `apply` 解析配置 → 建立 `ReflexRuntime` → 注册虚拟
-provider 与请求钩子 → 注册 8 个工具 → 挂载面板路由。卸载时逆序注销，完全可逆。
+provider 与请求钩子 → 注册默认 4 个工具（`route` 打开后 5 个）→ 注册
+`/reflex-ledger` 命令 → 挂载面板路由。卸载时逆序注销，完全可逆。
 
 ---
 
@@ -340,7 +341,8 @@ record?.digest;  // 与决策记录里的 digest 一致
 - 判定缓存以「回合 + 尾部窗口」为键：同一个问题一个回合只付一次；`maxJudgmentsPerTurn`、
   `maxJudgmentsPerSession`、`maxInterventionsPerTurn` 分别是每回合判定、每会话判定、每回合干预的次数上限；
 - 同一 `(agent, 调用签名)` 的干预在一个回合内去重；被本插件拒绝的那次调用的返回值不再二次判定；
-- 本插件自己的 8 个工具永不进入判定（它们的结果已经是优化产物），冻结的 `reflex_*` 载荷不受影响。
+- 本插件自己注册的工具永不进入判定（它们的结果已经是优化产物；默认 4 个，打开
+  `route` 后 5 个），这些 `reflex_*` 载荷不受干预影响。
 
 ### 安全与回退
 
@@ -362,7 +364,7 @@ record?.digest;  // 与决策记录里的 digest 一致
 | 虚拟 Provider | 路由开关、虚拟 Provider 名称、模型池增删与排序、兜底目标 |
 | 推理强度 | 策略（`reflex`/`auto`/具体档位）、兜底档、最小置信度、**自适应推理强度开关** |
 | 自动干预 | 三态模式（`off`/`observe`/`active`）、四大能力覆盖、每回合干预次数上限、每回合判定上限、每会话判定上限、重复阈值、失败阈值、最小置信度、判定窗口大小、剪枝下限比例；并列出当前生效的模式与能力（只读） |
-| 工具开关 | 8 个工具逐项启停；每项写明**做什么 / agent 何时该调用 / 是否建议暴露**，并有「应用推荐组合」按钮；页尾列出当前已注册的工具名（只读，跟随 `toolPrefix`） |
+| 工具开关 | 5 个能力逐项启停（默认 4 开、`route` 关）；每项写明**做什么 / agent 何时该调用 / 是否建议暴露**，并有「应用推荐组合」按钮；页尾列出当前已注册的工具名（只读，跟随 `toolPrefix`），并提示账本改用 `/reflex-ledger` |
 | System 1 后端 | 后端实现、Base URL、模型 ID、API Key 环境变量名、超时；以及工具名前缀、裁剪阈值、账本 JSONL 路径、校准曲线路径 |
 | 决策账本 | 实时指标、最近决策表、落盘路径、清空（需二次确认） |
 | **使用说明** | **本手册的只读视图，跟随 DSH 界面语言中英切换** |
@@ -382,9 +384,10 @@ record?.digest;  // 与决策记录里的 digest 一致
   完整写入**（与虚拟 Provider、推理强度等组一致），所以配置里留下的是你在面板上
   看到的那一份完整取值，而不是只有被改过的那一个字段；其中能力覆盖只写「不等于
   `inherit`」的项，其余保持省略（省略 = 跟随模式）。
-- **工具开关：只写显式关闭**。只有被关掉（`false`）的工具会写进 `tools.enabled`；
-  重新打开会**删除**该键，而不是写 `true`。因此「全开」与「整组省略」逐字节等价，
-  默认配置下配置内容零变化。
+- **工具开关：只写与默认不同的项**。只有偏离该后缀默认值的开关会写进
+  `tools.enabled`：默认开启的工具被关掉写 `false`，默认关闭的 `route` 被打开写
+  `true`；把任何一项改回默认值都会**删除**该键。因此「推荐组合」与「整组省略」
+  逐字节等价，默认配置下配置内容零变化（默认已经是 4 开 1 关）。
 - **推理强度开关：总是显式写入**。`effort.enabled` 随该组写下当前值，避免出现
   「面板显示已启用、配置里其实是省略」的歧义。
 - **System 1 后端：逐条 schema 路径整值写入**。Host 的设置文档按**配置路径**寻址，
@@ -398,41 +401,47 @@ record?.digest;  // 与决策记录里的 digest 一致
 `resolveConfig` 校验器拒绝并给出字段级错误文案，面板不会部分生效——要么整组通过，
 要么一个字都不写。
 
-### 工具开关：三类建议与推荐组合
+### 工具开关：两类建议与推荐组合
 
-工具开关页的每一项都写清三件事：**这个工具做什么**、**agent 在什么情况下应该调用
+工具开关页的每一项都写清三件事：**这个能力做什么**、**agent 在什么情况下应该调用
 它**、以及一条**是否建议暴露给 agent** 的标签：
 
-| 建议标签 | 含义 | 工具 |
+| 建议标签 | 含义 | 能力 |
 | --- | --- | --- |
-| 建议暴露 | agent 日常确实会用 | `choice`、`score`、`route`、`screen`、`gate` |
-| 已由自动干预覆盖 | 干预层在 `observe`/`active` 下已经自动做这件事，手动调用基本冗余 | `prune`、`detect_stagnation` |
-| 仅诊断 | 给人看面板与账本用，agent 不需要 | `status_ledger` |
+| 建议暴露 | agent 日常确实会用 | `choice`、`score`、`screen`、`gate` |
+| 按需开启 | 候选很多时先缩小范围才有用，默认关闭 | `route` |
 
-页首的「**应用推荐组合**」按钮按上表预填 8 个开关（`choice`、`score`、`route`、
-`screen`、`gate` 开，`prune`、`detect_stagnation`、`status_ledger` 关）。它**只预填
-草稿，不落盘**：仍需点「保存」才写回，写回内容也仍然只含显式关闭的那三项。
+页首的「**应用推荐组合**」按钮按上表预填这 5 个开关，并把 `route` 关掉。**这个
+推荐组合就是默认值**：`tools.enabled` 省略时，`choice`、`score`、`screen`、`gate`
+开、`route` 关，DSH 插件侧默认暴露 4 个工具。按钮只预填草稿、不落盘：仍需点
+「保存」；草稿若已经等于默认值，保存**不写任何内容**（没有需要记录的差异）。
 
-**默认配置不受影响——依旧 8 项全开**。推荐组合是可选操作与本文建议，不是新的默认值；
-它不改 `Config` 结构，也不引入任何新的配置文件或写入通道。其中 `route` 属于可选
-增强：不开也不影响主流程，只是让 agent 在候选很多时先缩小范围。
+`route` 是可选增强：打开它（面板开关，或配置里写 `tools: { enabled: { route: true } }`）
+才会注册 `reflex_route`；不开也不影响主流程。
+
+还有三项能力**已经不是工具**，因此这里没有它们的开关：`prune`（结果剪枝）与
+`detect_stagnation`（停滞检测）由自动干预层直接驱动，随 `observe`/`active` 生效；
+账本汇总改由 `/reflex-ledger` 命令读取。页尾有一行提示指出这两条去路；stdio MCP
+侧仍保留同名的 8 个工具，见下一节。
 
 ---
 
-## 9. MCP 工具 ↔ DSH 原生工具对照
+## 9. MCP 工具 ↔ DSH 原生能力对照
 
-两种形态暴露**同一套 8 个工具**，共享下表参数与返回载荷；参数校验边界见下文。
+两种形态**不再共享同一套工具**：stdio MCP 侧仍然暴露自 v0.1.0 起冻结的 **8 个工具**，
+DSH 插件侧只注册 **5 个可开关的能力（默认 4 个）**——另外三项能力改由自动干预与一条
+命令承载，不再占用模型的工具清单。
 
-| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 进程内工具名（`dsh-reflex`） | 主要参数 | 建议 |
+| 能力 | MCP 工具名（`harness-reflex mcp`） | DSH 插件侧（`dsh-reflex`） | 主要参数 | 建议 |
 | --- | --- | --- | --- | --- |
-| 多选一分类 | `reflex_choice` | `ctx.tools` 注册的 `reflex_choice` | `question`, `options[]`, 可选 `context` | 建议暴露 |
-| 连续评分 | `reflex_score` | `reflex_score` | `statement`, 可选 `criteria`, `context` | 建议暴露 |
-| 提示注入筛查 | `reflex_screen` | `reflex_screen` | `content`, 可选 `source`, `strict` | 建议暴露 |
-| 声明-证据门禁 | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` | 建议暴露 |
-| 长输出剪枝 | `reflex_prune` | `reflex_prune` | `rawOutput`, 可选 `intent`, `shadowMode` | 已由自动干预覆盖 |
-| 停滞检测 | `reflex_detect_stagnation` | `reflex_detect_stagnation` | 可选 `recentAction`, `goal`, `history[]` | 已由自动干预覆盖 |
-| 候选排序 | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, 可选 `topK` | 建议暴露（可选增强） |
-| 账本审计 | `reflex_status_ledger` | `reflex_status_ledger` | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） | 仅诊断 |
+| 多选一分类 | `reflex_choice` | 工具 `reflex_choice` | `question`, `options[]`, 可选 `context` | 建议暴露 |
+| 连续评分 | `reflex_score` | 工具 `reflex_score` | `statement`, 可选 `criteria`, `context` | 建议暴露 |
+| 提示注入筛查 | `reflex_screen` | 工具 `reflex_screen` | `content`, 可选 `source`, `strict` | 建议暴露 |
+| 声明-证据门禁 | `reflex_gate` | 工具 `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` | 建议暴露 |
+| 候选排序 | `reflex_route` | 工具 `reflex_route`（**默认不注册**） | `goal`, `candidates[]`, 可选 `topK` | 按需开启 |
+| 长输出剪枝 | `reflex_prune` | 无工具：结果剪枝由 `tools/pre-execute` 等钩子按干预模式自动执行 | `rawOutput`, 可选 `intent`, `shadowMode` | — |
+| 停滞检测 | `reflex_detect_stagnation` | 无工具：停滞检测是自动干预的一部分 | 可选 `recentAction`, `goal`, `history[]` | — |
+| 账本审计 | `reflex_status_ledger` | 无工具：改用 `/reflex-ledger` 命令（无参数） | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） | 人读 |
 
 差异点：
 
@@ -442,25 +451,26 @@ record?.digest;  // 与决策记录里的 digest 一致
   JSON Schema 校验；错传 `claims` 而非 `assertions` 会进入空断言门禁，返回
   `passed: false`、`needsEscalation: true`、`results: []`，不是 JSON Schema 错误。
   执行异常返回工具结果 `isError: true`。DSH 另支持断言内可选 `criteria`，MCP 未声明此嵌套字段；
-- `reflex_status_ledger` 在 DSH 侧返回的是**本次激活**的账本汇总；账本是否落盘
-  取决于 `ledgerPath`（省略时只留内存，不写用户项目）。
-- 8 个工具可用 `tools.enabled` **逐项关闭**：
+- DSH 侧的账本读取**不经过模型**：`/reflex-ledger` 由 Host 直接渲染为文本（汇总 +
+  最近 5 条），也没有工具参数；账本是否落盘取决于 `ledgerPath`（省略时只留内存，
+  不写用户项目）。MCP 侧仍是 `reflex_status_ledger` 工具，参数与返回见上表；
+- DSH 侧的能力可用 `tools.enabled` **逐项开关**，键名是**后缀**，只接受当前 5 个后缀：
 
   ```yaml
   tools:
     enabled:
-      prune: false       # 只关掉 reflex_prune，其余照常
+      route: true        # 打开默认关闭的候选排序
+      gate: false        # 关掉默认开启的门禁，其余照常
   ```
 
-  键名是**后缀**（`choice`/`score`/`route`/`screen`/`gate`/`prune`/
-  `detect_stagnation`/`status_ledger`），与 `toolPrefix` 无关：前缀改成 `rv_` 之后
-  `{ prune: false }` 关掉的仍是 `rv_prune`。被关闭的工具**不会被注册**到
-  `ctx.tools`，因此模型可见的工具清单里没有它，`reflexToolNames()` 与前缀推导的
-  结果里也没有它——没有「占位工具」这种东西，模型不会看到一个调用即报错的空壳。
-  省略 = 打开，未列出的后缀一律打开；写成不存在的后缀（例如 `teleport`）或非布尔
-  值会在安装时被校验器拒绝，而不是被静默忽略。**没有任何工具是强制常开的**，
-  `reflex_status_ledger` 同样可以关；把 8 项全部关掉后本插件不注册任何工具
-  （路由、推理强度与干预钩子不受影响）。
+  后缀与 `toolPrefix` 无关：前缀改成 `rv_` 之后 `{ gate: false }` 关掉的仍是
+  `rv_gate`。被关闭的能力**不会被注册**到 `ctx.tools`，因此模型可见的工具清单里
+  没有它，`reflexToolNames()` 与前缀推导的结果里也没有它——没有「占位工具」这种
+  东西，模型不会看到一个调用即报错的空壳。`tools.enabled` 省略时按后缀默认值
+  （`choice`/`score`/`screen`/`gate` 开、`route` 关）生效；写成不存在的后缀
+  （例如 `teleport`，或已不再是工具的 `prune`/`detect_stagnation`/`status_ledger`）
+  或非布尔值会在安装时被校验器拒绝，而不是被静默忽略。把 5 项全部写 `false` 后本
+  插件不注册任何工具（路由、推理强度与干预钩子不受影响）。
 
 ---
 
@@ -474,6 +484,10 @@ record?.digest;  // 与决策记录里的 digest 一致
 node dist/cli/index.js ledger      # 终端查看汇总
 ```
 
+- **`/reflex-ledger`（DSH 内）**：在会话里直接输入该命令，Host 会把**本次激活**的
+  账本汇总渲染成文本（总调用数、按类型分布、平均时延、节省 token 与估算成本、
+  门禁通过/失败、停滞告警，以及最近 5 条决策）——这是命令，不是工具：**不占用模型
+  上下文、不发起模型回合**，账本为空时返回一句「暂无记录」而不是一排 0；
 - `ledgerPath` 省略 ⇒ 仅内存，关掉进程即消失（默认，用户项目零污染）；
 - 配置了路径 ⇒ 追加写 JSONL 并支持回放，面板「决策账本」页显示落盘路径；
 - 面板清空账本需要连续两次点击确认，第二次才真正删除记录与 JSONL 文件。
@@ -484,7 +498,7 @@ node dist/cli/index.js ledger      # 终端查看汇总
 
 ```bash
 npm test                 # 根包：ledger / score / MCP 表面 / 打包清单
-npm run test:plugin      # DSH 插件：注册、严格校验、8 个工具、路由、推理强度、面板、使用说明
+npm run test:plugin      # DSH 插件：注册、严格校验、工具面与 /reflex-ledger、路由、推理强度、面板、使用说明
 npm run test:mutation    # 负向对照：注入故障，要求测试套件（或编译器）全部抓住
 npm run test:all         # build:all + 两套测试
 npm run release          # 全套测试 + 打包并校验 release/ 下的 tarball
@@ -519,7 +533,9 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | 推理强度没变化 | 策略设置为省略 = 不干预；或者调用方显式钉死了 `reasoningEffort` |
 | System 1 判定总是走兜底 | `timeoutMs` 过小、`baseUrl` 不可达，或 `minConfidence` 过高；先看「概览」页的最近决策与后端状态 |
 | 面板里的使用说明是旧版本 | 修改 `USER_GUIDE.md` 后未重新构建；执行 `npm run build:all` |
-| 关掉某个工具后模型仍在调用它 | 注册表在下一次加载时生效；重载插件后再看，并确认键名写的是**后缀**（`gate`，不是 `reflex_gate`） |
+| 关掉某个工具后模型仍在调用它 | 注册表在下一次加载时生效；重载插件后再看，并确认键名写的是**后缀**（`gate`，不是 `reflex_gate`）。`prune`/`detect_stagnation`/`status_ledger` 已不是工具，写进 `tools.enabled` 会被校验器拒绝 |
+| 默认工具清单里没有 `reflex_route` | 属预期：`route` 默认关闭，需要在工具开关页打开（或写 `tools: { enabled: { route: true } }`） |
+| 想查账本但找不到 `reflex_status_ledger` 工具 | 账本已是命令：输入 `/reflex-ledger`（stdio MCP 侧仍有同名工具） |
 | 关掉自适应推理强度后模型选择器仍有 `reflex` 档位 | 该档位是上一次加载注入的；确认配置已生效并重载插件，注入即被撤销 |
 | 保存「自动干预」后配置里多出默认值 | 属预期：该组是整组写回，模式与全部预算按面板当前值完整写入 |
 
@@ -530,4 +546,6 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 - 版本：`harness-reflex` 与 `dsh-reflex` 同步发布，v0.1.0-alpha.2；
 - Node：`>= 18`（根包 `engines`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
 - 插件以 `peerDependencies` 声明 Host 契约，运行时不重复打包 Host 模块；
-- stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷。
+- stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷；
+- DSH 插件侧的工具表面自 v0.1.0-alpha.2 起是 **5 个可开关能力、默认注册 4 个**
+  （`route` 默认关闭），账本为 `/reflex-ledger` 命令——这一侧不承诺与 MCP 侧逐项对齐。

@@ -340,7 +340,9 @@ function facts(apiKeyPresent: boolean): PanelRuntimeFacts {
     backendName: 'jev',
     pools: [{ model: 'reflex-pro', entries: [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] }],
     routingActive: true,
-    toolSurface: REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`),
+    // AUTHORED authors no tools block, so the Host registers the documented
+    // default: the four recommended tools, with route left for opt-in.
+    toolSurface: REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `reflex_${suffix}`),
     ledger: {
       getSummary: () => LEDGER_SUMMARY,
       getEntries: () => LEDGER_ENTRIES,
@@ -890,7 +892,11 @@ test('the switch pages seed the documented defaults and pin nothing when nothing
   openTab(tree, '工具开关');
   tree = await mounted.runtime.flush();
   for (const suffix of REFLEX_TOOL_SUFFIXES) {
-    assert.equal(checkboxOf(tree, `reflex_${suffix}`).props.checked, true, `${suffix} does not default to on`);
+    assert.equal(
+      checkboxOf(tree, `reflex_${suffix}`).props.checked,
+      suffix !== 'route',
+      `${suffix} does not show its documented default`
+    );
   }
 
   fire(find(tree, 'button', '保存'), 'onClick');
@@ -905,7 +911,9 @@ test('the switch pages seed the documented defaults and pin nothing when nothing
 test('authored switches are read back, and rewriting them does not freeze what was inherited', async () => {
   const authored = {
     ...AUTHORED,
-    tools: { enabled: { gate: false, status_ledger: false } },
+    // One authored departure in each direction: a tool switched off, and the
+    // opt-in tool switched on.
+    tools: { enabled: { gate: false, route: true } },
     interventions: { mode: 'off', capabilities: { gate: 'observe' } }
   } as ReflexConfig;
   const { form, mutations } = settingsForm(authored);
@@ -914,17 +922,18 @@ test('authored switches are read back, and rewriting them does not freeze what w
   openTab(mounted.tree, '工具开关');
   let tree = await mounted.runtime.flush();
   assert.equal(checkboxOf(tree, 'reflex_gate').props.checked, false, 'an authored switch is not read back');
-  assert.equal(checkboxOf(tree, 'reflex_status_ledger').props.checked, false, 'status_ledger has no always-on exception');
+  assert.equal(checkboxOf(tree, 'reflex_route').props.checked, true, 'an authored opt-in is not read back');
   assert.equal(checkboxOf(tree, 'reflex_choice').props.checked, true);
 
-  // Reopening one tool must *remove* its key instead of pinning it to true.
+  // Reopening one tool must *remove* its key instead of pinning it to true,
+  // while the departure in the other direction stays authored.
   fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: true } });
   tree = await mounted.runtime.flush();
   fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
   const tools = plain(mutations[0]?.ops) as { path: string[]; value: unknown }[];
   assert.deepEqual(tools.map((op) => op.path), [['tools']]);
-  assert.deepEqual(tools[0]?.value, { enabled: { status_ledger: false } });
+  assert.deepEqual(tools[0]?.value, { enabled: { route: true } });
 
   // The interventions page keeps the authored override and changes only the mode.
   mutations.length = 0;
@@ -954,15 +963,35 @@ test('the tools page closes one tool and writes exactly that switch', async () =
   openTab(mounted.tree, '工具开关');
   let tree = await mounted.runtime.flush();
 
-  // One switch per suffix, labelled with the registered name under the draft prefix.
+  // One switch per suffix, labelled with the registered name under the draft
+  // prefix. Each one starts at its documented default, not at "on".
   for (const suffix of REFLEX_TOOL_SUFFIXES) {
-    assert.equal(checkboxOf(tree, `reflex_${suffix}`).props.checked, true, `${suffix} does not start enabled`);
+    assert.equal(
+      checkboxOf(tree, `reflex_${suffix}`).props.checked,
+      suffix !== 'route',
+      `${suffix} does not start at its documented default`
+    );
   }
   const effective = textOf(tree);
   assert.ok(!effective.includes('尚未读取到运行时状态'), 'the Host projection of the registered surface was not read');
-  for (const suffix of REFLEX_TOOL_SUFFIXES) {
-    assert.ok(effective.includes(`reflex_${suffix}`), `the effective registration omits ${suffix}`);
-  }
+  // The read-only card renders one bare row per registered name; the switch
+  // labels above carry the same prefix, so read the card's own rows instead of
+  // every occurrence of the name on the page.
+  const registeredRows = (of: unknown): string[] =>
+    elements(of)
+      .filter(
+        (element) =>
+          element.type === 'div' &&
+          element.children.length === 1 &&
+          typeof element.children[0] === 'string' &&
+          (element.children[0] as string).startsWith('reflex_')
+      )
+      .map((element) => element.children[0] as string);
+  assert.deepEqual(
+    registeredRows(tree),
+    REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `reflex_${suffix}`),
+    'the effective card must list exactly the four tools the default registers'
+  );
 
   fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } });
   tree = await mounted.runtime.flush();
@@ -972,13 +1001,13 @@ test('the tools page closes one tool and writes exactly that switch', async () =
   assert.equal(mutations.length, 1, 'saving did not reach the settings form');
   const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: unknown }[];
   assert.deepEqual(ops.map((op) => [op.op, op.path]), [['set', ['tools']]]);
-  assert.deepEqual(ops[0]?.value, { enabled: { gate: false } }, 'an open tool must be omitted, not written as true');
+  assert.deepEqual(ops[0]?.value, { enabled: { gate: false } }, 'only the departure from the default is written');
 
   // The Host takes the written block and closes exactly that tool.
   const resolved = resolveConfig({ ...AUTHORED, tools: ops[0]?.value as ReflexConfig['tools'] });
   assert.equal(resolved.tools.enabled.gate, false);
-  assert.equal(resolved.tools.enabled.status_ledger, true, 'status_ledger has no always-on exception');
-  assert.equal(Object.values(resolved.tools.enabled).filter((on) => !on).length, 1);
+  assert.equal(resolved.tools.enabled.route, false, 'closing gate must not switch the opt-in tool on');
+  assert.equal(Object.values(resolved.tools.enabled).filter((on) => !on).length, 2, 'gate is closed and route keeps its off default');
   mounted.unmount();
 });
 
@@ -995,10 +1024,7 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
     score: ['0–1 的连续分', '连续评分'],
     route: ['概率排序', '缩小范围'],
     screen: ['提示注入', '不可信输入'],
-    gate: ['逐条核对', '验收判据'],
-    prune: ['压缩过长', '大段日志'],
-    detect_stagnation: ['零进展', '连续失败'],
-    status_ledger: ['决策账本', '审计或排障']
+    gate: ['逐条核对', '验收判据']
   };
   const copy = textOf(tree);
   for (const suffix of REFLEX_TOOL_SUFFIXES) {
@@ -1007,25 +1033,30 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
     assert.ok(copy.includes(when), `${suffix} does not say when to call it`);
   }
 
-  // The advice is stated per tool: five suggested, two already covered, one for
-  // people. Counts, so a misplaced label is caught too.
+  // The advice is stated per tool: four suggested, one to turn on when needed.
+  // Counts, so a misplaced label is caught too.
   const occurrences = (needle: string): number => copy.split(needle).length - 1;
-  assert.equal(occurrences('建议暴露'), 5, 'the tools the agent should keep are not marked as such');
-  assert.equal(occurrences('已由自动干预覆盖'), 2, 'the intervention-covered tools are not marked as such');
-  assert.equal(occurrences('仅诊断'), 1, 'the diagnostic-only tool is not marked as such');
+  assert.equal(occurrences('建议暴露'), 4, 'the tools the agent should keep are not marked as such');
+  assert.equal(occurrences('按需开启'), 1, 'route is the one tool that is not part of the recommended set');
+  assert.equal(occurrences('已由自动干预覆盖'), 0, 'the intervention-covered advice outlived the tools it described');
+  assert.equal(occurrences('仅诊断'), 0, 'the diagnostic-only advice outlived the ledger tool');
   assert.equal(occurrences('按后缀开关，与工具名前缀无关'), 0, 'the generic per-tool hint is still repeated');
+
+  // The ledger left the tool surface, so the page says where it went; and no
+  // switch survives for a capability that is no longer a tool.
+  assert.ok(copy.includes('/reflex-ledger'), 'the tools page must point at the ledger command');
+  for (const gone of ['reflex_prune', 'reflex_detect_stagnation', 'reflex_status_ledger']) {
+    assert.equal(copy.includes(gone), false, `${gone} is still presented as a tool`);
+  }
 
   // The recommendation is the review table, written out here on purpose: the test
   // is the spec, not a copy of the panel's own constant.
   const recommended: Record<string, boolean> = {
     choice: true,
     score: true,
-    route: true,
+    route: false,
     screen: true,
-    gate: true,
-    prune: false,
-    detect_stagnation: false,
-    status_ledger: false
+    gate: true
   };
   fire(find(tree, 'button', '应用推荐组合'), 'onClick');
   tree = await mounted.runtime.flush();
@@ -1034,17 +1065,28 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
   }
   assert.equal(mutations.length, 0, 'pre-filling the recommendation wrote to the settings document');
 
-  // Only a real save writes, and it writes only the closed tools.
+  // Saving it writes nothing: the recommended set *is* the documented default,
+  // so there is no departure to author and the Host is left untouched.
   fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
-  assert.equal(mutations.length, 1, 'saving the recommendation did not reach the settings form');
+  assert.equal(mutations.length, 0, 'a set that already matches the default must not be written');
+
+  // A real departure is written — and written alone.
+  fire(checkboxOf(tree, 'reflex_route'), 'onChange', { target: { checked: true } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'saving the departure did not reach the settings form');
   const ops = plain(mutations[0]?.ops) as { path: string[]; value: { enabled: Record<string, boolean> } }[];
   assert.deepEqual(ops.map((op) => op.path), [['tools']]);
   assert.deepEqual(
     ops[0]?.value,
-    { enabled: { prune: false, detect_stagnation: false, status_ledger: false } },
-    'the five tools the recommendation keeps on must be omitted, not written as true'
+    { enabled: { route: true } },
+    'the recommended tools must be omitted, and only the opt-in departure authored'
   );
+  const resolved = resolveConfig({ ...AUTHORED, tools: ops[0]?.value as ReflexConfig['tools'] });
+  assert.equal(resolved.tools.enabled.route, true, 'the Host reads the authored opt-in back');
+  assert.equal(resolved.tools.enabled.choice, true);
   mounted.unmount();
 });
 
@@ -1209,7 +1251,9 @@ test('every path the panel writes is a path the Host declares volatile', async (
     { tab: '推理强度', edit: (tree) => fire(checkboxOf(tree, '启用自适应推理强度'), 'onChange', { target: { checked: false } }) },
     { tab: 'System 1 后端', edit: editBackendPage },
     { tab: '自动干预', edit: (tree) => fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } }) },
-    { tab: '工具开关', edit: (tree) => fire(find(tree, 'button', '应用推荐组合'), 'onClick') }
+    // Closing a tool that is on by default is a real departure, so this page
+    // still reaches the document even though its recommendation matches the default.
+    { tab: '工具开关', edit: (tree) => fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } }) }
   ];
   const paths = new Set<string>();
   for (const perturb of perturbs) {
@@ -1354,7 +1398,8 @@ test('the guide page renders the shipped user guide inside the panel', async () 
     '1. Harness Reflex 是什么',
     '虚拟 Provider 与模型池',
     'npm run build:all',
-    'reflex_detect_stagnation'
+    // The ledger is a command on the plugin side now, so the guide has to say so.
+    '/reflex-ledger'
   ]) {
     assert.ok(text.includes(probe), `the guide page is missing "${probe}"`);
   }
@@ -1379,6 +1424,7 @@ test('the guide page follows the Host language', async () => {
 
   assert.ok(text.includes('Harness Reflex User Guide'), 'the English guide is not on the page');
   assert.ok(text.includes('Virtual provider and model pools'), 'the English guide lost a section');
+  assert.ok(text.includes('/reflex-ledger'), 'the English guide does not document the ledger command');
   assert.ok(text.includes('docs/USER_GUIDE.en.md'), 'the English guide does not name its source document');
   assert.ok(!text.includes('虚拟 Provider 与模型池'), 'the Chinese guide leaked into the English page');
   mounted.unmount();

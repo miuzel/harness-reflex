@@ -41,7 +41,7 @@ export interface ReflexPruneResult {
   processedOutput: string;
 }
 
-/** Payload of the `status_ledger` operation. */
+/** Payload of the ledger read, mirroring the stdio MCP `status_ledger` payload. */
 export interface ReflexLedgerResult {
   summary: ReturnType<DecisionLedger['getSummary']>;
   recentEntries?: ReturnType<DecisionLedger['getEntries']>;
@@ -215,6 +215,10 @@ export class ReflexRuntime {
 
   /**
    * Prune bulky output, preserving the lines the intent depends on.
+   *
+   * Programmatic seam for the pruning capability: the automatic intervention
+   * layer drives {@link pruneService} directly, and this entry point stays for
+   * in-process callers (tests, diagnostics, an embedding Host).
    * @param request - raw output, lookup intent, and shadow-mode flag.
    * @returns the compacted payload and the measured token savings.
    */
@@ -241,6 +245,10 @@ export class ReflexRuntime {
    * tool. Supplied steps are treated as earlier than the ones recorded here, so
    * a caller can hand over a whole run and still add the action it just took.
    *
+   * Programmatic seam for the stagnation capability: the automatic intervention
+   * layer drives {@link stagnationService} directly, and this entry point stays
+   * for in-process callers.
+   *
    * @param request - the action just taken, the overall goal, and any prior steps.
    * @returns the stagnation verdict and corrective suggestion.
    */
@@ -256,6 +264,10 @@ export class ReflexRuntime {
 
   /**
    * Read the decision ledger.
+   *
+   * Programmatic seam behind `/reflex-ledger`: the Host command formats this
+   * same read for a person, and an embedding Host can call it directly. Nothing
+   * in the tool surface depends on it.
    * @param request - whether to attach the ten most recent entries.
    * @returns the aggregate summary and, on request, recent entries.
    */

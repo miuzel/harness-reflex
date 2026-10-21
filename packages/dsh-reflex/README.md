@@ -1,8 +1,9 @@
 # dsh-reflex — Harness Reflex 的 DSH Host 插件
 
 把仓库根目录的 **Harness Reflex（System One 决策运行时）** 以 **DSH Cordis Host 插件**的形式挂进 `dsh`
-进程内：不再经过 stdio MCP 子进程，8 个 `reflex_*` 能力直接注册到 `ctx.tools`，与其它 DSH 工具共享同一套
-参数校验、执行管线与生命周期。
+进程内：不再经过 stdio MCP 子进程，5 个 `reflex_*` 能力直接注册到 `ctx.tools`（默认注册其中 4 个，
+`route` 需显式打开），与其它 DSH 工具共享同一套参数校验、执行管线与生命周期。剪枝与停滞检测改由自动干预层
+直接驱动（不再占用工具位），台账汇总则是 `/reflex-ledger` **命令**——不经过模型。
 
 插件同时提供**虚拟 Provider 与动态模型路由**：注册一个虚拟 provider（默认 `reflex`），把
 `reflex-auto` / `reflex-fast` 这类虚拟模型按配置的物理候选池，用 System 1（毫秒级、零生成开销）在
@@ -30,16 +31,17 @@
 | `tsconfig.json` | 独立编译配置（`src/` → `dist/`） |
 | `src/config.ts` | `ReflexConfig` 类型 + schemastery `Config` 模式 + `resolveConfig` |
 | `src/bridge.ts` | `ReflexRuntime`：一次激活的 backend / ledger / 校准器 / 5 个决策服务 |
-| `src/tools.ts` | 8 个 `defineTool` 定义（严格参数 + JSON 输出 + 顶层未声明参数拦截） |
+| `src/tools.ts` | 5 个 `defineTool` 定义与逐后缀默认开关（严格参数 + JSON 输出 + 顶层未声明参数拦截） |
+| `src/command.ts` | `/reflex-ledger`：注册到 Host 命令注册表，直接读运行时台账并渲染为文本（不经模型） |
 | `src/index.ts` | Cordis 插件入口 `apply` / `applyReflex`，注册与拆除都在一个 `ctx.effect` 内 |
 | `src/router.ts` | `VirtualModelRouter`：候选池 → 候选（当前模型带 `current` 标记）→ System 1 决策（带上下文/模型状态与缓存亲和策略）→ **粘性闸门**（`stickyMargin`，默认 15%）→ 降级/Fail-Closed → 审计（`currentModel`/`switched`/`contextTokens`） |
 | `src/virtual-adapter.ts` | `ReflexVirtualAdapter`：虚拟 provider 的 `LlmAdapter` 表面 + 派发层路由兜底 |
 | `src/routing.ts` | `installModelRouting`：注册虚拟路由，挂 `agent/pre-step`（逐 agent 记任务与上下文规模）/ `agent/request`（带上当前物理模型与上下文规模决策） |
 | `src/effort.ts` | `EffortInterceptor`：每轮自适应思考等级（触发判定 / System 1 决策 / 线索兜底 / 投影 / 状态） |
 | `src/session-audit.ts` | `plugin:dsh-reflex/effort` 会话记录的写入与回读（不污染模型可见面） |
-| `src/testing.ts` | `./testing` 入口：拉起真实 Cordis + `systemPrompt` + `tools` + `llm` 的测试夹具 |
-| `src/*.test.ts` | 186 个插件测试（注册/配置/8 个工具行为/严格校验/生命周期/路由单元/路由集成（含上下文与粘性）/思考等级单元/思考等级集成/面板/使用说明） |
-| `scripts/mutation-check.mjs` | 负向对照：注入 32 个故障，要求测试套件（或编译器）全部抓到 |
+| `src/testing.ts` | `./testing` 入口：拉起真实 Cordis + `systemPrompt` + `tools` + `llm` + `commands` 的测试夹具 |
+| `src/*.test.ts` | 插件测试（注册/配置/工具面与逐后缀默认/`/reflex-ledger` 命令/严格校验/生命周期/路由单元/路由集成（含上下文与粘性）/思考等级单元/思考等级集成/面板/使用说明） |
+| `scripts/mutation-check.mjs` | 负向对照：逐个注入故障，要求测试套件（或编译器）全部抓到 |
 
 ---
 
@@ -110,7 +112,7 @@ dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex �
 
 配置好之后，模型既可以显式选择 `provider: reflex` / `model: reflex-auto`，也可以由代理的默认模型
 （例如 subagent 继承的 `reflex-auto`）落到这里；插件会在 `agent/request` 上把它改写成 System 1 选出的
-物理 `provider/model`，并写入一条 `type: 'model-route'` 台账（可在 `reflex_status_ledger` 里查看）。
+物理 `provider/model`，并写入一条 `type: 'model-route'` 台账（在会话里输入 `/reflex-ledger` 查看）。
 
 配置了 `effort.reasoningEffort: reflex` 之后（或在请求里显式把 `reasoningEffort` 设成 `reflex`/`auto`），
 插件会在同一处再拦截一次：用 `agent/pre-step` 捕获的**本轮任务文本**问 System 1 本轮该用哪一档思考，
@@ -123,21 +125,30 @@ dsh plugin add ./packages/dsh-reflex      # 或在 dsh 配置中把 dsh-reflex �
   `reflex effort: high → high (system-one 0.83, 0ms) deepseek:reasoner` 这样一行状态。
   GUI 状态栏需要另配带 `dsh.client` 的客户端半边（本包不含）。
 
-## 提供的工具
+## 提供的工具与命令
 
-8 个工具与 stdio MCP 表面**同名同载荷**，参数校验由 Host 的 `defineTool` 完成（必填/类型/枚举/嵌套
-`additionalProperties`），工具层再补一道「顶层未声明参数」拦截。
+插件侧注册 **5 个可开关能力，默认注册 4 个**：`choice`、`score`、`screen`、`gate` 默认开启，
+`route` 默认关闭（`tools: { enabled: { route: true } }` 或在面板工具开关页打开）。参数校验由 Host 的
+`defineTool` 完成（必填/类型/枚举/嵌套 `additionalProperties`），工具层再补一道「顶层未声明参数」拦截。
 
 | 工具 | 关键参数 | 用途 |
 | --- | --- | --- |
 | `reflex_choice` | `question`, `options[]`, `context?` | 多选一概率分布（毫秒级、零生成开销） |
 | `reflex_score` | `statement`, `criteria?`, `context?` | 0.0–1.0 连续评分（三档分布投影） |
-| `reflex_route` | `goal`, `candidates[{name,description}]`, `topK?` | 候选工具/技能概率排序（只排序不卡阈值） |
 | `reflex_screen` | `content`, `source?`, `strict?` | 提示注入/指令劫持筛查，命中时附数据围栏 |
 | `reflex_gate` | `assertions[{statement,criteria?}]`, `evidence`, `strictness?` | 声明-证据核对门禁（Fail-Closed） |
-| `reflex_prune` | `rawOutput`, `intent?`, `shadowMode?` | 长输出剪枝 + token 节省统计（Fail-Open） |
-| `reflex_detect_stagnation` | `recentAction{tool,input,output?,error?}`, `goal?`, 可选 `history[]`（同一形状的数组，用于恢复/委派后接续既有历史） | 重复重试/振荡/零进展检测与打断建议 |
-| `reflex_status_ledger` | `includeEntries?` | 台账汇总（调用数、延迟、净省 token、成本） |
+| `reflex_route`（默认关闭） | `goal`, `candidates[{name,description}]`, `topK?` | 候选工具/技能概率排序（只排序不卡阈值） |
+
+另外三项能力**不在工具清单里**：
+
+| 能力 | 插件侧承载方式 |
+| --- | --- |
+| `prune`（长输出剪枝 + token 节省统计） | 自动干预层在 `tools/pre-execute` 等钩子上直接执行（`observe`/`active`） |
+| `detect_stagnation`（重复重试/振荡/零进展） | 自动干预层的一部分，随模式生效 |
+| 台账汇总（调用数、延迟、净省 token、成本） | `/reflex-ledger` 命令：无参数、直接渲染文本、不开模型回合 |
+
+stdio MCP 侧（`harness-reflex mcp` / `.mcp.json` / Codex / AGY bundle）**仍保留同名的 8 个工具**，
+其表面自 v0.1.0 起冻结，与本插件侧不再逐项对齐。
 
 ## 生命周期与可逆性
 
@@ -151,13 +162,15 @@ ctx.effect(() => {
   return () => {
     stopObserving();                                 // 摘掉 tools/change 观察者
     stopRouting();                                   // 摘掉路由拦截 + 释放虚拟 provider 路由
-    for (const dispose of disposers.reverse()) dispose();  // 逆序注销 8 个工具
+    unregisterLedger();                             // 注销 /reflex-ledger 命令
+    for (const dispose of disposers.reverse()) dispose();  // 逆序注销全部已注册工具
     runtime.dispose();                               // 释放 ledger（内存态清空）
   };
 }, 'reflex tools');
 ```
 
-- 插件卸载 / context dispose：8 个工具全部从 `ctx.tools` 消失，观察者被摘除，`runtime.disposed === true`。
+- 插件卸载 / context dispose：全部工具从 `ctx.tools` 消失，`/reflex-ledger` 名字被释放，观察者被摘除，
+  `runtime.disposed === true`。同一个 context 上的第二个激活不会争抢命令名（名字上下文唯一，首个激活持有）。
 - `runtime.dispose()` 幂等，重复调用无副作用。
 - 同一个 context 上可以并存多个激活（不同 `toolPrefix`），互不影响，可任意顺序卸载。
 - 虚拟 provider 路由是**进程内独占**的：同一 `LlmRuntime` 上首个配置了候选池的激活拥有它，后续激活复用
@@ -168,20 +181,21 @@ ctx.effect(() => {
 ## 测试
 
 ```bash
-npm test                 # 根包 26 个测试（ledger / score / route / route-prompt / MCP 表面 / 打包清单）
-npm run test:plugin      # 插件 186 个测试
+npm test                 # 根包测试（ledger / score / route / route-prompt / MCP 表面 / 打包清单）
+npm run test:plugin      # 插件测试（工具面 / 命令 / 校验 / 生命周期 / 路由 / 面板 / 使用说明）
 npm run test:all         # 构建 + 两套测试
-npm run test:mutation    # 负向对照：注入 32 个故障，要求被测试或编译器抓住
+npm run test:mutation    # 负向对照：注入故障，要求被测试或编译器抓住
 ```
 
-`npm run test:mutation` 会在 `packages/dsh-reflex/tmp/mutation/`（已 gitignore）里复制一份源码，先确认
-基线是绿的（186 passed），再逐个注入 **32 个**故障并**要求变红**（31 个由测试抓住、1 个由编译器抓住）。
-下表是其中代表性的一批：
+`npm run test:mutation` 会在 `tmp/reflex-mutation/`（已 gitignore）里复制一份源码，先确认基线是绿的
+（测试数不得低于当前套件规模），再逐个注入故障并**要求变红**。下表是其中代表性的一批：
 
 | 注入故障 | 命中验收面 | 期望被谁抓住 |
 | --- | --- | --- |
-| `drop-tool-at-registration` | 8 个工具齐全 | 测试（注册数量） |
-| `drop-tool-from-suffix-list` | 工具名清单完整 | 编译器（联合类型） |
+| `drop-tool-at-registration` | 已启用工具全部注册 | 测试（注册数量） |
+| `route-default-drift` | `route` 默认关闭 | 测试（默认工具面多出一个） |
+| `ledger-command-unregistered` | `/reflex-ledger` 可读 | 测试（命令不存在） |
+| `tool-switch-ignores-close` | 关掉的工具不注册 | 测试（关闭的工具仍在注册表） |
 | `no-teardown` | 生命周期可逆 | 测试（卸载后工具仍在） |
 | `no-root-argument-check` | 严格参数校验 | 测试（未声明参数被接受） |
 | `prefix-default-drift` | 部署配置默认值 | 测试（工具名不匹配） |

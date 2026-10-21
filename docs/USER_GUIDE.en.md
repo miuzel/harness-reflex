@@ -73,8 +73,9 @@ Key modules of the plugin:
 
 Activation order: DSH loads the plugin → `apply` resolves the configuration →
 `ReflexRuntime` is built → the virtual provider and request hooks are installed →
-the eight tools are registered → the panel routes are mounted. Unloading unwinds
-in reverse and is fully reversible.
+the four default tools (five with `route` switched on) are registered →
+the `/reflex-ledger` command is registered → the panel routes are mounted.
+Unloading unwinds in reverse and is fully reversible.
 
 ---
 
@@ -396,8 +397,9 @@ writing a second one.
   interventions per turn;
 - Interventions for one `(agent, call signature)` are de-duplicated within a turn,
   and the result of a call this plugin refused is never judged a second time;
-- This plugin's own eight tools are never judged — their output is already the
-  optimizer's — so the frozen `reflex_*` payloads are unaffected.
+- This plugin's own tools are never judged — their output is already the
+  optimizer's (four by default, five with `route` on) — so no `reflex_*` payload
+  this plugin registers is ever re-judged.
 
 ### Safety and rollback
 
@@ -427,7 +429,7 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | Virtual provider | Routing switch, provider name, pool editing and ordering, fallback target |
 | Reasoning effort | Policy (`reflex`/`auto`/a concrete level), fallback level, minimum confidence, **adaptive-effort switch** |
 | Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
-| Tools | A per-tool switch for each of the eight tools, each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`) |
+| Tools | A per-capability switch for each of the five capabilities (four on, `route` off by default), each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`), with a line pointing the ledger at `/reflex-ledger` |
 | System 1 backend | Implementation, base URL, model id, API-key variable name, timeout; plus the tool-name prefix, prune threshold, ledger JSONL path and calibration-curve path |
 | Decision ledger | Live metrics, recent-decision table, JSONL sink, clear (confirmed twice) |
 | **Guide** | **A read-only view of this manual, following the DSH interface language** |
@@ -454,10 +456,12 @@ much they write:
   is the complete set of values you see, not only the field you edited.
   Capability overrides write only the entries that are **not** `inherit`; the
   rest stay omitted (omitted = follow the mode).
-- **Tools: only explicit closes are written.** Only a tool switched off (`false`)
-  is written into `tools.enabled`; switching it back on **deletes** the key
-  rather than writing `true`. "All on" and "the whole group omitted" are
-  therefore byte-identical, and the default configuration does not change at all.
+- **Tools: only departures from the default are written.** A default-on tool
+  switched off is written as `false`, the default-off `route` switched on is
+  written as `true`, and switching anything back to its default **deletes** the
+  key. The recommended set and "the whole group omitted" are therefore
+  byte-identical (the default already is four on, one off), and the default
+  configuration does not change at all.
 - **The reasoning-effort switch is always written explicitly.** `effort.enabled`
   is saved with the group's current value, so there is no "the panel shows it
   enabled but the configuration actually omits it" ambiguity.
@@ -477,47 +481,56 @@ an invalid three-state value) is rejected by the same Host-side `resolveConfig`
 validator with a field-level message, and the panel applies nothing partially:
 the whole group passes, or not a byte of it is written.
 
-### Tool switches: three kinds of advice, and the recommended set
+### Tool switches: two kinds of advice, and the recommended set
 
-Every entry on the tools page states three things: **what the tool does**, **when
-the agent should call it**, and one label answering **whether it is advised to
-expose the tool to the agent**:
+Every entry on the tools page states three things: **what the capability does**,
+**when the agent should call it**, and one label answering **whether it is advised
+to expose it to the agent**:
 
-| Advice | Meaning | Tools |
+| Advice | Meaning | Capabilities |
 | --- | --- | --- |
-| Suggested for the agent | The agent genuinely uses it in day-to-day work | `choice`, `score`, `route`, `screen`, `gate` |
-| Covered by the intervention layer | The layer already does this under `observe`/`active`, so a manual call is usually redundant | `prune`, `detect_stagnation` |
-| Diagnostics only | It exists for a human reading the page and the ledger | `status_ledger` |
+| Suggested for the agent | The agent genuinely uses it in day-to-day work | `choice`, `score`, `screen`, `gate` |
+| Opt-in | It only pays off when there are many candidates, so it is off by default | `route` |
 
-The "**Apply recommended set**" button at the top pre-fills the eight switches
-from that table (`choice`, `score`, `route`, `screen` and `gate` on; `prune`,
-`detect_stagnation` and `status_ledger` off). It **pre-fills the draft only and
-writes nothing**: the group is still saved when you press Save, and what gets
-written is still only the three explicit closes.
+The "**Apply recommended set**" button at the top pre-fills those five switches
+and switches `route` off. **That recommended set is the default**: with
+`tools.enabled` omitted, `choice`, `score`, `screen` and `gate` are on and `route`
+is off, so the DSH plugin exposes four tools by default. The button pre-fills the
+draft only and writes nothing — the group is still saved when you press Save, and
+a draft that already equals the default writes **nothing at all** (there is no
+difference to record).
 
-**The default configuration is unchanged — all eight stay on.** The recommended
-set is an optional action and a recommendation in this manual, not a new default:
-it adds no `Config` field, no new configuration file, and no second write
-channel. `route` is an optional extra in particular — the main flow does not
-depend on it, it merely shrinks the candidate range when there are many options.
+`route` is an optional extra: switching it on (on the page, or with
+`tools: { enabled: { route: true } }`) is what registers `reflex_route`; the main
+flow does not depend on it.
+
+Three capabilities are **no longer tools** and therefore have no switch here:
+`prune` (result pruning) and `detect_stagnation` (stagnation detection) are driven
+directly by the intervention layer as `observe`/`active` take effect, and the
+ledger summary moved to the `/reflex-ledger` command. A line at the end of the
+page points both out; the stdio MCP side still carries all eight tool names, see
+the next section.
 
 ---
 
-## 9. MCP tools ↔ DSH native tools
+## 9. MCP tools ↔ DSH native capabilities
 
-Both forms expose the **same eight tools**, sharing the arguments below and their
-payloads; argument-validation boundaries differ as described below.
+The two forms **no longer share one tool set**: the stdio MCP side still exposes
+the **eight tools frozen since v0.1.0**, while the DSH plugin side registers
+**five switchable capabilities (four by default)** — the other three are carried
+by the automatic intervention layer and by one command instead of occupying the
+model's tool list.
 
-| Capability | MCP tool name (`harness-reflex mcp`) | DSH in-process tool (`dsh-reflex`) | Main arguments | Advice |
+| Capability | MCP tool name (`harness-reflex mcp`) | DSH plugin side (`dsh-reflex`) | Main arguments | Advice |
 | --- | --- | --- | --- | --- |
-| Multi-option classification | `reflex_choice` | `reflex_choice` registered via `ctx.tools` | `question`, `options[]`, optional `context` | Suggested for the agent |
-| Continuous rating | `reflex_score` | `reflex_score` | `statement`, optional `criteria`, `context` | Suggested for the agent |
-| Prompt-injection screen | `reflex_screen` | `reflex_screen` | `content`, optional `source`, `strict` | Suggested for the agent |
-| Claim/evidence gate | `reflex_gate` | `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` | Suggested for the agent |
-| Long-output pruning | `reflex_prune` | `reflex_prune` | `rawOutput`, optional `intent`, `shadowMode` | Covered by the intervention layer |
-| Stagnation detection | `reflex_detect_stagnation` | `reflex_detect_stagnation` | optional `recentAction`, `goal`, `history[]` | Covered by the intervention layer |
-| Candidate ranking | `reflex_route` | `reflex_route` | `goal`, `candidates[]`, optional `topK` | Suggested (optional extra) |
-| Ledger audit | `reflex_status_ledger` | `reflex_status_ledger` | optional `includeEntries` (returns `summary`, optionally `recentEntries`) | Diagnostics only |
+| Multi-option classification | `reflex_choice` | tool `reflex_choice` | `question`, `options[]`, optional `context` | Suggested for the agent |
+| Continuous rating | `reflex_score` | tool `reflex_score` | `statement`, optional `criteria`, `context` | Suggested for the agent |
+| Prompt-injection screen | `reflex_screen` | tool `reflex_screen` | `content`, optional `source`, `strict` | Suggested for the agent |
+| Claim/evidence gate | `reflex_gate` | tool `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` | Suggested for the agent |
+| Candidate ranking | `reflex_route` | tool `reflex_route` (**not registered by default**) | `goal`, `candidates[]`, optional `topK` | Opt-in |
+| Long-output pruning | `reflex_prune` | no tool: result pruning runs automatically from hooks such as `tools/pre-execute`, following the intervention mode | `rawOutput`, optional `intent`, `shadowMode` | — |
+| Stagnation detection | `reflex_detect_stagnation` | no tool: stagnation detection is part of the automatic intervention layer | optional `recentAction`, `goal`, `history[]` | — |
+| Ledger audit | `reflex_status_ledger` | no tool: use the `/reflex-ledger` command (no arguments) | optional `includeEntries` (returns `summary`, optionally `recentEntries`) | For humans |
 
 Differences:
 
@@ -531,28 +544,32 @@ Differences:
   `results: []`, not a JSON Schema error. Execution exceptions return a tool result
   with `isError: true`. DSH additionally accepts optional per-assertion `criteria`;
   MCP does not declare that nested field.
-- `reflex_status_ledger` on the DSH side summarises **the current activation**;
-  whether the ledger persists depends on `ledgerPath` (unset keeps it in memory
-  and never writes into the user's project).
-- Each of the eight tools can be **switched off individually** with
-  `tools.enabled`:
+- Reading the ledger on the DSH side **never reaches the model**: `/reflex-ledger`
+  is rendered into text by the Host (the summary plus the five most recent
+  decisions) and takes no tool arguments; whether the ledger persists depends on
+  `ledgerPath` (unset keeps it in memory and never writes into the user's
+  project). The MCP side keeps the `reflex_status_ledger` tool with the arguments
+  in the table above.
+- DSH-side capabilities can be **switched individually** with `tools.enabled`,
+  keyed by **suffix**; only the five current suffixes are accepted:
 
   ```yaml
   tools:
     enabled:
-      prune: false       # closes reflex_prune only; the rest stay available
+      route: true        # switch on the candidate ranking, off by default
+      gate: false        # switch off the gate, on by default; the rest stay available
   ```
 
-  The key is the **suffix** (`choice`/`score`/`route`/`screen`/`gate`/`prune`/
-  `detect_stagnation`/`status_ledger`), independent of `toolPrefix`: after
-  renaming the prefix to `rv_`, `{ prune: false }` still closes `rv_prune`. A
-  closed tool is **not registered** into `ctx.tools`, so it is absent from the
-  model-visible tool list and from `reflexToolNames()` and its prefix
-  derivation — there is no "placeholder tool" and the model never sees a shell
-  that fails on every call. Omitted means open, and any suffix you do not list
-  stays open; an unknown suffix (say `teleport`) or a non-boolean is rejected by
-  the validator at install time instead of being ignored. **No tool is forced
-  always-on** — `reflex_status_ledger` can be closed too — and closing all eight
+  The suffix is independent of `toolPrefix`: after renaming the prefix to `rv_`,
+  `{ gate: false }` still closes `rv_gate`. A closed capability is **not
+  registered** into `ctx.tools`, so it is absent from the model-visible tool list
+  and from `reflexToolNames()` and its prefix derivation — there is no
+  "placeholder tool" and the model never sees a shell that fails on every call.
+  With `tools.enabled` omitted the per-suffix default applies
+  (`choice`/`score`/`screen`/`gate` on, `route` off); an unknown suffix (say
+  `teleport`, or one that is no longer a tool such as
+  `prune`/`detect_stagnation`/`status_ledger`) or a non-boolean is rejected by the
+  validator at install time instead of being ignored. Writing `false` for all five
   registers no tool at all (routing, reasoning effort and the intervention hooks
   are unaffected).
 
@@ -568,6 +585,12 @@ latency, confidence, token-savings estimate and a truncated detail field:
 node dist/cli/index.js ledger      # terminal summary
 ```
 
+- **`/reflex-ledger` (inside DSH)**: type the command in a session and the Host
+  renders **this activation's** ledger summary into text (total calls, breakdown
+  by type, average latency, tokens saved and the estimated cost, gate
+  pass/fail, stagnation alerts, and the five most recent decisions). It is a
+  command, not a tool: it **costs no model context and opens no model turn**, and
+  an empty ledger answers "no records yet" instead of a row of zeroes;
 - `ledgerPath` unset ⇒ memory only, gone with the process (the default, so user
   projects stay untouched);
 - a configured path ⇒ append-only JSONL with replay, and the panel's ledger page
@@ -581,7 +604,7 @@ node dist/cli/index.js ledger      # terminal summary
 
 ```bash
 npm test                 # root package: ledger / score / MCP surface / packaging manifest
-npm run test:plugin      # DSH plugin: registration, strict validation, 8 tools, routing, effort, panel, guide
+npm run test:plugin      # DSH plugin: registration, strict validation, tool surface and /reflex-ledger, routing, effort, panel, guide
 npm run test:mutation    # negative control: injected faults must be caught by the suite (or the compiler)
 npm run test:all         # build:all + both suites
 npm run release          # all suites + pack and verify the tarballs in release/
@@ -618,7 +641,9 @@ stdio MCP `tools/list` for real.
 | Reasoning effort never changes | The policy is unset (no intervention), or the caller pinned `reasoningEffort` explicitly |
 | System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page |
 | The in-panel guide is stale | `USER_GUIDE.md` changed without a rebuild; run `npm run build:all` |
-| A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`) |
+| A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`). `prune`/`detect_stagnation`/`status_ledger` are not tools any more and are refused by the validator |
+| `reflex_route` is missing from the default tool list | Expected: `route` is off by default; switch it on in the Tools page (or set `tools: { enabled: { route: true } }`) |
+| Looking for a `reflex_status_ledger` tool to read the ledger | The ledger is a command now: type `/reflex-ledger` (the stdio MCP side still has the tool of that name) |
 | The model selector still offers `reflex` after adaptive effort was switched off | That level was injected by the previous load; make sure the configuration is in effect and reload the plugin to revoke the injection |
 | Saving Interventions grew the configuration with defaults | Expected: that group is written back whole, so the mode and every budget are saved as shown |
 
@@ -631,4 +656,8 @@ stdio MCP `tools/list` for real.
 - Host contracts are declared as `peerDependencies`, so the plugin never bundles
   a second copy of Host modules;
 - The eight-tool stdio MCP surface has been frozen since v0.1.0; a Host-side
-  change must not silently alter its payloads.
+  change must not silently alter its payloads;
+- The DSH plugin-side tool surface, since v0.1.0-alpha.2, is **five switchable
+  capabilities with four registered by default** (`route` is off by default) and
+  the ledger is the `/reflex-ledger` command — that side does not promise to
+  mirror the MCP side item by item.

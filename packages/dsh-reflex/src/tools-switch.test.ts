@@ -13,7 +13,7 @@ import {
   type ReflexToolsConfig
 } from './config.js';
 import { createReflexHost, createToolContext, callTool } from './testing.js';
-import { REFLEX_TOOL_SUFFIXES, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
+import { REFLEX_TOOL_DEFAULT_ENABLED, REFLEX_TOOL_SUFFIXES, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
 import { applyReflex, type ReflexRuntime } from './index.js';
 
 /**
@@ -51,7 +51,7 @@ function probeTool(name: string) {
 /**
  * Load the plugin the way the Host loader does, so the activation can be
  * unloaded without tearing down the context it lives on.
- * @param ctx - context carrying `tools` and `llm`.
+ * @param ctx - context carrying `tools`, `llm`, and `commands`.
  * @param config - deployment config.
  * @returns the plugin fiber and its runtime.
  */
@@ -60,7 +60,7 @@ async function loadReflex(ctx: Context, config: ReflexConfig): Promise<{ fiber: 
   const fiber = await ctx.plugin(
     {
       name: 'dsh-reflex',
-      inject: ['tools', 'llm'],
+      inject: ['tools', 'llm', 'commands'],
       Config,
       apply: (inner: Context, innerConfig: ReflexConfig) => {
         created = applyReflex(inner, innerConfig);
@@ -72,24 +72,42 @@ async function loadReflex(ctx: Context, config: ReflexConfig): Promise<{ fiber: 
   return { fiber, runtime: created };
 }
 
-test('tools.enabled defaults to every tool on and rejects a switch it cannot honour', () => {
+test('tools.enabled takes the per-suffix default and answers every suffix', () => {
   const bare = resolveConfig({ backend: 'mock' });
-  assert.deepEqual(bare.tools, { enabled: all(true) }, 'an omitted map means every tool is on');
-  assert.deepEqual(enabledReflexToolSuffixes(bare), [...REFLEX_TOOL_SUFFIXES]);
-  assert.deepEqual(reflexToolNames(bare), REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`));
+  assert.deepEqual(bare.tools, { enabled: { ...REFLEX_TOOL_DEFAULT_ENABLED } }, 'an omitted map means "the default", not "all on"');
+  assert.equal(bare.tools.enabled.route, false, 'route is the documented exception');
+  assert.deepEqual(
+    enabledReflexToolSuffixes(bare),
+    REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route'),
+    'the default surface is the four recommended tools'
+  );
+  assert.deepEqual(
+    reflexToolNames(bare),
+    REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `reflex_${suffix}`)
+  );
 
-  const partial = resolveConfig({ backend: 'mock', tools: { enabled: { route: false, status_ledger: false } } });
-  assert.deepEqual(partial.tools.enabled.route, false);
-  assert.deepEqual(partial.tools.enabled.status_ledger, false, 'status_ledger is not forced on');
-  assert.deepEqual(partial.tools.enabled.choice, true, 'an unmentioned switch keeps its default');
-  assert.deepEqual(enabledReflexToolSuffixes(partial), REFLEX_TOOL_SUFFIXES.filter((s) => s !== 'route' && s !== 'status_ledger'));
+  const partial = resolveConfig({ backend: 'mock', tools: { enabled: { route: true, score: false } } });
+  assert.equal(partial.tools.enabled.route, true, 'the off-by-default suffix can be switched on');
+  assert.equal(partial.tools.enabled.score, false, 'an on-by-default suffix can be switched off');
+  assert.equal(partial.tools.enabled.choice, true, 'an unmentioned switch keeps its default');
+  assert.deepEqual(enabledReflexToolSuffixes(partial), REFLEX_TOOL_SUFFIXES.filter((s) => s !== 'score'));
 });
 
 test('an unknown or malformed switch is refused instead of silently ignored', () => {
   assert.throws(
     () => resolveConfig({ backend: 'mock', tools: { enabled: { route: false, teleport: true } } } as unknown as ReflexConfig),
-    /tools\.enabled has unknown tool switch "teleport"; legal suffixes are choice, score, route, screen, gate, prune, detect_stagnation, status_ledger/,
+    /tools\.enabled has unknown tool switch "teleport"; legal suffixes are choice, score, route, screen, gate/,
     'a typo must not silently leave the tool registered'
+  );
+  assert.throws(
+    () => resolveConfig({ backend: 'mock', tools: { enabled: { prune: false } } } as unknown as ReflexConfig),
+    /tools\.enabled has unknown tool switch "prune"/,
+    'a capability that is no longer a tool cannot be switched: pruning is an intervention, not a tool'
+  );
+  assert.throws(
+    () => resolveConfig({ backend: 'mock', tools: { enabled: { status_ledger: false } } } as unknown as ReflexConfig),
+    /tools\.enabled has unknown tool switch "status_ledger"/,
+    'the ledger is the /reflex-ledger command now'
   );
   assert.throws(
     () => resolveConfig({ backend: 'mock', tools: { enabled: { teleport: true, hologram: false } } } as unknown as ReflexConfig),
@@ -134,18 +152,23 @@ test('an unknown or malformed switch is refused instead of silently ignored', ()
 });
 
 test('a closed tool is unregistered while its siblings stay registered', async () => {
-  const host = await createReflexHost({ backend: 'mock', tools: { enabled: { gate: false, prune: false } } });
+  // One switch in each direction: gate (on by default) closed, route (off by
+  // default) opened.
+  const host = await createReflexHost({ backend: 'mock', tools: { enabled: { gate: false, route: true } } });
   try {
     assert.deepEqual(
       [...host.runtime.toolSurface],
-      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'gate' && suffix !== 'prune').map((suffix) => `reflex_${suffix}`),
+      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'gate').map((suffix) => `reflex_${suffix}`),
       'the runtime surface is the effective registration, in registration order'
     );
     assert.equal(host.ctx.tools.get('reflex_gate'), undefined, 'a closed tool is not in the registry at all');
-    assert.equal(host.ctx.tools.get('reflex_prune'), undefined);
+    assert.ok(host.ctx.tools.get('reflex_route'), 'the opt-in tool is registered once switched on');
     for (const suffix of REFLEX_TOOL_SUFFIXES) {
-      if (suffix === 'gate' || suffix === 'prune') continue;
+      if (suffix === 'gate') continue;
       assert.ok(host.ctx.tools.get(`reflex_${suffix}`), `${suffix} must survive its sibling's switch`);
+    }
+    for (const gone of ['prune', 'detect_stagnation', 'status_ledger']) {
+      assert.equal(host.ctx.tools.get(`reflex_${gone}`), undefined, `${gone} is not part of the vocabulary any more`);
     }
 
     const open = await host.callTool('reflex_choice', { question: 'Pick', options: ['a', 'b'] });
@@ -158,13 +181,15 @@ test('a closed tool is unregistered while its siblings stay registered', async (
 });
 
 test('the switch survives a toolPrefix rename because it is keyed by suffix', async () => {
-  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rx_', tools: { enabled: { route: false } } });
+  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rx_', tools: { enabled: { score: false } } });
   try {
     assert.deepEqual(
       [...host.runtime.toolSurface],
-      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `rx_${suffix}`)
+      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'score' && suffix !== 'route').map((suffix) => `rx_${suffix}`),
+      'the closed suffix and the opt-in suffix are both absent under the new prefix'
     );
-    assert.equal(host.ctx.tools.get('rx_route'), undefined);
+    assert.equal(host.ctx.tools.get('rx_score'), undefined);
+    assert.equal(host.ctx.tools.get('rx_route'), undefined, 'route still needs its explicit switch under a rename');
     assert.ok(host.ctx.tools.get('rx_choice'));
     assert.equal(host.ctx.tools.get('reflex_choice'), undefined, 'the default prefix is not registered as well');
   } finally {
@@ -192,7 +217,9 @@ test('the published surface keeps tracking the registry after a tools/change', a
   const ctx = await createToolContext();
   try {
     const runtime = applyReflex(ctx, { backend: 'mock', tools: { enabled: { score: false } } });
-    const expected = REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'score').map((suffix) => `reflex_${suffix}`);
+    const expected = REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'score' && suffix !== 'route').map(
+      (suffix) => `reflex_${suffix}`
+    );
     assert.deepEqual([...runtime.toolSurface], expected);
 
     // A registry change re-derives the surface from what is really registered:
@@ -212,7 +239,7 @@ test('closing, unloading, and reopening a tool leaves no duplicate registration'
     assert.equal(ctx.tools.get('reflex_gate'), undefined);
     assert.deepEqual(
       [...first.runtime.toolSurface],
-      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'gate').map((suffix) => `reflex_${suffix}`)
+      REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'gate' && suffix !== 'route').map((suffix) => `reflex_${suffix}`)
     );
 
     await first.fiber.dispose();
@@ -221,11 +248,11 @@ test('closing, unloading, and reopening a tool leaves no duplicate registration'
       assert.equal(ctx.tools.get(`reflex_${suffix}`), undefined, `${suffix} was released on unload`);
     }
 
-    const second = await loadReflex(ctx, { backend: 'mock' });
+    const second = await loadReflex(ctx, { backend: 'mock', tools: { enabled: { route: true } } });
     assert.deepEqual(
       [...second.runtime.toolSurface],
       REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`),
-      'reopening restores the full surface exactly once'
+      'reopening honours the switches again and restores exactly the full surface'
     );
     const reopened = ctx.tools.get('reflex_gate');
     assert.ok(reopened, 'the reopened tool is registered again');

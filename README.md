@@ -129,10 +129,10 @@ node dist/cli/index.js ledger
 ## 测试
 
 ```bash
-npm test                 # 根包：ledger / score / route / route-prompt / MCP 表面 / 打包清单（26 个测试）
-npm run test:plugin      # DSH 插件：注册、严格校验、8 个工具行为、生命周期、虚拟 provider 路由（含上下文感知与会话粘性）、设置面板与使用说明（186 个测试）
+npm test                 # 根包：ledger / score / route / route-prompt / MCP 表面 / 打包清单
+npm run test:plugin      # DSH 插件：注册、严格校验、工具面与 /reflex-ledger、生命周期、虚拟 provider 路由（含上下文感知与会话粘性）、设置面板与使用说明
 npm run test:all         # 构建根包 + 插件，然后跑两套测试
-npm run test:mutation    # 负向对照：注入 32 个故障，要求被测试（或编译器）抓住
+npm run test:mutation    # 负向对照：注入故障，要求被测试（或编译器）抓住
 ```
 
 ---

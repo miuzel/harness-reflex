@@ -11,13 +11,17 @@ import {
   type ReflexConfig
 } from './config.js';
 import * as plugin from './index.js';
-import { createReflexHost, resultValue } from './testing.js';
-import { REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
+import { createReflexHost } from './testing.js';
+import { REFLEX_TOOL_DEFAULT_ENABLED, REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
 import type { ReflexLedgerResult } from './bridge.js';
 
 test('plugin module satisfies the Cordis Host plugin contract', () => {
   assert.equal(plugin.name, 'dsh-reflex');
-  assert.deepEqual(plugin.inject, ['tools', 'llm'], 'routing needs the LLM runtime service');
+  assert.deepEqual(
+    plugin.inject,
+    ['tools', 'llm', 'commands'],
+    'routing needs the LLM runtime service, and /reflex-ledger needs the command registry'
+  );
   assert.equal(typeof plugin.apply, 'function');
   assert.equal(typeof plugin.Config, 'function');
   assert.equal(typeof plugin.createReflexRuntime, 'function');
@@ -93,9 +97,11 @@ test('resolveConfig validates and fills every field', () => {
   assert.equal('setting' in resolved.effort, false, 'an unset marker must stay unset, not become a default level');
   assert.deepEqual(
     resolved.tools,
-    { enabled: Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, true])) },
-    'every tool is on unless it was switched off'
+    { enabled: { ...REFLEX_TOOL_DEFAULT_ENABLED } },
+    'every omitted switch takes its documented default: route is the one that starts off'
   );
+  assert.equal(resolved.tools.enabled.route, false, 'route is opt-in');
+  assert.equal(resolved.tools.enabled.choice, true, 'the other four stay on');
 });
 
 test('Config accepts the reflex/auto marker and every effort level', () => {
@@ -146,32 +152,34 @@ test('resolveConfig normalizes the effort marker and refuses a broken block', ()
   );
 });
 
-test('the eight reflexive capabilities use the MCP-compatible names', () => {
+test('the five reflexive capabilities use the MCP-compatible names', () => {
   assert.deepEqual(
     reflexToolNames(resolveConfig({ backend: 'mock' })).sort(),
-    [
-      'reflex_choice',
-      'reflex_detect_stagnation',
-      'reflex_gate',
-      'reflex_prune',
-      'reflex_route',
-      'reflex_score',
-      'reflex_screen',
-      'reflex_status_ledger'
-    ].sort()
+    ['reflex_choice', 'reflex_gate', 'reflex_score', 'reflex_screen'].sort(),
+    'the default surface is the four recommended tools: route is opt-in'
   );
-  assert.equal(REFLEX_TOOL_SUFFIXES.length, 8);
   assert.deepEqual(
-    reflexToolNames(resolveConfig({ backend: 'mock', toolPrefix: 'rv_' })),
+    reflexToolNames(resolveConfig({ backend: 'mock', tools: { enabled: { route: true } } })).sort(),
+    REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`).sort(),
+    'turning route on restores the full five-tool vocabulary'
+  );
+  assert.equal(REFLEX_TOOL_SUFFIXES.length, 5);
+  assert.deepEqual(
+    reflexToolNames(resolveConfig({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } })),
     REFLEX_TOOL_SUFFIXES.map((suffix) => `rv_${suffix}`)
   );
 });
 
-test('apply registers every tool with a model-visible description', async () => {
+test('apply registers every enabled tool with a model-visible description', async () => {
   const host = await createReflexHost({ backend: 'mock' });
   try {
     const names = reflexToolNames(resolveConfig({ backend: 'mock' }));
+    assert.equal(names.length, 4, 'only the default-on tools are registered');
     assert.deepEqual([...host.runtime.toolSurface], names);
+    assert.equal(host.ctx.tools.get('reflex_route'), undefined, 'route is not registered by default');
+    assert.equal(host.ctx.tools.get('reflex_prune'), undefined, 'prune is no longer a tool at all');
+    assert.equal(host.ctx.tools.get('reflex_detect_stagnation'), undefined);
+    assert.equal(host.ctx.tools.get('reflex_status_ledger'), undefined);
     assert.equal(host.runtime.ledger.getLogPath(), null, 'the ledger stays in memory unless a path is configured');
 
     for (const name of names) {
@@ -188,7 +196,7 @@ test('apply registers every tool with a model-visible description', async () => 
 });
 
 test('a custom prefix renames the surface and leaves the defaults unregistered', async () => {
-  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rv_' });
+  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } });
   try {
     for (const suffix of REFLEX_TOOL_SUFFIXES) {
       assert.ok(host.ctx.tools.get(`rv_${suffix}`), `rv_${suffix} should be registered`);
@@ -202,7 +210,9 @@ test('a custom prefix renames the surface and leaves the defaults unregistered',
 test('an explicit ledgerPath is honoured by the activation', async () => {
   const host = await createReflexHost({ backend: 'mock', ledgerPath: 'unused.jsonl' });
   try {
-    const result = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', {}));
+    // The ledger is read through the runtime, which is what /reflex-ledger does;
+    // there is no status_ledger tool to read it through any more.
+    const result: ReflexLedgerResult = host.runtime.statusLedger({ includeEntries: true });
     assert.equal(result.summary.totalCalls, 0);
     assert.equal(host.runtime.ledger.getLogPath(), 'unused.jsonl');
   } finally {

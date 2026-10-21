@@ -114,7 +114,8 @@ test('both guide revisions document the same thirteen sections', () => {
     'actualSavedTokens',
     'fail-open',
     'reflex_route',
-    'reflex_status_ledger'
+    'reflex_status_ledger',
+    '/reflex-ledger'
   ];
   for (const document of [zh, en]) {
     for (const token of required) {

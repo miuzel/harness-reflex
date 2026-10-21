@@ -24,6 +24,7 @@ import {
   INTERVENTION_SETTINGS,
   REFLEX_TOOL_SUFFIXES,
   TOOL_ADVICE,
+  TOOL_DEFAULT_ENABLED,
   interpolate,
   ledgerRows,
   levelTone,
@@ -962,7 +963,7 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
 
 /** Dictionary key of one advice label. */
 function toolAdviceKey(advice: ToolAdvice): string {
-  return advice === 'expose' ? 'toolAdviceExpose' : advice === 'covered' ? 'toolAdviceCovered' : 'toolAdviceDiagnostic';
+  return advice === 'expose' ? 'toolAdviceExpose' : 'toolAdviceOptional';
 }
 
 /**
@@ -973,9 +974,7 @@ function toolAdviceKey(advice: ToolAdvice): string {
 function toolAdviceTone(advice: ToolAdvice): string {
   return advice === 'expose'
     ? token('--dsw-alias-state-success-primary', '#4ade80')
-    : advice === 'covered'
-      ? token('--dsw-alias-label-tertiary', '#8a8a8a')
-      : token('--dsw-alias-state-warn-primary', '#d9a441');
+    : token('--dsw-alias-state-warn-primary', '#d9a441');
 }
 
 /** Tool-switch page: one toggle per reflex tool, plus the effective registration. */
@@ -1024,7 +1023,10 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
                 'div',
                 { style: S.toolHead },
                 Toggle({
-                  checked: draft.tools.enabled[suffix] !== false,
+                  // The switch shows the *effective* state, so a suffix the
+                  // deployment never mentioned reads its documented default
+                  // (`route` starts off) instead of an unconditional "on".
+                  checked: draft.tools.enabled[suffix] ?? TOOL_DEFAULT_ENABLED[suffix],
                   label: `${draft.runtime.toolPrefix}${suffix}`,
                   disabled,
                   onChange: (checked) => setTool(suffix, checked)
@@ -1038,7 +1040,10 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
               h('span', { style: S.toolWhat }, t(`toolWhat_${suffix}`)),
               h('span', { style: S.hint }, t(`toolWhen_${suffix}`))
             );
-          })
+          }),
+          // The ledger is not a tool any more, so this page points at where it
+          // went instead of listing a switch for it.
+          h('div', { style: S.hint }, t('toolsLedgerHint'))
         )
       )
     }),

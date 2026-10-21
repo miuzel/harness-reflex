@@ -98,52 +98,59 @@ export const INTERVENTION_CAPABILITIES = ['stagnation', 'prune', 'gate', 'closin
 /** One capability name in the panel vocabulary. */
 export type PanelInterventionCapability = (typeof INTERVENTION_CAPABILITIES)[number];
 
-/** The eight tool suffixes, in registration order. Restated; see above. */
-export const REFLEX_TOOL_SUFFIXES = [
-  'choice',
-  'score',
-  'route',
-  'screen',
-  'gate',
-  'prune',
-  'detect_stagnation',
-  'status_ledger'
-] as const;
+/** The five tool suffixes this plugin registers, in registration order. Restated; see above. */
+export const REFLEX_TOOL_SUFFIXES = ['choice', 'score', 'route', 'screen', 'gate'] as const;
 
 /** One tool suffix in the panel vocabulary. */
 export type PanelToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
 
 /**
+ * Whether one suffix is registered when the deployment says nothing about it.
+ *
+ * Restated from the Host's own table (`REFLEX_TOOL_DEFAULT_ENABLED` in
+ * `src/tools.ts`), because the page is a separate compilation unit: `route` is
+ * the one capability the default activation leaves off. The page reads the live
+ * value from the Host and uses this table only where a value is missing, so a
+ * wrong entry here would show up as a wrong switch, not as a wrong write.
+ */
+export const TOOL_DEFAULT_ENABLED: Record<PanelToolSuffix, boolean> = {
+  choice: true,
+  score: true,
+  route: false,
+  screen: true,
+  gate: true
+};
+
+/**
  * What the panel advises doing with one tool.
  *
- * - `expose`: the agent reaches for it in normal work;
- * - `covered`: the automatic intervention layer already does this, so a manual
- *   call is usually redundant;
- * - `diagnostic`: it exists for a human reading the page or the ledger.
+ * - `expose`: the agent reaches for it in normal work, and the recommended set
+ *   keeps it on;
+ * - `optional`: it works, and the recommended set leaves it off until someone
+ *   decides the deployment needs it.
  */
-export type ToolAdvice = 'expose' | 'covered' | 'diagnostic';
+export type ToolAdvice = 'expose' | 'optional';
 
 /**
  * The advice shown next to each suffix, and the basis of "apply the recommended
- * set". Advice is not configuration: it never writes anything, and the default
- * deployment stays "all eight on".
+ * set". Advice is not configuration: it never writes anything, and it agrees
+ * with the Host default — four suffixes on, `route` off.
  */
 export const TOOL_ADVICE: Record<PanelToolSuffix, ToolAdvice> = {
   choice: 'expose',
   score: 'expose',
-  route: 'expose',
+  route: 'optional',
   screen: 'expose',
-  gate: 'expose',
-  prune: 'covered',
-  detect_stagnation: 'covered',
-  status_ledger: 'diagnostic'
+  gate: 'expose'
 };
 
 /**
  * The switch each suffix takes when the recommended set is applied.
  *
  * Derived from {@link TOOL_ADVICE} rather than written out a second time, so the
- * button and the labels can never disagree about what is recommended.
+ * button and the labels can never disagree about what is recommended. The result
+ * is the documented default: `choice`, `score`, `screen`, and `gate` on,
+ * `route` off.
  * @returns suffix → enabled.
  */
 export function recommendedToolSwitches(): Record<string, boolean> {
@@ -176,7 +183,7 @@ export interface InterventionsDraft {
  * `toolPrefix` must not have to rewrite its switches.
  */
 export interface ToolsDraft {
-  /** Suffix → enabled. Every suffix is present; `true` is the default. */
+  /** Suffix → enabled. Every suffix is present; see {@link TOOL_DEFAULT_ENABLED}. */
   enabled: Record<string, boolean>;
 }
 
@@ -217,9 +224,9 @@ export const DRAFT_GROUPS: readonly (keyof PanelDraft)[] = [
   'tools'
 ];
 
-/** Every tool suffix enabled, which is the documented default. */
-function allToolsEnabled(): Record<string, boolean> {
-  return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, true]));
+/** Every tool suffix at its documented default, which is what an omitted block means. */
+function defaultToolSwitches(): Record<string, boolean> {
+  return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, TOOL_DEFAULT_ENABLED[suffix]]));
 }
 
 /** Every capability inheriting the master mode, which is the documented default. */
@@ -248,7 +255,7 @@ export const EMPTY_DRAFT: PanelDraft = {
     pruneTailChars: '400',
     intent: ''
   },
-  tools: { enabled: allToolsEnabled() }
+  tools: { enabled: defaultToolSwitches() }
 };
 
 /** Read a plain object field. */
@@ -424,7 +431,7 @@ export function draftFromConfig(value: unknown): PanelDraft {
     },
     tools: {
       enabled: Object.fromEntries(
-        REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, asBoolean(authoredTools[suffix], true)])
+        REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, asBoolean(authoredTools[suffix], TOOL_DEFAULT_ENABLED[suffix])])
       )
     }
   };
@@ -663,12 +670,16 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
       return [{ path: [group], value: section }];
     }
     case 'tools': {
-      // Enabled is the default, so only the closed tools are authored. Reopening
-      // a tool therefore *removes* its key, which is what "back to default"
-      // means here — and what keeps a later change of the default effective.
+      // Only departures from the documented default are authored, in either
+      // direction: `route` starts off, so switching it on stores `true`, while
+      // the other four start on and switching one off stores `false`. Returning
+      // a switch to its default therefore *removes* its key, which is what "back
+      // to default" means here — and what keeps a later change of the default
+      // effective.
       const enabled: Record<string, boolean> = {};
       for (const suffix of REFLEX_TOOL_SUFFIXES) {
-        if (draft.tools.enabled[suffix] === false) enabled[suffix] = false;
+        const value = draft.tools.enabled[suffix] ?? TOOL_DEFAULT_ENABLED[suffix];
+        if (value !== TOOL_DEFAULT_ENABLED[suffix]) enabled[suffix] = value;
       }
       return [{ path: [group], value: { enabled } }];
     }

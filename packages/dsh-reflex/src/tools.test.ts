@@ -17,8 +17,16 @@ const BULKY_OUTPUT = [
 ].join('\n');
 
 /**
+ * The route capability is off by default, so the two suites that exercise
+ * `reflex_route` ask for it explicitly. Every other suite runs on the surface a
+ * default deployment exposes.
+ */
+const ROUTE_ENABLED = { backend: 'mock' as const, tools: { enabled: { route: true } } };
+
+/**
  * Run one assertion body against a fresh mock-backed host.
  * @param body - receives the host; the host is disposed afterwards.
+ * @param config - deployment config; defaults to the mock backend and the default tool surface.
  */
 async function withHost(body: (host: ReflexTestHost) => Promise<void>, config = { backend: 'mock' as const }): Promise<void> {
   const host = await createReflexHost(config);
@@ -97,7 +105,7 @@ test('reflex_route ranks candidates against the goal and honours topK', async ()
     for (const ranked of result.rankedCandidates) assert.ok(names.includes(ranked.name));
     assert.ok(result.rankedCandidates[0].score >= result.rankedCandidates[1].score);
     assert.equal(result.bestCandidate, result.rankedCandidates[0].name);
-  });
+  }, ROUTE_ENABLED);
 });
 
 test('reflex_screen flags prompt injection and fences the payload', async () => {
@@ -150,11 +158,11 @@ test('reflex_gate verifies matching evidence and fails closed on contradiction',
   });
 });
 
-test('reflex_prune measures the reduction and shadow mode keeps the raw text', async () => {
+test('the prune service measures the reduction and shadow mode keeps the raw text', async () => {
   await withHost(async (host) => {
-    const pruned = resultValue<ReflexPruneResult>(
-      await host.callTool('reflex_prune', { rawOutput: BULKY_OUTPUT, intent: 'compiler error' })
-    );
+    // Pruning is a service the intervention layer drives, not a tool. These are
+    // the same requests the removed reflex_prune tool used to forward.
+    const pruned = await host.runtime.prune({ rawOutput: BULKY_OUTPUT, intent: 'compiler error' });
     assert.equal(pruned.shadow, false);
     assert.ok(pruned.tokensSaved > 0, `expected savings, got ${pruned.tokensSaved}`);
     assert.ok(pruned.processedOutput.length < BULKY_OUTPUT.length);
@@ -163,14 +171,10 @@ test('reflex_prune measures the reduction and shadow mode keeps the raw text', a
     assert.doesNotMatch(pruned.processedOutput, /\[====/, 'progress bars are dropped');
     assert.match(pruned.reductionPercentage, /^\d+(\.\d+)?%$/);
 
-    const withInternals = resultValue<ReflexPruneResult>(
-      await host.callTool('reflex_prune', { rawOutput: BULKY_OUTPUT, intent: 'node_modules typescript internals' })
-    );
+    const withInternals = await host.runtime.prune({ rawOutput: BULKY_OUTPUT, intent: 'node_modules typescript internals' });
     assert.match(withInternals.processedOutput, /node_modules\/typescript/, 'an intent that names internals keeps them');
 
-    const shadow = resultValue<ReflexPruneResult>(
-      await host.callTool('reflex_prune', { rawOutput: BULKY_OUTPUT, intent: 'compiler error', shadowMode: true })
-    );
+    const shadow = await host.runtime.prune({ rawOutput: BULKY_OUTPUT, intent: 'compiler error', shadowMode: true });
     assert.equal(shadow.shadow, true);
     assert.equal(shadow.processedOutput, BULKY_OUTPUT);
     assert.equal(shadow.tokensSaved, pruned.tokensSaved);
@@ -178,7 +182,7 @@ test('reflex_prune measures the reduction and shadow mode keeps the raw text', a
     // The tool hands the reduced text back, so it books the reduction it returns; only the
     // hook path, which cannot know whether the floor installs, is measure-only. A withheld
     // shadow measurement books nothing, and the size it measured stays readable.
-    const ledger = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', { includeEntries: true }));
+    const ledger = host.runtime.statusLedger({ includeEntries: true });
     const prunes = (ledger.recentEntries ?? []).filter((entry) => entry.type === 'prune');
     assert.equal(prunes.length, 3, 'every tool call is audited');
     assert.deepEqual(
@@ -195,42 +199,21 @@ test('reflex_prune measures the reduction and shadow mode keeps the raw text', a
   });
 });
 
-test('reflex_detect_stagnation trips on a repeated identical action', async () => {
+test('the stagnation service trips on a repeated identical action', async () => {
   await withHost(async (host) => {
     const recentAction = { tool: 'bash', input: 'npm test', output: 'fail 1', error: 'exit 1' };
 
-    const first = resultValue<StagnationCheckResponse>(await host.callTool('reflex_detect_stagnation', { recentAction, goal: 'green tests' }));
+    const first = await host.runtime.detectStagnation({ recentAction, goal: 'green tests' });
     assert.equal(first.isStuck, false);
-    await host.callTool('reflex_detect_stagnation', { recentAction, goal: 'green tests' });
-    const third = resultValue<StagnationCheckResponse>(await host.callTool('reflex_detect_stagnation', { recentAction, goal: 'green tests' }));
+    await host.runtime.detectStagnation({ recentAction, goal: 'green tests' });
+    const third = await host.runtime.detectStagnation({ recentAction, goal: 'green tests' });
 
     assert.equal(third.isStuck, true);
     assert.equal(third.patternType, 'repetition');
     assert.match(third.recommendedIntervention ?? '', /alternative tool|interrupt/i);
 
-    const ledger = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', {}));
+    const ledger = host.runtime.statusLedger({});
     assert.equal(ledger.summary.stagnationAlerts, 1);
-  });
-});
-
-test('reflex_status_ledger audits the decisions this activation recorded', async () => {
-  await withHost(async (host) => {
-    await host.callTool('reflex_choice', { question: 'Ship it?', options: ['yes', 'no'] });
-    await host.callTool('reflex_prune', { rawOutput: BULKY_OUTPUT, intent: 'compiler error' });
-
-    const summary = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', {}));
-    assert.equal(summary.summary.totalCalls, 2);
-    assert.deepEqual(summary.summary.callsByType, { choice: 1, prune: 1 });
-    assert.ok(summary.summary.totalTokensSaved > 0);
-    assert.ok(summary.summary.estimatedCostSavedUsd >= 0);
-    assert.equal(summary.recentEntries, undefined);
-
-    const detailed = resultValue<ReflexLedgerResult>(await host.callTool('reflex_status_ledger', { includeEntries: true }));
-    assert.equal(detailed.recentEntries?.length, 2);
-    assert.deepEqual(
-      detailed.recentEntries?.map((entry) => entry.type),
-      ['choice', 'prune']
-    );
   });
 });
 
@@ -256,17 +239,7 @@ test('every tool rejects undeclared, missing, mistyped, and out-of-enum argument
       { name: 'reflex_screen', args: { content: 'x', source: 'telepathy' }, expected: /"source" must be one of/ },
       { name: 'reflex_screen', args: { content: 'x', strict: 'yes' }, expected: /"strict" must be a boolean/ },
       { name: 'reflex_gate', args: { assertions: [], evidence: 12 }, expected: /"evidence" must be a string/ },
-      { name: 'reflex_gate', args: { assertions: [{ statement: 's', nope: 1 }], evidence: 'e' }, expected: /assertions\[0\]\.nope/ },
-      { name: 'reflex_prune', args: { rawOutput: 5 }, expected: /"rawOutput" must be a string/ },
-      { name: 'reflex_prune', args: { rawOutput: 'x', shadowMode: 'on' }, expected: /"shadowMode" must be a boolean/ },
-      {
-        name: 'reflex_detect_stagnation',
-        args: { recentAction: { tool: 'bash', input: 'ls', extra: true } },
-        expected: /recentAction\.extra/
-      },
-      { name: 'reflex_detect_stagnation', args: { recentAction: { tool: 'bash' } }, expected: /missing required property "recentAction.input"/ },
-      { name: 'reflex_status_ledger', args: { includeEntries: 'yes' }, expected: /"includeEntries" must be a boolean/ },
-      { name: 'reflex_status_ledger', args: { extra: 1 }, expected: /"extra" is not declared/ }
+      { name: 'reflex_gate', args: { assertions: [{ statement: 's', nope: 1 }], evidence: 'e' }, expected: /assertions\[0\]\.nope/ }
     ];
 
     for (const { name, args, expected } of cases) {
@@ -275,10 +248,10 @@ test('every tool rejects undeclared, missing, mistyped, and out-of-enum argument
       assert.match(resultText(result), expected, `${name} rejection message for ${JSON.stringify(args)}`);
     }
 
-    // The registry stayed healthy: a valid call still succeeds after 18 rejections.
+    // The registry stayed healthy: a valid call still succeeds after 12 rejections.
     const stillWorks = await host.callTool('reflex_choice', { question: 'Pick one', options: ['a', 'b'] });
     assert.equal(stillWorks.isError, false);
-  });
+  }, ROUTE_ENABLED);
 });
 
 test('unknown tool names fail loudly rather than silently no-op', async () => {

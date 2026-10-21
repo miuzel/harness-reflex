@@ -39,35 +39,43 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 334;
+const EXPECTED_TESTS = 340;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
   {
     name: 'drop-tool-at-registration',
-    area: 'registers all eight tools',
+    area: 'registers every enabled tool',
     file: 'src/index.ts',
     from: 'defineReflexTools(runtime, resolved).map(',
-    to: 'defineReflexTools(runtime, resolved).slice(0, 7).map('
+    to: 'defineReflexTools(runtime, resolved).slice(0, 3).map('
   },
   {
-    name: 'drop-tool-from-suffix-list',
-    area: 'surface list stays complete',
+    name: 'route-default-drift',
+    area: 'the opt-in tool stays off until it is asked for',
     file: 'src/tools.ts',
-    from: "  'status_ledger'\n",
-    to: ''
+    from: '  route: false,',
+    to: '  route: true,'
+  },
+  {
+    name: 'ledger-command-unregistered',
+    area: 'the ledger is reachable as /reflex-ledger',
+    file: 'src/index.ts',
+    from: '    const unregisterLedger = installLedgerCommand(ctx, runtime);',
+    to: '    const unregisterLedger = () => {};'
   },
   {
     name: 'no-teardown',
     area: 'reversible lifecycle',
     file: 'src/index.ts',
     // The complete teardown, in its current order: stopping the observer is the
-    // one step that survives, so the fault leaves routing, the intervention hooks,
-    // the panel and the runtime mounted after unload.
+    // one step that survives, so the fault leaves routing, the ledger command,
+    // the intervention hooks, the panel and the runtime mounted after unload.
     from: [
       '    return () => {',
       '      stopObserving();',
       '      stopRouting();',
+      '      unregisterLedger();',
       '      for (const dispose of interventions.disposers.reverse()) dispose();',
       '      unmountPanel();',
       '      for (const dispose of disposers.reverse()) dispose();',
@@ -370,7 +378,7 @@ const MUTATIONS = [
     name: 'tool-switch-ignores-close',
     area: 'a switched-off tool is not registered',
     file: 'src/tools.ts',
-    from: '  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] !== false);',
+    from: '  return REFLEX_TOOL_SUFFIXES.filter((suffix) => config.tools?.enabled?.[suffix] ?? REFLEX_TOOL_DEFAULT_ENABLED[suffix]);',
     to: '  return [...REFLEX_TOOL_SUFFIXES];'
   }
 ];

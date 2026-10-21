@@ -5,6 +5,7 @@ import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSyst
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
 import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
+import { installLedgerCommand } from './command.js';
 import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
 import { appendInterventionRecord, appendPrunedOriginal } from './session-audit.js';
@@ -16,10 +17,10 @@ import { installActualProjection } from './actual-projection.js';
  *
  * One activation owns one {@link ReflexRuntime} — its backend, ledger, the five
  * decision services, and the virtual→physical model router — and registers the
- * eight `reflex_*` tools on `ctx.tools`. Everything is created inside a single
+ * `reflex_*` tools on `ctx.tools`. Everything is created inside a single
  * `ctx.effect`, so unloading the plugin (or disposing the context) unregisters
  * every tool, detaches the `tools/change` observer, releases the virtual
- * provider route, and drops the runtime whole.
+ * provider route, unregisters `/reflex-ledger`, and drops the runtime whole.
  *
  * @module dsh-reflex
  */
@@ -28,11 +29,12 @@ import { installActualProjection } from './actual-projection.js';
 export const name = 'dsh-reflex';
 
 /**
- * The runtime needs the tool registry and, for model routing, the LLM service:
- * the virtual provider is a real provider route on `ctx.llm`, and the
- * dispatch-level layer delegates through `ctx.llm.stream`.
+ * The runtime needs the tool registry, the LLM service for model routing, and
+ * the command registry for `/reflex-ledger`: the virtual provider is a real
+ * provider route on `ctx.llm`, and the ledger command is a Host-rendered command
+ * that never reaches the model.
  */
-export const inject = ['tools', 'llm'];
+export const inject = ['tools', 'llm', 'commands'];
 
 export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
 export type { ReflexToolsConfig, ResolvedToolsConfig } from './config.js';
@@ -55,6 +57,13 @@ export type {
 } from './interventions.js';
 export type { InterventionAuditRecord } from './session-audit.js';
 export { createBackend } from './bridge.js';
+export {
+  LEDGER_COMMAND_ENTRIES,
+  REFLEX_LEDGER_COMMAND,
+  REFLEX_LEDGER_COMMAND_DESCRIPTION,
+  formatLedgerReport,
+  installLedgerCommand
+} from './command.js';
 export {
   PANEL_BASE,
   PANEL_LEDGER_WINDOW,
@@ -221,6 +230,10 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     });
 
     const stopRouting = installRouting(ctx, runtime, resolved.routing.maxTaskChars);
+    // The ledger is an audit question a person asks, not a decision the model
+    // makes, so it is a Host command instead of a tool: `/reflex-ledger` reads
+    // the same runtime and never opens a turn.
+    const unregisterLedger = installLedgerCommand(ctx, runtime);
     // The automatic half of the plugin: the same System 1 judgments, spent at the
     // Host's own hook points instead of waiting for the model to call a tool. The
     // installer registers nothing when every capability is `off`, so an inactive
@@ -228,8 +241,8 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     const interventions = installInterventions(ctx, {
       config: resolved.interventions,
       pruneThreshold: resolved.pruneThreshold,
-      // The eight tools of this plugin are already the optimizer's own output:
-      // judging them again would spend a second judgment on the same payload.
+      // The tools of this plugin are already the optimizer's own output: judging
+      // them again would spend a second judgment on the same payload.
       ownTools: reflexToolNames(resolved),
       stagnation: runtime.stagnationService,
       prune: runtime.pruneService,
@@ -262,6 +275,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     return () => {
       stopObserving();
       stopRouting();
+      unregisterLedger();
       for (const dispose of interventions.disposers.reverse()) dispose();
       unmountPanel();
       for (const dispose of disposers.reverse()) dispose();

@@ -542,3 +542,21 @@ g-006（路由上下文感知与会话粘性）增量：
 | S3 + P9 先定目标模型、读其声明档位、**在声明集合内**自适应，不常态化 `snapped`；纯逐字复述深度关键词须判 `off`/`low` | `src/effort.ts`：#decideTurn 对逐字复述轮次**先短路**（不咨询 System 1，理由写进台账）、`#askSystemOne` 在置信度地板之后追加「必须超过 `1/候选数` 均分基线」的否决、`buildEffortChoiceOptions(efforts?)` 按目标模型声明的档位收敛候选（邻居吸附）、`VERBATIM_INSTRUCTION` 扩到 `原样发给我/原样发给/原样输出/原文照抄/照抄` | `effort-model-levels.test.ts`：中文深度轮次读 System 1 词汇（`source==='system-one'`、`confidence > 1/3`、`high`）而非坍缩到首候选；「只与均分持平」的答案在任何候选数下都不被信任（GPT/FULL/DEEPSEEK → `cue-fallback`，reason 命中 `/floor|baseline/`；对照组 0.5 → `system-one` + `low`）；简报点名的每种复述措辞都保住低成本档（`cleaned.verbatim === true`，`off|low`，`outcome 'supported'`） |
 | S4 有思考能力的物理模型与虚拟模型都在模型选择器里提供 `reflex` 自适应档；无思考能力模型不显示；固定物理模型只调档位不改路由；策略跨切换/恢复保持且不覆盖显式档位 | `src/routing.ts` 的 `installAdaptiveEffortSurface` 包装 `resolveModelInfo`（只在**已声明 reasoning** 的模型前面插入 `{id:'reflex', name:'Reflex (Auto)'}`，`defaultEffort` 保持适配器原值）、`resolveCallConfig`/`prepareCall`（把标记还原成目标模型声明集合内的档位）；`src/virtual-adapter.ts` 的虚拟模型声明 `reflex` 选择且**不带** `defaultEffort`（带上的话会打断 `markAgentLoopRequest` 的请求同一性）；`model/selection` 回放：日志里是 `reflex` 则重新武装自适应，是具体等级则解除 | `adaptive-effort-surface.test.ts`（7 条）：思考路由首位是 `Reflex (Auto)` 且既有档位与默认值存活、无 reasoning 的路由完全不出现档位、未激活时不发明 `reasoningEffort`、显式物理选择不被改写、`prepareCall` 后请求同一性保持 |
 | 接口一致性 / 版本 / 序列化 / 打包 / 真机 | `reflex_detect_stagnation` 增加可选 `history`（`MAX_HISTORY=30`，`mergeHistory`）；版本 `0.1.0-alpha.2`；DeepSeek/GPT 序列化载荷结构化验证；四套命令全绿；`release/` 只留 alpha.2 产物 | `npm run build:all` exit 0（`client.js (172049 bytes, 8 modules, externals: react)`）；`npm test` = 58/58；`npm run test:plugin` = 219/219；`npm run release:pack` = 26/26（`harness-reflex-0.1.0-alpha.2.tgz` 68 entries、`dsh-reflex-0.1.0-alpha.2.tgz` 90 entries）；`provider-serialization.test.ts`（4 条，缺失 SDK 时按 NT 跳过并显式声明）；**真机**：`tmp/dsh-home` 装 alpha.2 tarball 起 `dsh web --port 3099`，面板显示 `v0.1.0-alpha.2`、`/dsh-reflex/api/health` 返回 `{"name":"dsh-reflex","version":"0.1.0-alpha.2"}`、配置池后模型选择器出现「Reflex (System 1 router) → reflex-auto」、插件页状态条 `激活·reflex·mock-heuristic-v1`、池 `reflex-auto 2 候选`（截图 `tmp/e2e-reflex-panel-3099.png`）；有意保留的取舍：固定物理模型下需在选择器里选 `reflex` 才进入自适应，选具体等级即钉死 |
+
+## 14. 能力开关设置面与插件侧工具面收敛（g-009）
+
+> **本节起，插件侧的工具面以本节为准。** 第 1/2 节的「8 个原生工具」是 g-001 交付时的事实，
+> 此后已收敛；stdio MCP 侧仍是自 v0.1.0 起冻结的 8 个工具，两者不再逐项对齐。
+
+- 插件侧注册 **5 个可开关能力、默认 4 个**：`choice`/`score`/`screen`/`gate` 默认开启，`route`
+  默认关闭（`src/tools.ts` 的 `REFLEX_TOOL_DEFAULT_ENABLED`；面板工具开关页里它是唯一起始关闭项，
+  「应用推荐组合」= 该默认值，草稿等于默认时不写任何配置）。
+- `reflex_prune`、`reflex_detect_stagnation`、`reflex_status_ledger` 三个**工具从插件侧移除**：
+  剪枝与停滞检测由自动干预层直接调用 `ReflexRuntime` 的服务实例（`interventions.ts` 本轮未改动，
+  干预行为不变），台账改为 `/reflex-ledger` 命令（`src/command.ts`：注册进 Host 的 `commands`
+  服务、无参数、直接读运行时并渲染为文本、**不经过模型**、随 `unregisterLedger()` 在卸载时注销）。
+- `tools.enabled` 只接受这 5 个后缀（`route` 之外的后缀如 `prune`/`status_ledger` 会被校验器拒绝）；
+  写入只记录**与该后缀默认值不同**的项，两个方向都支持（关闭默认开启项写 `false`，打开 `route` 写 `true`）。
+- 依赖与注入：`peerDependencies` 增加 `@deepseek-ai/dsh-commands`（`>=0.2.0-alpha.0 <0.2.2`），
+  `src/index.ts` 的 `inject` 增加 `'commands'`，`scripts/link-dsh-deps.mjs` 的 `HOST_MODULES` 同步。
+- `src/mcp/server.ts`（stdio MCP 表面）**未改动**，`src/mcp/server.test.ts` 的 8 工具冻结断言保持。

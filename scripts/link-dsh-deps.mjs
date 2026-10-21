@@ -35,6 +35,7 @@ const HOST_MODULES = [
   '@deepseek-ai/cosmokit',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-client-modules',
+  '@deepseek-ai/dsh-commands',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session',
