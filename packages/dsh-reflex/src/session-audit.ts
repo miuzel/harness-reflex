@@ -140,6 +140,15 @@ export interface InterventionAuditRecord {
    * `no-reduction` skip, where nothing was installed at all.
    */
   floorMissed?: boolean;
+  /**
+   * Whether a floor-missed install had to drop its locator marker.
+   *
+   * The marker is what tells a reader that a prune happened and where the full
+   * payload lives. A candidate that fits only without it is still installed, and
+   * this field records the omission instead of leaving it silent. Only ever
+   * present with `floorMissed: true`.
+   */
+  markerOmitted?: boolean;
   memoHit?: boolean;
   agentId?: string;
   turn?: number;

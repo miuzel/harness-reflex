@@ -210,6 +210,8 @@ export interface InterventionPlan {
     floorApplied?: boolean;
     /** Whether the reduction was installed short of the floor's promised share. */
     floorMissed?: boolean;
+    /** Whether a floor miss had to omit its locator marker to stay smaller. */
+    markerOmitted?: boolean;
     turn?: number;
     step?: number;
     /** Which judging path produced the prune candidate. */
@@ -265,6 +267,8 @@ export interface InterventionSkipDetail {
   floored?: boolean;
   /** Whether the installed reduction fell short of the floor's promised share. */
   floorMissed?: boolean;
+  /** Whether a floor miss had to omit its locator marker to stay smaller. */
+  markerOmitted?: boolean;
   /** Which judging path produced the candidate. */
   judgePath?: 'segmented' | 'local' | 'fallback';
   /** Segments handed to System One by the judgment. */
@@ -970,6 +974,15 @@ export interface PruneFloorPlan {
    * the form whose size the plan promised.
    */
   markerChars: number;
+  /**
+   * Whether a floor-missed install wanted the locator marker but could not carry it.
+   *
+   * The marker is what tells a reader that the reduction happened and where the
+   * full payload lives, so a candidate that fits only *without* it is still
+   * installed — the reduction is real — but the omission is recorded instead of
+   * being silently dropped. Always `false` when `floorMissed` is false.
+   */
+  markerOmitted: boolean;
 }
 
 /** The floor options shared by the plan and the composition. */
@@ -1035,12 +1048,27 @@ export function pruneFloorPlan(
       omittedChars: originalChars - candidateChars,
       headChars: 0,
       tailChars: 0,
-      markerChars: 0
+      markerChars: 0,
+      markerOmitted: false
     };
   }
   // One marker side is mandatory: it carries the locator of the original. The
-  // second is bought only when the share's budget leaves room for it.
-  if (candidateChars + marker >= originalChars) return idleFloorPlan(originalChars);
+  // second is bought only when the share's budget leaves room for it. A candidate
+  // that cannot even pay for the mandatory marker is still a real reduction, so
+  // it is installed *without* the marker and the omission is recorded: dropping
+  // it would trade a smaller answer for the whole payload over a missing line.
+  if (candidateChars + marker >= originalChars) {
+    return {
+      floored: false,
+      floorMissed: true,
+      resultChars: candidateChars,
+      omittedChars: originalChars - candidateChars,
+      headChars: 0,
+      tailChars: 0,
+      markerChars: 0,
+      markerOmitted: true
+    };
+  }
   let budget = Math.max(candidateChars + marker, Math.min(originalChars, target));
   let markerChars = marker;
   let context = budget - candidateChars - markerChars;
@@ -1058,7 +1086,8 @@ export function pruneFloorPlan(
     omittedChars: originalChars - resultChars,
     headChars: split.head,
     tailChars: split.tail,
-    markerChars
+    markerChars,
+    markerOmitted: false
   };
 }
 
@@ -1081,12 +1110,36 @@ function splitContext(context: number, head: number, tail: number): { head: numb
 
 /** The plan of a reduction that is not happening. */
 function idleFloorPlan(originalChars: number): PruneFloorPlan {
-  return { floored: false, floorMissed: false, resultChars: originalChars, omittedChars: 0, headChars: 0, tailChars: 0, markerChars: 0 };
+  return {
+    floored: false,
+    floorMissed: false,
+    resultChars: originalChars,
+    omittedChars: 0,
+    headChars: 0,
+    tailChars: 0,
+    markerChars: 0,
+    markerOmitted: false
+  };
 }
 
 /** The marker one floored reduction carries on each side of its candidate. */
 export function pruneMarker(locator: string): string {
   return `\n… [reflex prune: full original retrievable as ${locator}] …\n`;
+}
+
+/**
+ * The marker a floor-missed install appends after its candidate.
+ *
+ * The floored form opens with the marker because the head has just ended with a
+ * newline. A candidate that already ends with one needs no blank line before the
+ * marker, so only the leading newline is dropped in that case; the trailing
+ * newline is the same one the floored form carries.
+ * @param candidate - the judged candidate about to be installed.
+ * @param marker - the locator marker.
+ * @returns the suffix to append.
+ */
+function pruneMarkerSuffix(candidate: string, marker: string): string {
+  return candidate.endsWith('\n') ? marker.slice(1) : marker;
 }
 
 /** Split one payload into whole lines, the terminator kept with its line. */
@@ -1213,20 +1266,41 @@ function composeFloorLines(
  * without either breaking the share or growing past the original has simply
  * missed the floor, not invalidated the reduction: installing the candidate is
  * strictly better than carrying the whole payload. So the candidate is installed
- * as-is, with `floored: false` (no head/tail form was built) and
- * `floorMissed: true` (the promised share is not carried), and the sizes are
- * booked against the text that is really installed.
+ * with `floored: false` (no head/tail form was built) and `floorMissed: true`
+ * (the promised share is not carried), and the sizes are booked against the text
+ * that is really installed.
+ *
+ * The locator marker is appended when the candidate can still pay for it, so the
+ * reader sees that a prune happened and where the full payload lives. When the
+ * marker would push the install to the original's size or past it, the reduction
+ * wins and the marker is omitted — recorded as `markerOmitted: true`, never
+ * silently dropped.
  *
  * Only a candidate that is not actually smaller leaves the original untouched —
  * that is a real "no reduction", and the caller's own degradation path owns it.
  *
  * @param original - the raw payload.
  * @param candidate - the judged reduction the composition could not widen.
+ * @param marker - the locator marker a floor-missed install wants to carry.
  * @returns the text to install and the floor decision that says why.
  */
-function refusedFloor(original: string, candidate: string): PruneFloorPlan & { text: string } {
+function refusedFloor(original: string, candidate: string, marker: string): PruneFloorPlan & { text: string } {
   if (candidate.length >= original.length) {
     return { ...idleFloorPlan(original.length), text: original };
+  }
+  const suffix = pruneMarkerSuffix(candidate, marker);
+  if (candidate.length + suffix.length < original.length) {
+    return {
+      floored: false,
+      floorMissed: true,
+      resultChars: candidate.length + suffix.length,
+      omittedChars: original.length - candidate.length - suffix.length,
+      headChars: 0,
+      tailChars: 0,
+      markerChars: suffix.length,
+      markerOmitted: false,
+      text: `${candidate}${suffix}`
+    };
   }
   return {
     floored: false,
@@ -1236,6 +1310,7 @@ function refusedFloor(original: string, candidate: string): PruneFloorPlan & { t
     headChars: 0,
     tailChars: 0,
     markerChars: 0,
+    markerOmitted: true,
     text: candidate
   };
 }
@@ -1292,7 +1367,7 @@ export function applyPruneFloor(
     headCount = 1;
   }
   let tailCount = alignedTailLines(lines, plan.tailChars);
-  if (headCount + tailCount > lines.length) return refusedFloor(original, candidate);
+  if (headCount + tailCount > lines.length) return refusedFloor(original, candidate, marker);
   let composed = composeFloorLines(lines, headCount, tailCount, candidate, marker, secondMarker);
   // The share is a promise, and rounding to a boundary or dropping duplicates can
   // fall short of it: widen by whole lines until the form really carries the
@@ -1317,7 +1392,7 @@ export function applyPruneFloor(
     if (!grew) break;
   }
   if (composed.text.length >= original.length || composed.text.length < target) {
-    return refusedFloor(original, candidate);
+    return refusedFloor(original, candidate, marker);
   }
   return {
     ...plan,
@@ -1432,6 +1507,8 @@ interface PruneMemo {
   floored: boolean;
   /** Whether the reduction missed the floor's promised share, replayed on a hit. */
   floorMissed?: boolean;
+  /** Whether that miss installed without its locator marker, replayed on a hit. */
+  markerOmitted?: boolean;
   /** Locator of the retained original, once a retention for this payload succeeded. */
   locator?: string;
   /**
@@ -2323,6 +2400,7 @@ export class InterventionEngine {
     const reusedFromMemo = !needsCandidate && memo?.text !== undefined ? memo : undefined;
     const floorApplied = reusedFromMemo ? reusedFromMemo.floored : composed.floored;
     const floorMissed = reusedFromMemo ? reusedFromMemo.floorMissed === true : composed.floorMissed;
+    const markerOmitted = reusedFromMemo ? reusedFromMemo.markerOmitted === true : composed.markerOmitted;
     const measured: InterventionSkipDetail = {
       ...payloadDetail,
       ...diagnostics,
@@ -2330,6 +2408,7 @@ export class InterventionEngine {
       candidateTokens,
       floored: floorApplied,
       floorMissed,
+      markerOmitted,
       candidateChars: composed.text.length
     };
     const judged = !memo || needsCandidate;
@@ -2361,11 +2440,19 @@ export class InterventionEngine {
       capability: 'prune',
       action: 'prune-result',
       reason: `${exec.name} returned ${originalTokens} tokens; the judged reduction carries ${candidateTokens}`,
-      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, floorApplied),
+      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, {
+        floored: floorApplied,
+        floorMissed,
+        markerOmitted,
+        locator,
+        keptSegments: diagnostics.keptSegments,
+        judgedSegments: diagnostics.judgedSegments
+      }),
       detail: {
         digest,
         floorApplied,
         floorMissed,
+        markerOmitted,
         confidence: response.reductionPercentage,
         turn: state.turn,
         step: state.step,
@@ -2392,6 +2479,7 @@ export class InterventionEngine {
           tokensSaved: originalTokens - candidateTokens,
           floored: floorApplied,
           floorMissed,
+          markerOmitted,
           diagnostics
         });
       }
@@ -2435,7 +2523,7 @@ export class InterventionEngine {
     // and provenance of that rebuild are what gets accounted for.
     const installed =
       retention.locator === locator
-        ? { ...composed, floored: floorApplied, floorMissed }
+        ? { ...composed, floored: floorApplied, floorMissed, markerOmitted }
         : applyPruneFloor(text, response.processedOutput, {
             floorRatio: this.config.pruneFloorRatio,
             headChars: this.config.pruneHeadChars,
@@ -2453,6 +2541,7 @@ export class InterventionEngine {
           ...measured,
           floored: installed.floored,
           floorMissed: installed.floorMissed,
+          markerOmitted: installed.markerOmitted,
           candidateChars: installed.text.length,
           candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
         },
@@ -2470,6 +2559,7 @@ export class InterventionEngine {
           ...measured,
           floored: installed.floored,
           floorMissed: installed.floorMissed,
+          markerOmitted: installed.markerOmitted,
           candidateChars: installed.text.length,
           candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
         },
@@ -2483,8 +2573,16 @@ export class InterventionEngine {
     const installedTokens = Math.max(0, Math.ceil(installed.text.length / 4));
     plan.detail.floorApplied = installed.floored;
     plan.detail.floorMissed = installed.floorMissed;
+    plan.detail.markerOmitted = installed.markerOmitted;
     plan.detail.candidateChars = installed.text.length;
-    plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, installed.floored);
+    plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, {
+      floored: installed.floored,
+      floorMissed: installed.floorMissed,
+      markerOmitted: installed.markerOmitted,
+      locator: retention.locator,
+      keptSegments: diagnostics.keptSegments,
+      judgedSegments: diagnostics.judgedSegments
+    });
     // Booked only here: a candidate that was not smaller, a replacement that could
     // not be composed, and a retention that failed all returned above, so none of
     // them consumed the turn's allowance for an action that never happened.
@@ -2516,6 +2614,7 @@ export class InterventionEngine {
       tokensSaved: originalTokens - installedTokens,
       floored: installed.floored,
       floorMissed: installed.floorMissed,
+      markerOmitted: installed.markerOmitted,
       locator: retention.locator,
       diagnostics
     });
@@ -2863,6 +2962,7 @@ export class InterventionEngine {
       ...(plan.detail.digest === undefined ? {} : { digest: plan.detail.digest }),
       ...(plan.detail.floorApplied === undefined ? {} : { floorApplied: plan.detail.floorApplied, floored: plan.detail.floorApplied }),
       ...(plan.detail.floorMissed === undefined ? {} : { floorMissed: plan.detail.floorMissed }),
+      ...(plan.detail.markerOmitted ? { markerOmitted: true } : {}),
       ...(judgment?.memoHits ? { memoHit: true } : {}),
       ...(originalLocator === undefined ? {} : { originalLocator }),
       ...(plan.detail.turn === undefined ? {} : { turn: plan.detail.turn }),
@@ -2960,6 +3060,7 @@ export class InterventionEngine {
         ...(detail?.digest === undefined ? {} : { digest: detail.digest }),
         ...(detail?.floored === undefined ? {} : { floored: detail.floored }),
         ...(detail?.floorMissed === undefined ? {} : { floorMissed: detail.floorMissed }),
+        ...(detail?.markerOmitted ? { markerOmitted: true } : {}),
         ...(detail?.judgePath === undefined ? {} : { judgePath: detail.judgePath }),
         ...(detail?.judgedSegments === undefined ? {} : { judgedSegments: detail.judgedSegments }),
         ...(detail?.unjudgedSegments === undefined ? {} : { unjudgedSegments: detail.unjudgedSegments }),
@@ -3121,15 +3222,63 @@ export class InterventionEngine {
    * It travels in the audit record, never in the model's context: a prune is
    * supposed to *remove* context, so sending an explanation of the removal would
    * work against the thing it is accounting for.
+   *
+   * The wording follows the data: "kept whole" is only said when the judgment
+   * really kept every segment it judged. A candidate that was floored says the
+   * head/extract/tail form it carries, and a floor miss says how many segments
+   * survived, how many were omitted, and that the promised share was not reached
+   * — plus where the full payload can be read back, marker or no marker.
+   *
+   * @param tool - name of the reduced call.
+   * @param originalTokens - tokens of the raw payload.
+   * @param candidateTokens - tokens of the text really installed.
+   * @param outcome - the floor's decision and the judgment's segment counts.
+   * @returns the note, clipped to the audit's text budget.
    */
-  #pruneFeedback(tool: string, originalTokens: number, candidateTokens: number, floored: boolean): string {
+  #pruneFeedback(
+    tool: string,
+    originalTokens: number,
+    candidateTokens: number,
+    outcome: {
+      floored: boolean;
+      floorMissed: boolean;
+      markerOmitted: boolean;
+      locator: string;
+      keptSegments?: number;
+      judgedSegments?: number;
+    }
+  ): string {
     const kept = originalTokens === 0 ? 100 : Math.round((candidateTokens / originalTokens) * 100);
-    return clip(
-      `Reflex reduced ${tool}: ${originalTokens} → ${candidateTokens} tokens (${kept}% kept). ` +
-        `${floored ? 'The head, the judged extract and the tail were kept; ' : 'The judged extract was kept whole; '}` +
-        `the full output was retained in this session's log and is not in context.`,
-      FEEDBACK_CHARS
-    );
+    const head = `Reflex reduced ${tool}: ${originalTokens} → ${candidateTokens} tokens (${kept}% kept). `;
+    const keptSegments = outcome.keptSegments;
+    const judgedSegments = outcome.judgedSegments;
+    const segmentsShort =
+      keptSegments !== undefined && judgedSegments !== undefined && keptSegments < judgedSegments;
+    const segmentNote = segmentsShort
+      ? `Kept ${keptSegments}/${judgedSegments} segments, omitted ${judgedSegments - keptSegments}. `
+      : '';
+    let body: string;
+    if (outcome.floored) {
+      body =
+        'The head, the judged extract and the tail were kept; ' +
+        `the full output was retained in this session's log and is not in context.`;
+    } else if (outcome.floorMissed) {
+      const floorPercent = Math.round(this.config.pruneFloorRatio * 100);
+      const install =
+        outcome.markerOmitted
+          ? 'no locator marker was added because it would not have kept the text smaller than the original'
+          : 'the judged extract was installed as-is';
+      body = `${segmentNote}The candidate fell short of the ${floorPercent}% floor, so ${install}; ` +
+        `the full output is retrievable as ${outcome.locator}.`;
+    } else if (segmentsShort) {
+      body = `${segmentNote}The judged extract was installed as-is; ` +
+        `the full output is retrievable as ${outcome.locator}.`;
+    } else {
+      body =
+        'The judged extract was kept whole; ' +
+        `the full output was retained in this session's log and is not in context.`;
+    }
+    return clip(`${head}${body}`, FEEDBACK_CHARS);
   }
 
   /** The memoized reduction of one payload, when it is still remembered. */

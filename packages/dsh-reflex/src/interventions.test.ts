@@ -122,7 +122,11 @@ function stagnationStub(
 }
 
 /** A pruning service returning one controlled candidate. */
-function pruneStub(candidate: (raw: string) => string, latencyMs = 0): InterventionEngineOptions['prune'] {
+function pruneStub(
+  candidate: (raw: string) => string,
+  latencyMs = 0,
+  diagnostics: Partial<PruneResponse> = {}
+): InterventionEngineOptions['prune'] {
   return {
     prune: async (raw: string) => {
       const text = candidate(raw);
@@ -133,7 +137,8 @@ function pruneStub(candidate: (raw: string) => string, latencyMs = 0): Intervent
         estimatedTokensSaved: Math.max(0, Math.ceil((raw.length - text.length) / 4)),
         reductionPercentage: raw.length === 0 ? 0 : Math.round(((raw.length - text.length) / raw.length) * 1000) / 10,
         shadow: false,
-        latencyMs
+        latencyMs,
+        ...diagnostics
       } satisfies PruneResponse;
     }
   } as InterventionEngineOptions['prune'];
@@ -1231,18 +1236,21 @@ test('a payload with no line to keep installs the candidate, never a fragment', 
   // installed as-is — never the whole payload, and never a half-line.
   const original = 'L'.repeat(1200);
   const candidate = 'L'.repeat(80);
+  const locator = locatorOf(original);
   const floored = applyPruneFloor(original, candidate, {
     floorRatio: 0.5,
     headChars: 400,
     tailChars: 400,
-    locator: locatorOf(original)
+    locator
   });
   assert.equal(floored.floored, false, 'the floor refuses a payload it cannot align');
   assert.equal(floored.floorMissed, true, 'and says the promised share was not carried');
-  assert.equal(floored.text, candidate, 'the judged candidate is installed, not the original');
-  assert.equal(floored.resultChars, candidate.length);
-  assert.equal(floored.omittedChars, original.length - candidate.length, 'the omitted size is the real one');
-  assert.equal(floored.text.includes('reflex prune'), false, 'and no marker was installed');
+  assert.equal(floored.text, `${candidate}${pruneMarker(locator)}`, 'the judged candidate is installed, not the original');
+  assert.equal(floored.resultChars, floored.text.length);
+  assert.equal(floored.omittedChars, original.length - floored.text.length, 'the omitted size is the real one');
+  assert.equal(floored.markerOmitted, false, 'the locator marker still fits');
+  assert.ok(floored.text.includes(locator), 'and names where the full payload lives');
+  assert.ok(floored.text.length < original.length, 'the install is still strictly smaller');
 });
 
 test('a first line longer than its budget installs the candidate rather than a cut line', () => {
@@ -1251,17 +1259,21 @@ test('a first line longer than its budget installs the candidate rather than a c
   // candidate it could not widen is still installed whole.
   const original = `${'A'.repeat(600)}\n${Array.from({ length: 4 }, (_, index) => `tail line ${index}\n`).join('')}`;
   const candidate = 'DIAGNOSTIC\n';
+  const locator = locatorOf(original);
   const floored = applyPruneFloor(original, candidate, {
     floorRatio: 0.5,
     headChars: 400,
     tailChars: 400,
-    locator: locatorOf(original)
+    locator
   });
   assert.equal(floored.floored, false);
   assert.equal(floored.floorMissed, true);
-  assert.equal(floored.text, candidate);
-  assert.equal(floored.omittedChars, original.length - candidate.length);
-  assert.equal(floored.text.includes('reflex prune'), false, 'nothing half-line was installed');
+  assert.equal(floored.markerOmitted, false);
+  // The candidate already ends with a newline, so the marker does not open a blank line.
+  assert.equal(floored.text, `${candidate}${pruneMarker(locator).slice(1)}`);
+  assert.equal(floored.omittedChars, original.length - floored.text.length);
+  assert.ok(floored.text.includes(locator), 'the marker names the retained original');
+  assert.ok(floored.text.length < original.length);
 });
 
 test('the minimal reproduction installs the candidate instead of throwing it away', () => {
@@ -1277,19 +1289,22 @@ test('the minimal reproduction installs the candidate instead of throwing it awa
   assert.equal(candidate.length, 7199);
   assert.ok(candidate.length < Math.ceil(original.length * 0.5), 'the candidate is below the floor target');
 
+  const locator = locatorOf(original);
   const floored = applyPruneFloor(original, candidate, {
     floorRatio: 0.5,
     headChars: 400,
     tailChars: 400,
-    locator: locatorOf(original)
+    locator
   });
   assert.notEqual(floored.text, original, 'the whole payload is not reinstalled');
-  assert.equal(floored.text, candidate, 'the judged candidate is installed byte for byte');
+  assert.equal(floored.text, `${candidate}${pruneMarker(locator)}`, 'the judged candidate is installed byte for byte, then named');
   assert.equal(floored.floored, false, 'no floor form was composed');
   assert.equal(floored.floorMissed, true, 'and the promised share is honestly reported as missed');
-  assert.equal(floored.resultChars, candidate.length);
-  assert.equal(floored.omittedChars, original.length - candidate.length);
-  assert.equal(floored.text.includes('reflex prune'), false, 'the un-widened candidate carries no marker');
+  assert.equal(floored.resultChars, floored.text.length);
+  assert.equal(floored.omittedChars, original.length - floored.text.length);
+  assert.equal(floored.markerOmitted, false);
+  assert.ok(floored.text.includes(locator), 'the un-widened candidate still carries the locator marker');
+  assert.ok(floored.text.length < original.length);
 });
 
 test('the real-machine shape installs its 6.6k candidate instead of reporting no-reduction', async () => {
@@ -1313,7 +1328,8 @@ test('the real-machine shape installs its 6.6k candidate instead of reporting no
   const result = resultOf(original);
   const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
   const installed = installedText(decision as { content?: unknown });
-  assert.equal(installed.length, candidate.length, 'the candidate is the installed text');
+  const locator = locatorOf(original);
+  assert.equal(installed, `${candidate}${pruneMarker(locator)}`, 'the candidate plus its locator marker is the installed text');
   assert.ok(installed.length < original.length, 'the payload really shrank');
 
   const report = engine.report();
@@ -1324,10 +1340,103 @@ test('the real-machine shape installs its 6.6k candidate instead of reporting no
   assert.equal(record.floorApplied, false);
   assert.equal(record.floored, false);
   assert.equal(record.floorMissed, true, 'the audit distinguishes a floor miss from no reduction');
+  assert.equal(record.markerOmitted, undefined, 'the marker fit, so nothing was omitted');
   assert.equal(record.originalTokens, estimateTokens(original));
-  assert.equal(record.candidateTokens, estimateTokens(candidate), 'the booked size is the installed size');
-  assert.equal(record.actualSavedTokens, estimateTokens(original) - estimateTokens(candidate));
+  assert.equal(record.candidateTokens, estimateTokens(installed), 'the booked size is the installed size');
+  assert.equal(record.actualSavedTokens, estimateTokens(original) - estimateTokens(installed));
   assert.ok(record.actualSavedTokens > 0, 'a real saving is booked');
+  assert.ok(record.feedback.includes(locator), 'the note names where the original lives');
+  assert.equal(record.feedback.includes('kept whole'), false, 'a floor miss is never described as kept whole');
+});
+
+test('the real-machine shape reports the segments it kept and the floor it missed', async () => {
+  // The exact audit of session-65bff8aa turn5 step1: 14534 characters, a 6665
+  // candidate that omitted 5 of the 10 judged segments, and a floor it did not
+  // reach. The install must say both that it pruned and where the rest lives.
+  const rows = Array.from(
+    { length: 205 },
+    (_, index) => `[===] progress ${String(index).padStart(3, '0')} ${'x'.repeat(index < 185 ? 51 : 50)}`
+  );
+  const original = rows.join('\n');
+  const candidate = `${rows.slice(0, 47).join('\n')}\n[5 omitted]\n${rows.slice(158).join('\n')}`;
+  assert.equal(original.length, 14534);
+  assert.equal(candidate.length, 6665, 'the candidate is the real-machine size');
+  assert.ok(candidate.includes('[5 omitted]'), 'the candidate already carries the omitted-segments note');
+  assert.ok(candidate.length < Math.ceil(original.length * 0.5), 'the candidate is below the 50% floor target');
+
+  const engine = engineFor(
+    { mode: 'active' },
+    { prune: pruneStub(() => candidate, 0, { judgePath: 'segmented', judgedSegments: 10, keptSegments: 5 }) }
+  );
+  const result = resultOf(original);
+  const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+  const installed = installedText(decision as { content?: unknown });
+  const locator = locatorOf(original);
+  assert.equal(installed, `${candidate}${pruneMarker(locator)}`, 'the install is the candidate plus the locator marker');
+  assert.equal(installed.length, 6665 + pruneMarker(locator).length, 'the marker length is booked, not hidden');
+  assert.ok(installed.length < original.length);
+  assert.ok(installed.includes('[5 omitted]'), 'the omitted-segments marker survives');
+  assert.ok(installed.includes(locator), 'and the locator marker is present');
+
+  const record = engine.report().recent[0]!;
+  assert.equal(record.floorMissed, true);
+  assert.equal(record.markerOmitted, undefined);
+  assert.equal(record.candidateTokens, estimateTokens(installed), 'candidateTokens include the marker');
+  assert.equal(record.actualSavedTokens, estimateTokens(original) - estimateTokens(installed));
+  assert.match(record.feedback, /Kept 5\/10 segments, omitted 5\./);
+  assert.match(record.feedback, /fell short of the 50% floor/);
+  assert.ok(record.feedback.includes(locator), 'the note says how to retrieve the original');
+  assert.equal(record.feedback.includes('kept whole'), false);
+});
+
+test('a floor miss that cannot fit its marker installs the candidate and says so', async () => {
+  // A candidate ten characters short of the original: the floor must not install
+  // a form that is not smaller, so it installs the candidate. The locator marker
+  // (about 90 characters) cannot fit either — the reduction wins, the marker is
+  // omitted, and the omission is recorded and explained instead of hidden.
+  const locator = locatorOf('L'.repeat(1000));
+  const omitted = applyPruneFloor('L'.repeat(1000), 'L'.repeat(989), {
+    floorRatio: 0.99,
+    headChars: 400,
+    tailChars: 400,
+    locator
+  });
+  assert.equal(omitted.floorMissed, true);
+  assert.equal(omitted.markerOmitted, true, 'the marker is explicitly recorded as omitted');
+  assert.equal(omitted.text, 'L'.repeat(989), 'the candidate is installed without the marker');
+  assert.ok(omitted.text.length < 1000, 'and the install is still strictly smaller');
+
+  const payload = `${'z'.repeat(9)}\n`.repeat(90);
+  assert.equal(payload.length, 900);
+  const candidate = payload.slice(0, 890);
+  const engine = engineFor(
+    { mode: 'active', pruneFloorRatio: 0.99 },
+    { prune: pruneStub(() => candidate) }
+  );
+  const result = resultOf(payload);
+  const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+  assert.equal(installedText(decision as { content?: unknown }), candidate);
+  const record = engine.report().recent[0]!;
+  assert.equal(record.floorMissed, true);
+  assert.equal(record.markerOmitted, true, 'the audit records the omitted marker');
+  assert.match(record.feedback, /no locator marker was added/);
+  assert.match(record.feedback, /fell short of the 99% floor/);
+  assert.ok(record.feedback.includes(locatorOf(payload)), 'the note still says how to retrieve the original');
+});
+
+test('a judgment that kept every segment is described as kept whole', async () => {
+  const truncate = LONG_RESULT.slice(0, Math.ceil(LONG_RESULT.length * 0.75));
+  assert.ok(truncate.length >= Math.ceil(LONG_RESULT.length * 0.5), 'the candidate carries the floor share');
+  const engine = engineFor(
+    { mode: 'active' },
+    { prune: pruneStub(() => truncate, 0, { judgePath: 'segmented', judgedSegments: 10, keptSegments: 10 }) }
+  );
+  const result = resultOf(LONG_RESULT);
+  await engine.toolResult(execOf('bash', { command: 'build' }), result, async () => acceptOf(result));
+  const record = engine.report().recent[0]!;
+  assert.equal(record.floorMissed, false);
+  assert.match(record.feedback, /kept whole/);
+  assert.equal(record.feedback.includes('omitted'), false);
 });
 
 test('a candidate that is not smaller is still a real no-reduction, not a floor miss', async () => {
