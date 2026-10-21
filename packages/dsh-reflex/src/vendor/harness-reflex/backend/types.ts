@@ -86,6 +86,15 @@ export interface PruneResponse {
   judgedSegments?: number;
   /** Segments beyond the per-request limit, kept deterministically instead. */
   unjudgedSegments?: number;
+  /**
+   * Segments the composed candidate kept whole, out of all segments.
+   *
+   * The engine's candidate is the "balanced" one, so this is the number of
+   * segments that survived the budget: it answers "did the judge keep too much
+   * to shrink anything" without re-deriving the selection. Absent on paths that
+   * did not select segments by score (local, fallback).
+   */
+  keptSegments?: number;
 }
 
 /**

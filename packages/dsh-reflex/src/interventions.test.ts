@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
-import { KNOWN_SESSION_EVENT_TYPES, Session, type SessionId } from '@deepseek-ai/dsh-session';
+import { KNOWN_SESSION_EVENT_TYPES, Session, isSurfaceEligibleType, type SessionId } from '@deepseek-ai/dsh-session';
 import { defineTool, type PostToolDecision, type PreToolDecision, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import type { UserMessage } from '@deepseek-ai/dsh-llm';
 
@@ -44,7 +44,8 @@ import {
   prunedOriginalsOf,
   readPrunedOriginal,
   appendPrunedOriginal,
-  PRUNED_ORIGINAL_RECORD_TYPE
+  PRUNED_ORIGINAL_RECORD_TYPE,
+  type InterventionAuditRecord
 } from './session-audit.js';
 import { createToolContext, fakeAgent, resultText } from './testing.js';
 import { JevDecisionBackend, MockDecisionBackend, ToolResultPruner } from './vendor/harness-reflex/index.js';
@@ -2784,7 +2785,10 @@ function segmentGatewayStub(keep = 0.9): { requests: any[]; restore: () => void 
 }
 
 /** An active engine whose prune service is the real vendored backend over a stub gateway. */
-function jevEngineFor(pruneJudgeMinChars: number): InterventionEngine {
+function jevEngineFor(
+  pruneJudgeMinChars: number,
+  overrides: Partial<InterventionEngineOptions> = {}
+): InterventionEngine {
   const resolved = resolveConfig({
     backend: 'jev',
     systemOne: { baseUrl: 'http://jev.stub/v1/systemone', model: 'jev-latest', timeoutMs: 500 },
@@ -2797,7 +2801,8 @@ function jevEngineFor(pruneJudgeMinChars: number): InterventionEngine {
     stagnation: stagnationStub().service,
     prune: new ToolResultPruner(createBackend(resolved), undefined, resolved.pruneThreshold),
     gate: gateStub('contradicted'),
-    retain: retentionStub().retain
+    retain: retentionStub().retain,
+    ...overrides
   });
 }
 
@@ -3141,4 +3146,327 @@ test('the configured claim floor and evidence budget drive the closing check', a
   assert.equal(engine.report().skips['closing-no-claim'], 1, 'the floor, not a word list, decided it');
   assert.ok(engine.report().evidence.truncatedChars > 0, 'the configured budget truncated the evidence');
   assert.ok((engine.report().skips['evidence-truncated'] ?? 0) >= 1, 'and the truncation is recorded');
+});
+
+// ── skipped plans: the record a real run needs to explain "nothing happened" ──
+
+/** Collect the audit records one engine hands its sink, without a session. */
+function auditSink(): { records: InterventionAuditRecord[]; audit: NonNullable<InterventionEngineOptions['audit']> } {
+  const records: InterventionAuditRecord[] = [];
+  return { records, audit: (record) => records.push(record) };
+}
+
+/**
+ * A payload with the shape of the real reproduction: 14,533 characters over 205
+ * lines, blank-line segmented so the judging path has segments to score.
+ */
+function realMachinePayload(targetChars = 14533, lineCount = 205): string {
+  const prefix = (index: number): string => `step ${String(index).padStart(3, '0')}: resolved module dependency`;
+  const blankEvery = 15;
+  const contentCount = lineCount - Math.floor((lineCount - 1) / blankEvery);
+  const width = Math.floor((targetChars - (lineCount - 1)) / contentCount);
+  const lines = Array.from({ length: lineCount }, (_, index) => {
+    if (index > 0 && index % blankEvery === blankEvery - 1) return '';
+    const head = prefix(index);
+    return `${head}${'x'.repeat(Math.max(0, width - head.length))}`;
+  });
+  const shortfall = targetChars - lines.join('\n').length;
+  assert.ok(shortfall >= 0, 'the fixture never exceeds its target');
+  if (shortfall > 0) {
+    const first = lines.findIndex((line) => line.length > 0);
+    assert.ok(first >= 0);
+    lines[first] = `${lines[first]}${'x'.repeat(shortfall)}`;
+  }
+  return lines.join('\n');
+}
+
+test('every abandoned prune plan leaves one skip record, in observe and active', async () => {
+  const agent = fakeAgent({ id: 'skip-branches' });
+  const small = resultOf('ok');
+  const nonLine = resultOf('x'.repeat(300));
+  const long = resultOf(LONG_RESULT);
+  const longExec = execOf('bash', { command: 'build' }, agent);
+  const imageResult = {
+    isError: false,
+    content: [{ type: 'image', mediaType: 'image/png', data: 'AA==' }],
+    meta: {}
+  } as unknown as Readonly<ToolExecutionResult>;
+  const valueShaped = { kind: 'accept', value: { replaced: true } } as unknown as PostToolDecision;
+  // A service that measures the payload and gives it straight back: the candidate
+  // is not smaller, which is the branch a real "nothing was pruned" run lands in.
+  const noReductionPrune: NonNullable<InterventionEngineOptions['prune']> = {
+    prune: async (raw: string) => ({
+      processedOutput: raw,
+      originalChars: raw.length,
+      prunedChars: raw.length,
+      estimatedTokensSaved: 0,
+      reductionPercentage: 0,
+      shadow: false,
+      latencyMs: 0,
+      judgePath: 'segmented',
+      judgedSegments: 7,
+      unjudgedSegments: 2,
+      keptSegments: 7,
+      fallbackReason: 'stub fallback'
+    })
+  };
+
+  interface Scenario {
+    reason: string;
+    modes?: readonly ('observe' | 'active')[];
+    interventions?: ReflexConfig['interventions'];
+    overrides?: Partial<InterventionEngineOptions>;
+    act: (engine: InterventionEngine) => Promise<unknown>;
+    /** Payload the skip names, when the branch had one. */
+    digestOfText?: string;
+    /** Judgments the branch really spent (the audit must not add any). */
+    judgments?: number;
+    check?: (record: InterventionAuditRecord) => void;
+  }
+
+  const scenarios: Scenario[] = [
+    {
+      reason: 'below-threshold',
+      act: (engine) => engine.toolResult(execOf('bash', { command: 'true' }, agent), small, async () => acceptOf(small)),
+      digestOfText: 'ok'
+    },
+    {
+      reason: 'unsupported-payload',
+      act: (engine) =>
+        engine.toolResult(execOf('bash', { command: 'scan' }, agent), nonLine, async () => acceptOf(nonLine)),
+      digestOfText: 'x'.repeat(300)
+    },
+    {
+      reason: 'no-text-block',
+      act: (engine) =>
+        engine.toolResult(execOf('view_image', {}, agent), imageResult, async () => ({
+          kind: 'accept',
+          content: [...(imageResult.content ?? [])]
+        }))
+    },
+    {
+      reason: 'value-shaped-accept',
+      act: (engine) => engine.toolResult(longExec, long, async () => valueShaped)
+    },
+    {
+      reason: 'intervention-cap',
+      interventions: { maxInterventionsPerTurn: 0 },
+      act: (engine) => engine.toolResult(longExec, long, async () => acceptOf(long)),
+      digestOfText: LONG_RESULT
+    },
+    {
+      reason: 'judgment-turn-cap',
+      interventions: { maxJudgmentsPerTurn: 0 },
+      act: (engine) => engine.toolResult(longExec, long, async () => acceptOf(long)),
+      digestOfText: LONG_RESULT
+    },
+    {
+      reason: 'no-reduction',
+      overrides: { prune: noReductionPrune },
+      act: (engine) => engine.toolResult(longExec, long, async () => acceptOf(long)),
+      digestOfText: LONG_RESULT,
+      judgments: 1,
+      check: (record) => {
+        assert.equal(record.judgePath, 'segmented');
+        assert.equal(record.judgedSegments, 7);
+        assert.equal(record.unjudgedSegments, 2);
+        assert.equal(record.keptSegments, 7);
+        assert.equal(record.fallbackReason, 'stub fallback');
+        assert.equal(record.originalChars, LONG_RESULT.length);
+        assert.equal(record.candidateChars, LONG_RESULT.length);
+        assert.equal(record.originalTokens, estimateTokens(LONG_RESULT));
+        assert.equal(record.candidateTokens, estimateTokens(LONG_RESULT));
+        assert.equal(record.judgeTokens, estimateTokens(LONG_RESULT));
+      }
+    },
+    {
+      reason: 'retention-failed',
+      modes: ['active'],
+      overrides: { retain: () => undefined },
+      act: (engine) => engine.toolResult(longExec, long, async () => acceptOf(long)),
+      digestOfText: LONG_RESULT,
+      judgments: 1
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    for (const mode of scenario.modes ?? (['observe', 'active'] as const)) {
+      const sink = auditSink();
+      const engine = engineFor(
+        { ...(scenario.interventions ?? {}), mode },
+        { ...(scenario.overrides ?? {}), audit: sink.audit }
+      );
+      await scenario.act(engine);
+
+      const label = `${mode}/${scenario.reason}`;
+      assert.equal(sink.records.length, 1, `${label}: one record for the abandoned plan`);
+      const record = sink.records[0]!;
+      assert.equal(record.action, 'skip', `${label}: the record names itself a skip`);
+      assert.equal(record.skip, scenario.reason, `${label}: the reason is machine-readable`);
+      assert.equal(record.capability, 'prune', `${label}: the capability is named`);
+      assert.equal(record.mode, mode, `${label}: the mode it ran in is named`);
+      assert.equal(record.applied, false, `${label}: nothing was applied`);
+      assert.equal(record.feedback, '', `${label}: nothing model-facing`);
+      assert.equal(record.potentialSavedTokens, 0, `${label}: a skip claims no saving`);
+      assert.equal(record.actualSavedTokens, 0);
+      assert.equal(record.injectedTokens, 0);
+      assert.equal(record.turn, 0, `${label}: the deciding turn is named`);
+      assert.equal(record.step, 0, `${label}: and the step`);
+      if (scenario.digestOfText !== undefined) {
+        assert.equal(record.digest, digestOf(scenario.digestOfText), `${label}: the payload is identified`);
+        assert.equal(record.originalChars, scenario.digestOfText.length, `${label}: and sized`);
+      }
+      scenario.check?.(record);
+
+      const report = engine.report();
+      assert.deepEqual(report.recent, [], `${label}: a skip is not a plan`);
+      assert.equal(report[mode].plans, 0, `${label}: no plan booked`);
+      assert.equal(report[mode].applied, 0, `${label}: nothing applied`);
+      assert.equal(report[mode].judgments, scenario.judgments ?? 0, `${label}: only the real judgment is paid for`);
+      assert.equal(report.skips[scenario.reason], 1, `${label}: the process counter still answers`);
+      const state = engine.stateOf('skip-branches')!;
+      assert.equal(state.interventions, 0, `${label}: no action budget burnt writing the record`);
+      assert.equal(state.judgmentsSession, scenario.judgments ?? 0, `${label}: no judgment budget burnt either`);
+    }
+  }
+});
+
+test('a duplicated stagnation intervention is audited as a skip, not a second plan', async () => {
+  for (const mode of ['observe', 'active'] as const) {
+    const sink = auditSink();
+    const agent = fakeAgent({ id: 'duplicate-skip' });
+    const engine = engineFor({ mode, capabilities: { prune: 'off' } }, { audit: sink.audit });
+    const exec = execOf('bash', { command: 'ls' }, agent);
+    for (let index = 0; index < 3; index += 1) {
+      await engine.toolResult(exec, resultOf('ok'), async () => acceptOf(resultOf('ok')));
+    }
+    const messages = [message('go')];
+    await engine.preStep(stepPayload(agent, 1, 1, messages), async () => ({ kind: 'enter' as const, messages }));
+    await engine.preStep(stepPayload(agent, 1, 2, messages), async () => ({ kind: 'enter' as const, messages }));
+
+    assert.equal(engine.report().skips['duplicate-intervention'], 1, `${mode}: one latched repeat`);
+    const skips = sink.records.filter((record) => record.skip === 'duplicate-intervention');
+    assert.equal(skips.length, 1, `${mode}: the latch, not a second plan, answered the repeat`);
+    assert.equal(skips[0]!.capability, 'stagnation');
+    assert.equal(skips[0]!.mode, mode);
+    assert.equal(skips[0]!.turn, 1);
+    assert.equal(skips[0]!.step, 2);
+    assert.equal(skips[0]!.applied, false);
+    assert.equal(engine.report()[mode].plans, 1, `${mode}: the first episode still planned exactly once`);
+  }
+});
+
+test('an audit sink that throws never changes a skip decision', async () => {
+  const engine = engineFor(
+    { mode: 'observe' },
+    {
+      audit: () => {
+        throw new Error('log write failed');
+      }
+    }
+  );
+  const agent = fakeAgent({ id: 'fail-open-audit' });
+  const result = resultOf('ok');
+  const decision = await engine.toolResult(execOf('bash', { command: 'true' }, agent), result, async () =>
+    acceptOf(result)
+  );
+  assert.equal(decision.kind, 'accept', 'the decision is the waterfall’s own');
+  assert.equal(engine.report().skips['below-threshold'], 1, 'the counter is committed before the sink fails');
+  assert.deepEqual(engine.report().recent, []);
+});
+
+test('a skip is an ignorable session record, never a model message or a plan', async () => {
+  const ctx = await createToolContext();
+  try {
+    const runtime = applyReflex(ctx, { backend: 'mock', interventions: { mode: 'observe' }, pruneThreshold: 200 });
+    const session = Session.create('interventions-skip-audit' as SessionId);
+    const agent = { ...fakeAgent({ id: 'skip-audit' }), session } as unknown as Agent;
+    ctx.tools.register(
+      defineTool({
+        name: 'iv_small',
+        description: 'Test-only tool returning a small result.',
+        parameters: { text: { type: 'string', required: true } },
+        output: {
+          schema: { type: 'json' as const },
+          render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: String(value) }]
+        },
+        async execute(args: { text: string }) {
+          return args.text;
+        }
+      })
+    );
+    const result = await ctx.tools.execute({
+      callId: 'iv-small-1' as never,
+      name: 'iv_small',
+      arguments: { text: 'ok' },
+      signal: new AbortController().signal,
+      agent
+    });
+    assert.equal(resultText(result), 'ok', 'the model reads the result untouched');
+
+    const records = interventionRecordsOf(session.ownEvents());
+    assert.equal(records.length, 1, 'the abandoned plan is auditable');
+    const record = records[0]!;
+    assert.equal(record.action, 'skip');
+    assert.equal(record.skip, 'below-threshold');
+    assert.equal(record.capability, 'prune');
+    assert.equal(record.mode, 'observe');
+    assert.equal(record.applied, false);
+    assert.equal(record.feedback, '');
+    assert.equal(record.digest, digestOf('ok'));
+    assert.equal(record.originalChars, 2);
+
+    // The record is a plugin event the model never reads: it is marked ignorable
+    // and its type is not even eligible for the surface.
+    const event = session.ownEvents().find((candidate) => String(candidate.type) === INTERVENTION_RECORD_TYPE);
+    assert.ok(event, 'the record is in the session log');
+    assert.equal((event as { ignorable?: boolean }).ignorable, true, 'an ignorable plugin event');
+    assert.equal(isSurfaceEligibleType(INTERVENTION_RECORD_TYPE), false, 'and never surface-eligible');
+
+    // Nothing was planned, and the next step still carries only its own message.
+    assert.deepEqual(runtime.interventions!.report().recent, [], 'a skip does not appear as a plan');
+    assert.equal(runtime.interventions!.report().observe.plans, 0);
+    const messages = [message('carry on')];
+    const decision = (await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { turn: 1, step: 2, signal: new AbortController().signal, messages } as never,
+      async () => ({ kind: 'enter' as const, messages })
+    )) as { messages: unknown[] };
+    assert.equal(decision.messages.length, 1, 'no skip record entered the model-visible messages');
+  } finally {
+    await ctx.fiber.dispose();
+  }
+});
+
+test('the 14,533-character real-machine payload leaves its judge path and segment counts in the audit', async () => {
+  const payload = realMachinePayload();
+  assert.equal(payload.length, 14533, 'the fixture is the real payload size');
+  assert.equal(payload.split('\n').length, 205, 'and the real line count');
+  const stub = segmentGatewayStub();
+  try {
+    const sink = auditSink();
+    const engine = jevEngineFor(10000, { audit: sink.audit });
+    const result = resultOf(payload);
+    const decision = await engine.toolResult(execOf('bash', { command: 'build' }), result, async () =>
+      acceptOf(result)
+    );
+    const installed = installedText(decision as { content?: unknown });
+    assert.ok(installed.length > 0 && installed.length < payload.length, 'the payload really shrank');
+
+    assert.equal(stub.requests.length, 1, 'one batched segment judgment, as on the real machine');
+    const judged = Object.keys(stub.requests[0]!.questions).length;
+    assert.ok(judged > 1, `segments were judged (got ${String(judged)})`);
+    const record = sink.records.find((candidate) => candidate.action === 'prune-result');
+    assert.ok(record, 'the installed plan is audited');
+    assert.equal(record!.judgePath, 'segmented');
+    assert.equal(record!.judgedSegments, judged);
+    assert.equal(record!.unjudgedSegments, 0);
+    assert.ok((record!.keptSegments ?? 0) > 0, 'the kept segment count is readable');
+    assert.ok((record!.keptSegments ?? 0) <= judged);
+    assert.equal(record!.originalChars, payload.length);
+    assert.equal(record!.candidateChars, installed.length);
+    assert.equal(record!.digest, digestOf(payload));
+  } finally {
+    stub.restore();
+  }
 });

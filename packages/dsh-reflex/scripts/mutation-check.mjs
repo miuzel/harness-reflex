@@ -321,13 +321,13 @@ const MUTATIONS = [
     // The size gates are left intact: only the ceiling check disappears, so a turn
     // with no allowance left still plans reductions.
     from: [
-      "      this.#skip('retention-unavailable');",
+      "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
       '      return downstream;',
       '    }',
       '    if (!this.#actionWithinBudget(state)) {'
     ].join('\n'),
     to: [
-      "      this.#skip('retention-unavailable');",
+      "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
       '      return downstream;',
       '    }',
       '    if (false) {'

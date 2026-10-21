@@ -510,6 +510,8 @@ export interface PruneCandidate {
   /** Human-readable label including the reduction it achieved. */
   label: string;
   text: string;
+  /** Segments this candidate kept whole; observability of the selection. */
+  keptSegments?: number;
 }
 
 const PROGRESS_ART = /\[=+[>\s]|█|^\s*\d+%\s|\[K/;
@@ -1032,7 +1034,7 @@ export function buildScoredPruneCandidates(
   return ids.map((id) => {
     const selected = selectPruneSegments(segments, scores, rawOutput.length, PRUNE_SCORED_BUDGET_RATIO[id]);
     const text = capToBudget(assemblePruneCandidate(rawOutput, segments, selected), maxTokens);
-    return { id, label: scoredPruneLabel(id, rawOutput.length, text.length), text };
+    return { id, label: scoredPruneLabel(id, rawOutput.length, text.length), text, keptSegments: selected.size };
   });
 }
 
@@ -1540,7 +1542,11 @@ export class JevDecisionBackend implements DecisionBackend {
       const candidates = buildScoredPruneCandidates(raw, segments, scores, req.maxTokens);
       const balanced = candidates.find((candidate) => candidate.id === 'balanced') ?? candidates[0];
       const text = balanced !== undefined && balanced.text.length < raw.length ? balanced.text : raw;
-      return this.pruneResponse(raw, text, req.shadowMode, start, { judgePath: 'segmented', ...diagnostics });
+      return this.pruneResponse(raw, text, req.shadowMode, start, {
+        judgePath: 'segmented',
+        ...diagnostics,
+        ...(balanced === undefined ? {} : { keptSegments: balanced.keptSegments })
+      });
     } catch (err) {
       // FAIL-OPEN: template compression keeps the pruned output useful even when
       // the deterministic line filters have nothing to drop; the harness never

@@ -133,6 +133,29 @@ export interface InterventionAuditRecord {
   turn?: number;
   step?: number;
   /**
+   * Why a plan was abandoned instead of planned, when it was.
+   *
+   * Present exactly on an `action: 'skip'` record: every branch that refuses to
+   * plan writes one, so "why no intervention" is answerable from the session
+   * log instead of a process-local counter. Equal to the record's `reason`,
+   * kept as its own field so a reader can select skips without matching prose.
+   */
+  skip?: string;
+  /** Which judging path produced the prune candidate. */
+  judgePath?: 'segmented' | 'local' | 'fallback';
+  /** Segments handed to System One by the prune judgment (0 when the local path ran). */
+  judgedSegments?: number;
+  /** Segments beyond the per-request limit, kept deterministically instead. */
+  unjudgedSegments?: number;
+  /** Segments the candidate the engine composed from kept whole. */
+  keptSegments?: number;
+  /** Characters of the payload this decision was about. */
+  originalChars?: number;
+  /** Characters of the candidate the decision would have installed. */
+  candidateChars?: number;
+  /** Why the segmented judge fell back to the local candidates, when it did. */
+  fallbackReason?: string;
+  /**
    * Locator of the controlled copy of the payload this decision replaced.
    *
    * Present exactly when a prune installed a replacement *and* the pre-prune

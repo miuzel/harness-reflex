@@ -210,7 +210,67 @@ export interface InterventionPlan {
     floorApplied?: boolean;
     turn?: number;
     step?: number;
+    /** Which judging path produced the prune candidate. */
+    judgePath?: 'segmented' | 'local' | 'fallback';
+    /** Segments handed to System One by the prune judgment. */
+    judgedSegments?: number;
+    /** Segments beyond the per-request limit, kept deterministically instead. */
+    unjudgedSegments?: number;
+    /** Segments the composed candidate kept whole. */
+    keptSegments?: number;
+    /** Characters of the payload the plan was about. */
+    originalChars?: number;
+    /** Characters of the candidate the plan would install. */
+    candidateChars?: number;
+    /** Why the segmented judge fell back to the local candidates, when it did. */
+    fallbackReason?: string;
   };
+}
+
+/**
+ * Prune-path facts an abandoned plan carries into its audit record.
+ *
+ * The engine computes these on the way to a decision — the payload's identity
+ * and size up front, the judged path and segment counts once the service has
+ * answered — so a skip can say *which* decision path was abandoned instead of
+ * only that one was. Nothing here is recomputed for the audit; the values are
+ * the ones the decision itself used.
+ */
+export interface InterventionSkipDetail {
+  /** Payload identity, when a payload was the subject of the decision. */
+  digest?: string;
+  /** Characters of that payload. */
+  originalChars?: number;
+  /** Characters of the candidate the decision would have installed. */
+  candidateChars?: number;
+  /** Tokens of that payload, when already known. */
+  originalTokens?: number;
+  /** Tokens of that candidate, when already known. */
+  candidateTokens?: number;
+  /** Which judging path produced the candidate. */
+  judgePath?: 'segmented' | 'local' | 'fallback';
+  /** Segments handed to System One by the judgment. */
+  judgedSegments?: number;
+  /** Segments beyond the per-request limit, kept deterministically instead. */
+  unjudgedSegments?: number;
+  /** Segments the candidate kept whole. */
+  keptSegments?: number;
+  /** Why the segmented judge fell back to the local candidates. */
+  fallbackReason?: string;
+}
+
+/** What one abandoned plan tells the audit sink about itself. */
+interface SkipContext {
+  /** Capability whose plan was abandoned. */
+  capability: InterventionCapability;
+  /** The deciding agent's bookkeeping, when the hook had it. */
+  state?: AgentState;
+  /** The agent (or payload carrying one) whose session receives the record. */
+  agent?: unknown;
+  /** Prune-path facts, when a payload was involved. */
+  detail?: InterventionSkipDetail;
+  /** The judgment this decision rode on, so a paid skip is not booked as free. */
+  judgment?: JudgmentCharge;
 }
 
 /**
@@ -535,6 +595,37 @@ function emptyBucket(): InterventionCostBucket {
     potentialSavedTokens: 0,
     actualSavedTokens: 0,
     injectedTokens: 0
+  };
+}
+
+/**
+ * The payload half of a prune decision's audit fields.
+ *
+ * Taken before the service is asked, so a branch that refuses the payload early
+ * still names the payload it refused. An empty payload has no identity worth
+ * recording.
+ * @param text - the effective text the decision is about.
+ * @returns the digest and size of that text, or nothing for an empty payload.
+ */
+function prunePayloadDetail(text: string): InterventionSkipDetail {
+  return text.length === 0 ? {} : { digest: digestOf(text), originalChars: text.length };
+}
+
+/**
+ * The judgment-path half of a prune decision's audit fields.
+ *
+ * Pure pass-through of what the prune service computed: which path produced the
+ * candidate, how many segments it judged, and why it fell back when it did.
+ * @param response - the service's answer.
+ * @returns the diagnostics it reported.
+ */
+function pruneDiagnosticsOf(response: PruneResponse): InterventionSkipDetail {
+  return {
+    ...(response.judgePath === undefined ? {} : { judgePath: response.judgePath }),
+    ...(response.judgedSegments === undefined ? {} : { judgedSegments: response.judgedSegments }),
+    ...(response.unjudgedSegments === undefined ? {} : { unjudgedSegments: response.unjudgedSegments }),
+    ...(response.keptSegments === undefined ? {} : { keptSegments: response.keptSegments }),
+    ...(response.fallbackReason === undefined ? {} : { fallbackReason: response.fallbackReason })
   };
 }
 
@@ -1260,6 +1351,17 @@ interface PruneMemo {
   floored: boolean;
   /** Locator of the retained original, once a retention for this payload succeeded. */
   locator?: string;
+  /**
+   * Diagnostics of the judgment that composed this form.
+   *
+   * Replayed by a memo hit so its audit record keeps the provenance of the plan
+   * that really judged the payload, instead of looking like a path that never
+   * ran the judge. Observability only: no decision reads these back.
+   */
+  diagnostics?: Pick<
+    PruneResponse,
+    'judgePath' | 'judgedSegments' | 'unjudgedSegments' | 'keptSegments' | 'fallbackReason'
+  >;
 }
 
 /**
@@ -1518,7 +1620,7 @@ export class InterventionEngine {
       // that verdict, not re-asked; anything else is only worth a question when
       // it actually repeats (the same threshold as any other repetition).
       if (waitShape !== undefined && state.waited.has(signature)) {
-        this.#skip('wait-query');
+        this.#skip('wait-query', { capability: 'stagnation', state, agent: exec.agent });
         return downstream;
       }
       const priorSame = allWindow.filter((step) => step.signature === signature).length - 1;
@@ -1541,11 +1643,11 @@ export class InterventionEngine {
       }
       if (!suspicion.suspicious || state.denied.has(signature)) return downstream;
       if (state.applied.has(`stagnation:${signature}`)) {
-        this.#skip('duplicate-intervention');
+        this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: exec.agent });
         return downstream;
       }
       if (!this.#actionWithinBudget(state)) {
-        this.#skip('intervention-cap');
+        this.#skip('intervention-cap', { capability: 'stagnation', state, agent: exec.agent });
         return downstream;
       }
 
@@ -1569,7 +1671,12 @@ export class InterventionEngine {
         if (waitSuspected) state.waited.add(signature);
         // A budget/abort skip keeps its own reason; only a real "not stuck"
         // answer to a wait question is recorded as the wait outcome.
-        this.#skip(verdict.skip ?? (waitSuspected ? 'wait-query' : 'unconfirmed'));
+        this.#skip(verdict.skip ?? (waitSuspected ? 'wait-query' : 'unconfirmed'), {
+          capability: 'stagnation',
+          state,
+          agent: exec.agent,
+          judgment
+        });
         return downstream;
       }
 
@@ -1587,7 +1694,9 @@ export class InterventionEngine {
         }
       };
       const applied = capability === 'active' && downstream.kind === 'allow';
-      if (capability === 'active' && !applied) this.#skip('downstream-decided');
+      if (capability === 'active' && !applied) {
+        this.#skip('downstream-decided', { capability: 'stagnation', state, agent: exec.agent });
+      }
       // The decision is latched in both modes. Observe has to plan exactly what
       // active would do — one refusal per episode, subject to the same turn cap —
       // otherwise its column would over-count the very thing it is measuring.
@@ -1600,7 +1709,10 @@ export class InterventionEngine {
       // FAIL-OPEN: a planning failure must never veto a call the rest of the
       // waterfall already allowed. A wait whose judge could not answer is
       // reported with its own reason instead of the generic one.
-      this.#skip(waitSuspected ? 'wait-query-unavailable' : 'planning-error');
+      this.#skip(waitSuspected ? 'wait-query-unavailable' : 'planning-error', {
+        capability: 'stagnation',
+        agent: exec.agent
+      });
       return downstream;
     }
   }
@@ -1630,7 +1742,7 @@ export class InterventionEngine {
         // The result of a call this engine refused is the refusal itself. It is
         // neither evidence about the run nor a payload worth reducing, and
         // correcting it would bill one episode twice.
-        this.#skip('refused-result');
+        this.#skip('refused-result', { capability: 'prune', state, agent: exec.agent });
         return downstream;
       }
       // The *effective* content: whatever the rest of the waterfall decided the
@@ -1665,7 +1777,7 @@ export class InterventionEngine {
       return await this.#correctFailure(exec, result, downstream, state, signature, started);
     } catch {
       // FAIL-OPEN: the result is handed on exactly as the waterfall produced it.
-      this.#skip('planning-error');
+      this.#skip('planning-error', { capability: 'prune', agent: exec.agent });
       return downstream;
     }
   }
@@ -1719,16 +1831,20 @@ export class InterventionEngine {
       // repeat its work. A poll this turn never judged was not a repetition, so
       // it is not a stagnation episode either.
       if (last.wait === true) {
-        this.#skip(state.waited.has(last.signature) ? 'wait-query' : 'wait-query-unjudged');
+        this.#skip(state.waited.has(last.signature) ? 'wait-query' : 'wait-query-unjudged', {
+          capability: 'stagnation',
+          state,
+          agent: payload.agent
+        });
         return downstream;
       }
       const signature = last.signature;
       if (state.applied.has(`stagnation:${signature}`)) {
-        this.#skip('duplicate-intervention');
+        this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: payload.agent });
         return downstream;
       }
       if (!this.#actionWithinBudget(state)) {
-        this.#skip('intervention-cap');
+        this.#skip('intervention-cap', { capability: 'stagnation', state, agent: payload.agent });
         return downstream;
       }
       // The same window the pre-execute trigger measures: waits are not progress
@@ -1746,7 +1862,12 @@ export class InterventionEngine {
       const judgment = this.#judgmentCharge(verdict, started, this.#now());
       if (!verdict.useful) {
         this.#charge('stagnation', judgment);
-        this.#skip(verdict.skip ?? 'unconfirmed');
+        this.#skip(verdict.skip ?? 'unconfirmed', {
+          capability: 'stagnation',
+          state,
+          agent: payload.agent,
+          judgment
+        });
         return downstream;
       }
 
@@ -1778,7 +1899,7 @@ export class InterventionEngine {
       };
     } catch {
       // FAIL-OPEN: the step enters with exactly the messages it would have had.
-      this.#skip('planning-error');
+      this.#skip('planning-error', { capability: 'stagnation', agent: payload.agent });
       return downstream;
     }
   }
@@ -1810,11 +1931,11 @@ export class InterventionEngine {
       const candidates = claimCandidates(claimsText);
       if (candidates.length === 0) return;
       if (state.applied.has(`closing:turn:${payload.turn}`)) {
-        this.#skip('duplicate-intervention');
+        this.#skip('duplicate-intervention', { capability: 'closing', state, agent: payload.agent });
         return;
       }
       if (!this.#actionWithinBudget(state)) {
-        this.#skip('intervention-cap');
+        this.#skip('intervention-cap', { capability: 'closing', state, agent: payload.agent });
         return;
       }
       if (payload.signal?.aborted) return;
@@ -1824,14 +1945,16 @@ export class InterventionEngine {
       const assembled = assembleEvidence(state.evidence, this.config.closingEvidenceChars);
       this.#evidenceStats.retainedChars += assembled.retainedChars;
       this.#evidenceStats.truncatedChars += assembled.truncatedChars;
-      if (assembled.truncatedChars > 0) this.#skip('evidence-truncated');
+      if (assembled.truncatedChars > 0) {
+        this.#skip('evidence-truncated', { capability: 'closing', state, agent: payload.agent });
+      }
 
       // The closing classification is a judgment like any other: one request
       // with at most MAX_CLAIMS scored questions, bought from the same turn and
       // session budget as a stagnation check.
       const classifySkip = this.#spendJudgment(state);
       if (classifySkip) {
-        this.#skip(classifySkip);
+        this.#skip(classifySkip, { capability: 'closing', state, agent: payload.agent });
         return;
       }
       const classifyStarted = this.#now();
@@ -1845,7 +1968,7 @@ export class InterventionEngine {
       } catch {
         // FAIL-OPEN: an unavailable classifier must not become a model-visible
         // objection, and it must never fall back to the retired word list.
-        this.#skip('closing-claim-unavailable');
+        this.#skip('closing-claim-unavailable', { capability: 'closing', state, agent: payload.agent });
         return;
       }
       const claims = classification.results
@@ -1861,7 +1984,12 @@ export class InterventionEngine {
       };
       if (claims.length === 0) {
         this.#charge('closing', classificationCharge);
-        this.#skip('closing-no-claim');
+        this.#skip('closing-no-claim', {
+          capability: 'closing',
+          state,
+          agent: payload.agent,
+          judgment: classificationCharge
+        });
         return;
       }
 
@@ -1891,7 +2019,12 @@ export class InterventionEngine {
       const undecided = verdict.results.filter((item) => item.outcome === 'escalate').length;
       if (contradicted.length === 0) {
         this.#charge('closing', judgment);
-        this.#skip(undecided > 0 ? 'closing-undecided' : verdict.passed ? 'closing-evidence-consistent' : 'closing-unconfirmed');
+        this.#skip(undecided > 0 ? 'closing-undecided' : verdict.passed ? 'closing-evidence-consistent' : 'closing-unconfirmed', {
+          capability: 'closing',
+          state,
+          agent: payload.agent,
+          judgment
+        });
         return;
       }
 
@@ -1911,7 +2044,7 @@ export class InterventionEngine {
       if (applied) this.#steer(payload.agent, this.#message(agentId, payload.turn, state.step, plan.feedback));
     } catch {
       // FAIL-OPEN: a failed closing check leaves the turn boundary alone.
-      this.#skip('planning-error');
+      this.#skip('planning-error', { capability: 'closing', agent: payload.agent });
     }
   }
 
@@ -1970,41 +2103,45 @@ export class InterventionEngine {
     const capability = this.modeOf('prune');
     if (capability === 'off') return downstream;
     if (downstream.kind === 'block') return downstream;
+    // The payload identity is taken once, before any branch can refuse it: every
+    // skip below names the payload it was about, so the log answers "which result
+    // was not pruned" as well as "why".
+    const payloadDetail = prunePayloadDetail(text);
     if ('value' in downstream && downstream.value !== undefined) {
       // A value-shaped accept replaced the payload wholesale; nothing here knows
       // what its text is, so nothing here may touch it.
-      this.#skip('value-shaped-accept');
+      this.#skip('value-shaped-accept', { capability: 'prune', state, agent: exec.agent });
       return downstream;
     }
     if (!hasTextBlock(effective)) {
       // Nothing to replace, and nothing that could be reported as replaced. Asked
       // before the size checks: an image-only payload is not "small", it is out of
       // scope, and the skip reason should say so.
-      this.#skip('no-text-block');
+      this.#skip('no-text-block', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     if (text.length < this.#pruneThreshold) {
-      this.#skip('below-threshold');
+      this.#skip('below-threshold', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     if ((text.match(/\n/g)?.length ?? 0) < PRUNE_MIN_LINES) {
       // Not line-oriented output: the judge is asked to extract diagnostics, and a
       // payload with no lines does not have any to extract. Rewriting it would
       // destroy semantic data rather than compress a trace.
-      this.#skip('unsupported-payload');
+      this.#skip('unsupported-payload', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     if (text.length > MAX_RETAINED_CHARS) {
       // Retention is a precondition of replacing anything, so an oversized payload
       // is refused *before* it is judged or reported as a saving.
-      this.#skip('retention-too-large');
+      this.#skip('retention-too-large', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     const retain = this.#retain;
     if (!retain) {
       // Without a retention sink nothing may be replaced: the module will not
       // destroy the only copy of a result it cannot give back.
-      this.#skip('retention-unavailable');
+      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     if (!this.#actionWithinBudget(state)) {
@@ -2013,7 +2150,7 @@ export class InterventionEngine {
       // bought, so a full turn costs nothing to refuse. Both modes are checked:
       // observe has to plan no more actions than active could take, including the
       // ones the memo would have answered for free.
-      this.#skip('intervention-cap');
+      this.#skip('intervention-cap', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
     // Whether *this* agent can retain is the sink's answer, not this module's
@@ -2033,7 +2170,7 @@ export class InterventionEngine {
     if (!memo || needsCandidate) {
       const skip = this.#spendJudgment(state);
       if (skip) {
-        this.#skip(skip);
+        this.#skip(skip, { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
         return downstream;
       }
     }
@@ -2047,7 +2184,8 @@ export class InterventionEngine {
             estimatedTokensSaved: memo.tokensSaved,
             reductionPercentage: reductionPercentage(memo.originalChars, memo.prunedChars),
             shadow: memo.text === undefined,
-            latencyMs: 0
+            latencyMs: 0,
+            ...(memo.diagnostics ?? {})
           }
         // Both modes take the *real* candidate, and both ask for it measure-only.
         // `shadow` only decides whether the backend hands its text back, while
@@ -2079,6 +2217,17 @@ export class InterventionEngine {
       locator
     });
     const candidateTokens = Math.ceil(composed.text.length / 4);
+    // What the judgment reported about its own path, plus the sizes both the plan
+    // and a skip record quote. Recorded even when the candidate is not smaller,
+    // because that is exactly the branch a real run cannot explain from its log.
+    const diagnostics = pruneDiagnosticsOf(response);
+    const measured: InterventionSkipDetail = {
+      ...payloadDetail,
+      ...diagnostics,
+      originalTokens,
+      candidateTokens,
+      candidateChars: composed.text.length
+    };
     // A memo hit hands back a form that was composed for this payload already. It is
     // its own fixed point — it carries the share, so the plan of the same lengths
     // stays "not floored" and gives that text straight back — but its provenance is
@@ -2099,7 +2248,16 @@ export class InterventionEngine {
     };
     if (candidateTokens >= originalTokens) {
       this.#charge('prune', { ...judgment, originalTokens });
-      this.#skip('no-reduction');
+      // The branch a real "prune: active but nothing happened" run lands in: the
+      // judgment ran, and the candidate it produced was not smaller. The record
+      // says so with the path that produced it and the sizes both sides had.
+      this.#skip('no-reduction', {
+        capability: 'prune',
+        state,
+        agent: exec.agent,
+        detail: measured,
+        judgment
+      });
       return downstream;
     }
 
@@ -2113,7 +2271,10 @@ export class InterventionEngine {
         floorApplied,
         confidence: response.reductionPercentage,
         turn: state.turn,
-        step: state.step
+        step: state.step,
+        ...diagnostics,
+        originalChars: text.length,
+        candidateChars: composed.text.length
       }
     };
     const planCosts = { originalTokens, candidateTokens, potentialSavedTokens: originalTokens - candidateTokens };
@@ -2132,7 +2293,8 @@ export class InterventionEngine {
           originalChars: text.length,
           prunedChars: composed.text.length,
           tokensSaved: originalTokens - candidateTokens,
-          floored: floorApplied
+          floored: floorApplied,
+          diagnostics
         });
       }
       return downstream;
@@ -2157,7 +2319,13 @@ export class InterventionEngine {
       // the waterfall produced it, and no saving is recorded — but the judgment
       // that got this far was really made, so it is charged rather than hidden.
       this.#charge('prune', judgment);
-      this.#skip('retention-failed');
+      this.#skip('retention-failed', {
+        capability: 'prune',
+        state,
+        agent: exec.agent,
+        detail: measured,
+        judgment
+      });
       return downstream;
     }
 
@@ -2179,12 +2347,32 @@ export class InterventionEngine {
     if (installed.text.length === 0 || installed.text.length >= text.length) {
       // The plan said the form is smaller; the form that was really built must be
       // too, or nothing is installed and nothing is saved.
-      this.#skip('no-reduction');
+      this.#skip('no-reduction', {
+        capability: 'prune',
+        state,
+        agent: exec.agent,
+        detail: {
+          ...measured,
+          candidateChars: installed.text.length,
+          candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
+        },
+        judgment
+      });
       return downstream;
     }
     const replacement = this.#replaceText(effective, installed.text);
     if (!replacement) {
-      this.#skip('no-text-block');
+      this.#skip('no-text-block', {
+        capability: 'prune',
+        state,
+        agent: exec.agent,
+        detail: {
+          ...measured,
+          candidateChars: installed.text.length,
+          candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
+        },
+        judgment
+      });
       return downstream;
     }
 
@@ -2192,6 +2380,7 @@ export class InterventionEngine {
     // saving recorded — against the text that is really about to enter the context.
     const installedTokens = Math.max(0, Math.ceil(installed.text.length / 4));
     plan.detail.floorApplied = installed.floored;
+    plan.detail.candidateChars = installed.text.length;
     plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, installed.floored);
     // Booked only here: a candidate that was not smaller, a replacement that could
     // not be composed, and a retention that failed all returned above, so none of
@@ -2223,7 +2412,8 @@ export class InterventionEngine {
       prunedChars: installed.text.length,
       tokensSaved: originalTokens - installedTokens,
       floored: installed.floored,
-      locator: retention.locator
+      locator: retention.locator,
+      diagnostics
     });
     return {
       kind: 'accept',
@@ -2253,11 +2443,13 @@ export class InterventionEngine {
       signature
     });
     if (!suspicion.suspicious || state.applied.has(`gate:${signature}`)) {
-      if (suspicion.suspicious) this.#skip('duplicate-intervention');
+      if (suspicion.suspicious) {
+        this.#skip('duplicate-intervention', { capability: 'gate', state, agent: exec.agent });
+      }
       return downstream;
     }
     if (!this.#actionWithinBudget(state)) {
-      this.#skip('intervention-cap');
+      this.#skip('intervention-cap', { capability: 'gate', state, agent: exec.agent });
       return downstream;
     }
     const agentId = agentKeyOf(exec.agent);
@@ -2265,7 +2457,12 @@ export class InterventionEngine {
     const judgment = this.#judgmentCharge(verdict, started, this.#now());
     if (!verdict.useful) {
       this.#charge('gate', judgment);
-      this.#skip(verdict.skip ?? 'unconfirmed');
+      this.#skip(verdict.skip ?? 'unconfirmed', {
+        capability: 'gate',
+        state,
+        agent: exec.agent,
+        judgment
+      });
       return downstream;
     }
 
@@ -2564,7 +2761,14 @@ export class InterventionEngine {
       ...(judgment?.memoHits ? { memoHit: true } : {}),
       ...(originalLocator === undefined ? {} : { originalLocator }),
       ...(plan.detail.turn === undefined ? {} : { turn: plan.detail.turn }),
-      ...(plan.detail.step === undefined ? {} : { step: plan.detail.step })
+      ...(plan.detail.step === undefined ? {} : { step: plan.detail.step }),
+      ...(plan.detail.judgePath === undefined ? {} : { judgePath: plan.detail.judgePath }),
+      ...(plan.detail.judgedSegments === undefined ? {} : { judgedSegments: plan.detail.judgedSegments }),
+      ...(plan.detail.unjudgedSegments === undefined ? {} : { unjudgedSegments: plan.detail.unjudgedSegments }),
+      ...(plan.detail.keptSegments === undefined ? {} : { keptSegments: plan.detail.keptSegments }),
+      ...(plan.detail.originalChars === undefined ? {} : { originalChars: plan.detail.originalChars }),
+      ...(plan.detail.candidateChars === undefined ? {} : { candidateChars: plan.detail.candidateChars }),
+      ...(plan.detail.fallbackReason === undefined ? {} : { fallbackReason: plan.detail.fallbackReason })
     };
     this.#recent.push(record);
     if (this.#recent.length > MAX_RECENT) this.#recent.shift();
@@ -2599,9 +2803,63 @@ export class InterventionEngine {
     }
   }
 
-  /** Count one hook-level refusal by reason. */
-  #skip(reason: string): void {
+  /**
+   * Count one hook-level refusal by reason, and leave it in the session log.
+   *
+   * The counter is process-local and only answers "what did this activation
+   * skip"; the record is the durable half, because the question a real run
+   * raises is *why was nothing pruned* — and a branch that never planned
+   * anything otherwise leaves no trace at all. The write is best-effort by
+   * construction: no budget is charged, nothing is projected into the model's
+   * context, and a sink that throws or a session that is missing leaves the
+   * hook's own decision untouched.
+   *
+   * @param reason - the machine reason of the branch that abandoned the plan.
+   * @param context - capability, deciding state, agent, and prune diagnostics.
+   */
+  #skip(reason: string, context: SkipContext): void {
     this.#skips.set(reason, (this.#skips.get(reason) ?? 0) + 1);
+    this.#auditSkip(reason, context);
+  }
+
+  /** Write one abandoned plan to the audit channel, fail-open. */
+  #auditSkip(reason: string, context: SkipContext): void {
+    const audit = this.#audit;
+    if (!audit) return;
+    try {
+      const detail = context.detail;
+      const record: InterventionAuditRecord = {
+        capability: context.capability,
+        action: 'skip',
+        mode: this.modeOf(context.capability),
+        applied: false,
+        reason,
+        feedback: '',
+        localLatencyMs: context.judgment?.localLatencyMs ?? 0,
+        remoteLatencyMs: context.judgment?.remoteLatencyMs ?? 0,
+        judgeTokens: context.judgment?.judgeTokens ?? 0,
+        originalTokens: detail?.originalTokens ?? 0,
+        candidateTokens: detail?.candidateTokens ?? 0,
+        potentialSavedTokens: 0,
+        actualSavedTokens: 0,
+        injectedTokens: 0,
+        at: this.#now(),
+        skip: reason,
+        ...(context.state === undefined ? {} : { turn: context.state.turn, step: context.state.step }),
+        ...(detail?.digest === undefined ? {} : { digest: detail.digest }),
+        ...(detail?.judgePath === undefined ? {} : { judgePath: detail.judgePath }),
+        ...(detail?.judgedSegments === undefined ? {} : { judgedSegments: detail.judgedSegments }),
+        ...(detail?.unjudgedSegments === undefined ? {} : { unjudgedSegments: detail.unjudgedSegments }),
+        ...(detail?.keptSegments === undefined ? {} : { keptSegments: detail.keptSegments }),
+        ...(detail?.originalChars === undefined ? {} : { originalChars: detail.originalChars }),
+        ...(detail?.candidateChars === undefined ? {} : { candidateChars: detail.candidateChars }),
+        ...(detail?.fallbackReason === undefined ? {} : { fallbackReason: detail.fallbackReason })
+      };
+      audit(record, sessionOf(context.agent));
+    } catch {
+      // An audit sink is never allowed to fail a turn, and a skip is reported
+      // even when the log refused it: the counter above is already committed.
+    }
   }
 
   // ── state ─────────────────────────────────────────────────────────────────
