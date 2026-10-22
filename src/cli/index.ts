@@ -12,6 +12,7 @@ import { ToolResultPruner } from '../core/prune.js';
 import { DecisionLedger } from '../core/ledger.js';
 import { ReflexScreenService } from '../core/screen.js';
 import { fitIsotonicRegression, calculateECE, CalibrationCurve, Calibrator } from '../core/calibrate.js';
+import { runHookCli } from '../hook/cli.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -258,9 +259,9 @@ async function main() {
     }
 
     case 'hook': {
-      // Internal hook dispatcher for AGY/Claude hooks
-      const hookType = args[1] || 'default';
-      // Hook executed silently
+      // Command-hook dispatcher: reads one host event on stdin and writes one
+      // protocol JSON object on stdout. See docs/design/v0.2.0-harness-plugins.md §2.5.
+      await runHookCli(args.slice(1));
       break;
     }
 
@@ -277,6 +278,7 @@ Commands:
   setup [target]      Configure target harness (claude | codex | agy | all)
   gate [options]      Evaluate assertions against evidence (fail-closed)
   prune [options]     Prune lengthy tool outputs on stdin
+  hook <event>        Command-hook entry (pretooluse|posttooluse|postfailure|stop|substop|sessionstart|sessionend)
   ledger              Show decision ledger summary and token savings
   help                Display this help message
 

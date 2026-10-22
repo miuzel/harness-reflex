@@ -245,6 +245,41 @@ export interface RouteResponse {
 }
 
 /**
+ * One batch of sentences a closing check must classify before it may verify
+ * anything.
+ *
+ * The candidates are chosen deterministically (the last few sentences of the
+ * turn), but *which* of them claims completion is a semantic question: a word
+ * list would miss a Chinese "全部通过" and read a negated "not complete" as the
+ * opposite. A backend that can answer exposes `classifyClaims`; one that cannot
+ * leaves the closing check on its fail-open path.
+ */
+export interface ClaimClassificationRequest {
+  /** Candidate sentences, in the order the caller will treat them. */
+  statements: string[];
+  /** What the turn was doing, so the classifier reads the sentences in context. */
+  intent: string;
+  /** Extra context (the turn's own summary) when the caller has one. */
+  context?: string;
+}
+
+/** One sentence's classification. */
+export interface ClaimClassification {
+  statement: string;
+  /** Whether the winning criterion says the sentence claims completion. */
+  isClaim: boolean;
+  /** Probability of the completion-claim criterion, in `[0, 1]`. */
+  confidence: number;
+}
+
+/** The classification answer for one closing candidate batch. */
+export interface ClaimClassificationResponse {
+  /** One entry per submitted statement, in submission order when answered. */
+  results: ClaimClassification[];
+  latencyMs: number;
+}
+
+/**
  * Common interface for decision backends (Jev official, Simple-Jev, vLLM, mock)
  */
 export interface DecisionBackend {
@@ -256,6 +291,8 @@ export interface DecisionBackend {
   prune(req: PruneRequest): Promise<PruneResponse>;
   checkStagnation(req: StagnationCheckRequest): Promise<StagnationCheckResponse>;
   route(req: RouteRequest): Promise<RouteResponse>;
+  /** Classify completion-claim candidates, when the backend can answer at all. */
+  classifyClaims?(req: ClaimClassificationRequest): Promise<ClaimClassificationResponse>;
   /**
    * Health of the backend's outbound conversation, when it has one.
    *
