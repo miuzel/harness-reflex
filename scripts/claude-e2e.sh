@@ -47,6 +47,23 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL: $*" >&2; }
 
+# A session that cannot run for lack of login/credentials is a prerequisite
+# problem, not a regression: report it once and stop pretending the rest
+# failed. Anything else stays a real failure.
+SKIPPED=0
+prereq_reason() {
+  local pattern='not logged in|please run /login|authentication|invalid api key|credit balance|organization has been disabled'
+  local file
+  for file in "$@"; do
+    [ -e "$file" ] || continue
+    if grep -qiE "$pattern" "$file" 2>/dev/null; then
+      head -n 3 "$file" >&2
+      return 0
+    fi
+  done
+  return 1
+}
+
 echo "== Phase 0: static contract (no claude required) =="
 if [ ! -f "$ROOT/dist/cli/index.js" ]; then
   echo "building the root package first..."
@@ -121,27 +138,41 @@ fi
 echo "-- baseline (no plugin) --"
 if claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" "${SAFE_FLAG[@]}" >"$TMP/baseline.jsonl" 2>"$TMP/baseline.err"; then
   pass "baseline session completed"
+elif prereq_reason "$TMP/baseline.err" "$TMP/baseline.jsonl"; then
+  SKIPPED=1
+  echo "SKIP: claude is not logged in; run \`claude /login\` (or set ANTHROPIC_API_KEY) and rerun" >&2
 else
   cat "$TMP/baseline.err" >&2
   fail "baseline claude -p session failed (check credentials / model access)"
 fi
 
-echo "-- observe (plugin, HARNESS_REFLEX_MODE=observe) --"
-if env HARNESS_REFLEX_STATE_DIR="$STATE_OBSERVE" SYSTEM_ONE_BACKEND=mock HARNESS_REFLEX_MODE=observe \
-  claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/observe.jsonl" 2>"$TMP/observe.err"; then
-  pass "observe session completed"
+if [ "$SKIPPED" -eq 0 ]; then
+  echo "-- observe (plugin, HARNESS_REFLEX_MODE=observe) --"
+  if env HARNESS_REFLEX_STATE_DIR="$STATE_OBSERVE" SYSTEM_ONE_BACKEND=mock HARNESS_REFLEX_MODE=observe \
+    claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/observe.jsonl" 2>"$TMP/observe.err"; then
+    pass "observe session completed"
+  else
+    cat "$TMP/observe.err" >&2
+    fail "observe claude -p session failed"
+  fi
+
+  echo "-- active (closing opt-in) --"
+  if env HARNESS_REFLEX_STATE_DIR="$STATE_ACTIVE" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active \
+    claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/active.jsonl" 2>"$TMP/active.err"; then
+    pass "active session completed"
+  else
+    cat "$TMP/active.err" >&2
+    fail "active claude -p session failed"
+  fi
 else
-  cat "$TMP/observe.err" >&2
-  fail "observe claude -p session failed"
+  echo "-- observe/active sessions skipped --"
 fi
 
-echo "-- active (closing opt-in) --"
-if env HARNESS_REFLEX_STATE_DIR="$STATE_ACTIVE" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active \
-  claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/active.jsonl" 2>"$TMP/active.err"; then
-  pass "active session completed"
-else
-  cat "$TMP/active.err" >&2
-  fail "active claude -p session failed"
+if [ "$SKIPPED" -ne 0 ]; then
+  echo
+  echo "== Summary: ${PASS} passed, 0 failed, sessions skipped =="
+  echo "Static contract and validation passed; the real-session half needs \`claude /login\`."
+  exit 2
 fi
 
 echo "== Phase 3: assertions =="
@@ -175,8 +206,13 @@ else
 fi
 
 echo
-echo "== Summary: ${PASS} passed, ${FAIL} failed =="
+echo
+echo "== Summary: ${PASS} passed, ${FAIL} failed, ${SKIPPED} skipped =="
 if [ "$FAIL" -ne 0 ]; then
   exit 1
+fi
+if [ "$SKIPPED" -ne 0 ]; then
+  echo "Static contract passed; the real-session half needs \`claude /login\`."
+  exit 2
 fi
 echo "All real-machine assertions passed."

@@ -29,63 +29,55 @@ export const EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'm
 export const EFFORT_UNSET = 'off';
 
 /**
- * Resolve the configured effort, or `undefined` when the user left it alone.
+ * Reduce one authored value to an effort Claude Code accepts.
  *
- * `options` is what Claude Code passes to `register` (the plugin's declared
- * `userConfig` values with defaults filled in). `$.env` is the mods API, read
- * defensively so a unit test can supply a plain object.
+ * Pure on purpose: the mods scanner refuses a hook that passes `$` around, so
+ * the env read happens at the call site and only the string reaches this
+ * helper. `''`, `off` and anything unknown all mean "leave the request alone".
  *
- * @param {Record<string, unknown>} [options] - plugin userConfig values.
- * @param {{ env?: { get?: (name: string) => string | undefined } }} [$] - mods API.
+ * @param {unknown} value - a `userConfig` value or an environment value.
  * @returns {string | undefined} one of {@link EFFORT_LEVELS}, or `undefined`.
  */
-export function resolveEffort(options = {}, $ = {}) {
-  const fromOptions = typeof options.effort_level === 'string' ? options.effort_level : '';
-  let fromEnv = '';
-  try {
-    fromEnv = typeof $.env?.get === 'function' ? String($.env.get('HARNESS_REFLEX_EFFORT') ?? '') : '';
-  } catch {
-    fromEnv = '';
-  }
-  const value = (fromOptions || fromEnv).trim().toLowerCase();
-  if (!value || value === EFFORT_UNSET) return undefined;
-  return EFFORT_LEVELS.includes(value) ? value : undefined;
+export function normalizeEffort(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === '' || trimmed === EFFORT_UNSET) return undefined;
+  return EFFORT_LEVELS.includes(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * Resolve the configured effort from the plugin's `userConfig` alone.
+ *
+ * @param {Record<string, unknown>} [options] - plugin `userConfig` values.
+ * @returns {string | undefined} one of {@link EFFORT_LEVELS}, or `undefined`.
+ */
+export function resolveEffort(options = {}) {
+  return normalizeEffort(options.effort_level);
 }
 
 /**
  * Install the mod's middleware.
  *
+ * The mods scanner accepts `on` only as a direct call and `$` only as
+ * `$.noun.method(...)` at the call site, so this function neither stores the
+ * registrations nor hands `$` to a helper: each hook below is a call statement
+ * and every API use is written in full.
+ *
  * @param {(event: string, hook: Function) => unknown} on - the mods registration function.
  * @param {Record<string, unknown>} [options] - plugin `userConfig` values.
- * @returns {unknown[]} the registrations, in installation order.
  */
 export function register(on, options = {}) {
-  if (typeof on !== 'function') {
-    throw new TypeError('harness-reflex mod: register(on, options) requires the mods `on` function');
-  }
+  on('turn.step', async function* ($, e, next) {
+    let fromEnv = '';
+    try {
+      fromEnv = String($.env.get('HARNESS_REFLEX_EFFORT') ?? '');
+    } catch {
+      fromEnv = '';
+    }
+    const authored = typeof options.effort_level === 'string' ? options.effort_level : '';
+    const effort = normalizeEffort(authored.trim() === '' ? fromEnv : authored);
+    yield* next(effort === undefined ? e : { ...e, effort });
+  });
 
-  const registrations = [];
-
-  registrations.push(
-    on('turn.step', async function* turnStep($, event, next) {
-      let requested = event;
-      try {
-        const effort = resolveEffort(options, $);
-        if (effort) requested = { ...event, effort };
-      } catch {
-        requested = event;
-      }
-      yield* next(requested);
-    })
-  );
-
-  registrations.push(
-    on('tool.call', async ($, event, next) => {
-      // See the module header: the decision path lives in the command hooks in
-      // S3. Forwarding keeps this handler observational and idempotent.
-      return next(event);
-    })
-  );
-
-  return registrations;
+  on('tool.call', async ($, e, next) => next(e));
 }

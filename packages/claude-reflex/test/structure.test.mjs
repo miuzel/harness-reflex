@@ -152,28 +152,35 @@ function listMcpTools(cli) {
 }
 
 test('mod: turn.step applies only a valid configured effort; tool.call forwards', async () => {
-  const { register, resolveEffort, EFFORT_LEVELS } = await import('../hooks/register.js');
+  const { register, resolveEffort, normalizeEffort, EFFORT_LEVELS } = await import('../hooks/register.js');
 
   /** Install the mod once with one `userConfig` object. */
   function install(options) {
     const handlers = new Map();
+    const registrations = [];
     const on = (event, hook) => {
       handlers.set(event, hook);
-      return { event, off() {} };
+      const registration = { event, off() {} };
+      registrations.push(registration);
+      return registration;
     };
-    const registrations = register(on, options);
-    return { handlers, registrations };
+    // The real API wants `on` called as a statement; the return value is the
+    // scanner's business, not the plugin's.
+    const returned = register(on, options);
+    return { handlers, registrations, returned };
   }
 
   const defaultInstall = install({});
   assert.equal(defaultInstall.registrations.length, 2);
+  assert.equal(defaultInstall.returned, undefined, 'register returns nothing; the scanner refuses a stored registration');
   assert.deepEqual([...defaultInstall.handlers.keys()], ['turn.step', 'tool.call']);
 
   assert.equal(resolveEffort({ effort_level: 'high' }), 'high');
   assert.equal(resolveEffort({ effort_level: 'HIGH' }), 'high');
   assert.equal(resolveEffort({ effort_level: 'off' }), undefined);
   assert.equal(resolveEffort({ effort_level: 'ultra' }), undefined);
-  assert.equal(resolveEffort({}, { env: { get: () => 'low' } }), 'low');
+  assert.equal(normalizeEffort(' max '), 'max');
+  assert.equal(normalizeEffort(''), undefined);
 
   /** Drive one turn.step handler and capture the event passed to next. */
   async function drive(handlers, envValue) {
