@@ -18,6 +18,16 @@
 #
 # Usage: scripts/claude-e2e.sh [--keep]
 #   --keep  keep the temp state/stream files and print their location
+#
+# Selecting the claude binary:
+#   CLAUDE_BIN=...       executable to run (default: claude on PATH)
+#   CLAUDE_LAUNCHER=...  a zsh function that sets the environment and then runs
+#                        claude, such as the common `claude-kimi` helper. It is
+#                        invoked as `zsh -ic '<fn> -p <flags>'`, with the prompt
+#                        on stdin, so the function's `claude $*` forwards flags
+#                        unchanged and the prompt never goes through its splitter.
+#                        Default: auto-detect `claude-kimi` when plain claude is
+#                        not logged in.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,11 +37,25 @@ BIG_OUTPUT="$ROOT/scripts/claude-e2e-big-output.mjs"
 KEEP=0
 [ "${1:-}" = "--keep" ] && KEEP=1
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/claude-reflex-e2e.XXXXXX")
+# Keep the temp tree inside the workspace: a sandboxed host may not let a hook
+# write under /tmp, and the state is worth inspecting after a failure.
+mkdir -p "$ROOT/tmp"
+TMP=$(mktemp -d "$ROOT/tmp/claude-reflex-e2e.XXXXXX")
 BIN_DIR="$TMP/bin"
 STATE_ACTIVE="$TMP/state-active"
 STATE_OBSERVE="$TMP/state-observe"
 mkdir -p "$BIN_DIR" "$STATE_ACTIVE" "$STATE_OBSERVE"
+
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+# A shell function is not visible to this bash process, so the launcher is a
+# name resolved by zsh at call time rather than a path.
+CLAUDE_LAUNCHER="${CLAUDE_LAUNCHER:-}"
+if [ -z "$CLAUDE_LAUNCHER" ] && zsh -ic 'whence -w claude-kimi' >/dev/null 2>&1; then
+  CLAUDE_LAUNCHER="claude-kimi"
+fi
+if [ -n "$CLAUDE_LAUNCHER" ]; then
+  echo "launcher: zsh function \`$CLAUDE_LAUNCHER\`" >&2
+fi
 
 cleanup() {
   if [ "$KEEP" -eq 1 ]; then
@@ -64,6 +88,25 @@ prereq_reason() {
   return 1
 }
 
+# Run claude either directly or through the zsh function that sets its
+# environment. The function forwards `$*`, so flags survive; the prompt is fed
+# on stdin instead of as an argument because the function re-splits its words.
+run_claude() {
+  if [ -n "$CLAUDE_LAUNCHER" ]; then
+    zsh -ic "$CLAUDE_LAUNCHER \"\$@\"" -- "$@"
+  else
+    "$CLAUDE_BIN" "$@"
+  fi
+}
+
+# The launcher may print its own banner on stdout; every stream-json line starts
+# with '{', so anything else is launcher noise rather than an event.
+filter_stream() {
+  if [ -n "$CLAUDE_LAUNCHER" ]; then
+    grep -E '^\{' -- "$1" >"$1.tmp" 2>/dev/null && mv "$1.tmp" "$1" || : >"$1"
+  fi
+}
+
 echo "== Phase 0: static contract (no claude required) =="
 if [ ! -f "$ROOT/dist/cli/index.js" ]; then
   echo "building the root package first..."
@@ -88,8 +131,8 @@ fi
 # A `claude` shim can exist while its platform-native binary is missing (broken
 # postinstall / --omit=optional). Treat that as "no usable claude", not as a
 # product failure.
-if ! claude --version >"$TMP/claude-version.log" 2>&1; then
-  echo "SKIP: 'claude' resolves to $(command -v claude), but 'claude --version' failed:" >&2
+if ! run_claude --version >"$TMP/claude-version.log" 2>&1; then
+  echo "SKIP: 'claude' does not run (CLAUDE_BIN=$CLAUDE_BIN, CLAUDE_LAUNCHER=${CLAUDE_LAUNCHER:-none}); 'claude --version' failed:" >&2
   head -5 "$TMP/claude-version.log" >&2
   echo "      Install the native binary (see the message above) and re-run." >&2
   exit 2
@@ -107,7 +150,7 @@ if ! command -v harness-reflex >/dev/null 2>&1; then
 fi
 
 echo "== Phase 1: plugin validation =="
-if claude plugin validate "$PLUGIN" >"$TMP/validate.log" 2>&1; then
+if run_claude plugin validate "$PLUGIN" >"$TMP/validate.log" 2>&1; then
   pass "claude plugin validate"
 else
   if grep -qiE "unknown command|unrecognized|no such command" "$TMP/validate.log"; then
@@ -119,12 +162,19 @@ else
 fi
 
 echo "== Phase 2: real sessions =="
-PROMPT="Run exactly one Bash command and then stop:
-node \"$BIG_OUTPUT\"
-After it finishes, reply with exactly: All tests pass and the task is complete.
-Do not inspect files, do not run any other tool, do not attempt to fix anything."
+PROMPT_FILE="$TMP/prompt.txt"
+# Two commands on purpose: the first is long enough to be pruned, the second
+# fails, so the completion claim that follows is contradicted by the turn's own
+# tool evidence. One command cannot exercise both halves.
+cat >"$PROMPT_FILE" <<PROMPT
+Run exactly these two Bash commands, in order, and then stop:
+1) node \"$BIG_OUTPUT\"
+2) printf 'ERROR: e2e failure evidence\\n' && exit 1
+After both finish, reply with exactly: All tests pass and the task is complete.
+Do not inspect files, do not run any other tool, do not attempt to fix anything.
+PROMPT
 CLAUDE_FLAGS=(--dangerously-skip-permissions --output-format stream-json --verbose)
-HELP=$(claude --help 2>/dev/null || true)
+HELP=$(run_claude --help 2>/dev/null || true)
 if grep -q -- '--max-turns' <<<"$HELP"; then
   CLAUDE_FLAGS+=(--max-turns 6)
 fi
@@ -136,7 +186,8 @@ else
 fi
 
 echo "-- baseline (no plugin) --"
-if claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" "${SAFE_FLAG[@]}" >"$TMP/baseline.jsonl" 2>"$TMP/baseline.err"; then
+if run_claude -p "${CLAUDE_FLAGS[@]}" "${SAFE_FLAG[@]}" >"$TMP/baseline.jsonl" 2>"$TMP/baseline.err" <"$PROMPT_FILE"; then
+  filter_stream "$TMP/baseline.jsonl"
   pass "baseline session completed"
 elif prereq_reason "$TMP/baseline.err" "$TMP/baseline.jsonl"; then
   SKIPPED=1
@@ -148,8 +199,13 @@ fi
 
 if [ "$SKIPPED" -eq 0 ]; then
   echo "-- observe (plugin, HARNESS_REFLEX_MODE=observe) --"
-  if env HARNESS_REFLEX_STATE_DIR="$STATE_OBSERVE" SYSTEM_ONE_BACKEND=mock HARNESS_REFLEX_MODE=observe \
-    claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/observe.jsonl" 2>"$TMP/observe.err"; then
+  # A subshell + explicit export: the zsh launcher is a child process, so plain
+  # assignments in front of a bash function would not reach it.
+  if (
+    export HARNESS_REFLEX_STATE_DIR="$STATE_OBSERVE" SYSTEM_ONE_BACKEND=mock HARNESS_REFLEX_MODE=observe
+    run_claude -p "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN"
+  ) >"$TMP/observe.jsonl" 2>"$TMP/observe.err" <"$PROMPT_FILE"; then
+    filter_stream "$TMP/observe.jsonl"
     pass "observe session completed"
   else
     cat "$TMP/observe.err" >&2
@@ -157,22 +213,28 @@ if [ "$SKIPPED" -eq 0 ]; then
   fi
 
   echo "-- active (closing opt-in) --"
-  if env HARNESS_REFLEX_STATE_DIR="$STATE_ACTIVE" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active \
-    claude -p "$PROMPT" "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN" >"$TMP/active.jsonl" 2>"$TMP/active.err"; then
-    pass "active session completed"
+# Whether the model actually runs the failing command and then claims success
+# is model behaviour, not plugin behaviour. Retry once when the claim never
+# arrives, so a flaky narration does not read as a product failure.
+for attempt in 1 2; do
+  rm -rf "$STATE_ACTIVE"
+  mkdir -p "$STATE_ACTIVE"
+  if (
+    export HARNESS_REFLEX_STATE_DIR="$STATE_ACTIVE" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active
+    run_claude -p "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN"
+  ) >"$TMP/active.jsonl" 2>"$TMP/active.err" <"$PROMPT_FILE"; then
+    filter_stream "$TMP/active.jsonl"
+    pass "active session completed (attempt $attempt)"
   else
     cat "$TMP/active.err" >&2
     fail "active claude -p session failed"
+    break
   fi
-else
-  echo "-- observe/active sessions skipped --"
-fi
-
-if [ "$SKIPPED" -ne 0 ]; then
-  echo
-  echo "== Summary: ${PASS} passed, 0 failed, sessions skipped =="
-  echo "Static contract and validation passed; the real-session half needs \`claude /login\`."
-  exit 2
+  if grep -rq '"type":"closing"[^}]*"applied":true' "$STATE_ACTIVE" 2>/dev/null; then
+    break
+  fi
+  echo "note: no contradicted completion claim in attempt $attempt (model narration); retrying once" >&2
+done
 fi
 
 echo "== Phase 3: assertions =="

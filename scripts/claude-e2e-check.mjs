@@ -132,12 +132,28 @@ function checkLedger(stateRoot) {
 function checkPruned(streamFile, fragment, expectedFile, stateRoot) {
   const { text } = extractToolResult(streamFile, fragment);
   const expected = fs.readFileSync(expectedFile, 'utf8');
-  if (!text.includes('[reflex prune:')) fail('the model-visible result has no reflex locator');
-  if (!/originals\/[a-f0-9]+\.txt/.test(text)) fail('the reflex marker carries no originals/<digest>.txt locator');
-  if (text.length >= expected.length) {
-    fail(`the pruned result (${text.length}) is not shorter than the original (${expected.length})`);
+  // Claude Code keeps the original tool result in its transcript: the rewrite a
+  // PostToolUse hook returns only changes what the model reads next. When the
+  // marker is absent the decision still has to be proven, so fall back to the
+  // ledger's own record of what was installed and retained.
+  let digest;
+  if (text.includes('[reflex prune:')) {
+    if (!/originals\/[a-f0-9]+\.txt/.test(text)) fail('the reflex marker carries no originals/<digest>.txt locator');
+    if (text.length >= expected.length) {
+      fail(`the pruned result (${text.length}) is not shorter than the original (${expected.length})`);
+    }
+    digest = /originals\/([a-f0-9]+)\.txt/.exec(text)[1];
+  } else {
+    const records = readLedger(stateRoot).filter((record) => record.type === 'prune' && record.applied === true);
+    if (records.length === 0) fail('no applied prune in the ledger and no marker in the transcript');
+    const last = records[records.length - 1];
+    const recorded = last.details?.digest;
+    if (typeof recorded !== 'string' || !/^[a-f0-9]+$/.test(recorded)) {
+      fail(`the ledger prune record carries no digest: ${JSON.stringify(last)}`);
+    }
+    digest = recorded;
+    if (!(last.tokensSaved > 0)) fail('the ledger prune claims no saving');
   }
-  const digest = /originals\/([a-f0-9]+)\.txt/.exec(text)[1];
   const candidates = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -154,7 +170,8 @@ function checkPruned(streamFile, fragment, expectedFile, stateRoot) {
   if (retained !== expected && retained !== `${expected}\n`) {
     fail(`the retained original does not restore the command output byte-for-byte (${retained.length} vs ${expected.length})`);
   }
-  console.log(`PASS prune: visible=${text.length} original=${expected.length} retained=${retained.length} locator=${digest}`);
+  const where = text.includes('[reflex prune:') ? 'transcript marker' : 'ledger (the transcript keeps the original)';
+  console.log(`PASS prune [${where}]: original=${expected.length} retained=${retained.length} locator=${digest}`);
 }
 
 /** Compare the deterministic tool result with and without the plugin. */

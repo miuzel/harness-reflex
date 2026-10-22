@@ -226,3 +226,27 @@ scripts/claude-e2e.sh --keep   # 保留临时 state / stream 文件
 | mod 在 v2.1.287+ 的加载与 `turn.step` effort 生效 | 需要 mods 运行时 |
 | WSL 桌面 / 企业策略下的加载面 | 取决于用户环境 |
 | 收尾核验转 active 的误报率 | 需要真实模型行为样本 |
+
+## 用自定义启动器跑 e2e（例如 `claude-kimi`）
+
+本机把 claude 包在 zsh 函数里（`claude-kimi` 会先 export `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_API_KEY` 再调 `claude`）时，直接跑脚本会得到 `Not logged in`。脚本支持把它当启动器：
+
+```bash
+cd packages/../..            # 仓库根
+npm run build:all
+CLAUDE_LAUNCHER=claude-kimi PATH="$PWD/dist/cli:$PATH" scripts/claude-e2e.sh
+```
+
+- `CLAUDE_LAUNCHER` 是 **zsh 函数名**（不是路径），脚本以 `zsh -ic '<fn> -p <flags>'` 调用它，**prompt 走 stdin**——因为 `claude-kimi` 内部是 `claude $*`，把含换行与引号的 prompt 作为参数会被重新分词。
+- 函数在 stdout 打印的横幅（如 `starting claude with arguments ...`）会被过滤掉，只保留 `{...}` 的 stream-json 行。
+- 需要临时状态目录时脚本会用仓库内 `tmp/`（不是 `/tmp`）：沙箱宿主可能不允许 hook 写 `/tmp`，状态写不进去会让断言看起来像"没生效"。
+- 只想验静态契约与 `claude plugin validate`、不跑真实会话：`CLAUDE_LAUNCHER=... scripts/claude-e2e.sh` 在未登录时会以 exit 2 停下并说明。
+
+断言口径（真实会话部分）：
+
+| 断言 | 依据 |
+|---|---|
+| 剪枝生效 | ledger 的 `prune applied=true` + `originals/<digest>.txt` 与原始输出逐字节一致；Claude Code 的 transcript 保留原文，所以不要求 transcript 出现 locator |
+| 收尾阻断 | ledger 出现 `closing applied=true`，且随后 `stop_hook_active` 的重试被放行 |
+| observe 零副作用 | observe 与"未装插件"的模型可见结果逐字节相同 |
+
