@@ -45,7 +45,7 @@ const ROOT_TOOLS = [
 
 test('manifest: identity and the two user-facing options are complete', () => {
   const manifest = readJson('.claude-plugin/plugin.json');
-  assert.equal(manifest.name, 'claude-reflex');
+  assert.equal(manifest.name, 'harness-reflex');
   assert.match(manifest.name, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
   assert.equal(typeof manifest.version, 'string');
   assert.ok(manifest.version.length > 0);

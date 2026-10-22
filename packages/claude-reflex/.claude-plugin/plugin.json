@@ -1,5 +1,5 @@
 {
-  "name": "claude-reflex",
+  "name": "harness-reflex",
   "displayName": "Harness Reflex",
   "version": "0.1.0",
   "description": "Automatic pruning, stagnation checks, failure corrections and stop-time closing verification for Claude Code, backed by the harness-reflex decision runtime. Ships a mod, settings hooks and the 8-tool MCP server.",
