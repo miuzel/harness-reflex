@@ -487,9 +487,9 @@ function run(command, args) {
  * Re-copy pristine sources, the tsconfig, and the published manifest and client
  * artifact into the scratch copy.
  *
- * The client half's tests read `package.json` and the generated `client.js` as
- * the DSH loader would, so the copy has to carry them; otherwise the baseline
- * would be red for a missing file rather than for a real fault.
+ * The client half's tests read `package.json`, `README.md` and the generated
+ * `client.js` as the DSH loader would, so the copy has to carry them; otherwise
+ * the baseline would be red for a missing file rather than for a real fault.
  */
 function resetSources() {
   rmSync(path.join(workDir, 'src'), { recursive: true, force: true });
@@ -498,6 +498,7 @@ function resetSources() {
   cpSync(path.join(packageDir, 'tsconfig.json'), path.join(workDir, 'tsconfig.json'));
   cpSync(path.join(packageDir, 'package.json'), path.join(workDir, 'package.json'));
   cpSync(path.join(packageDir, 'tsconfig.client.json'), path.join(workDir, 'tsconfig.client.json'));
+  cpSync(path.join(packageDir, 'README.md'), path.join(workDir, 'README.md'));
   cpSync(path.join(packageDir, 'client.js'), path.join(workDir, 'client.js'));
 }
 

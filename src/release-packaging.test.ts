@@ -16,7 +16,22 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const pluginDir = join(repoRoot, 'packages', 'dsh-reflex');
+/**
+ * Locate the DSH plugin package by its manifest name rather than its directory
+ * name, so renaming the directory cannot silently break this test.
+ */
+function findPluginDir(): string {
+  const packagesDir = join(repoRoot, 'packages');
+  for (const entry of readdirSync(packagesDir)) {
+    const manifestPath = join(packagesDir, entry, 'package.json');
+    if (!existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: string };
+    if (manifest.name === 'dsh-harness-reflex') return join(packagesDir, entry);
+  }
+  throw new Error('no package named dsh-harness-reflex under packages/');
+}
+
+const pluginDir = findPluginDir();
 const releaseDir = join(repoRoot, 'release');
 
 const root = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as Manifest;

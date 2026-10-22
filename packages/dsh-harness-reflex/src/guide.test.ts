@@ -46,7 +46,7 @@ const packageDir = fileURLToPath(new URL('..', import.meta.url));
 
 /** Where the documents and their build products live. */
 const PATHS = {
-  generated: join(repoRoot, 'packages', 'dsh-reflex', 'src', 'client', 'guide.generated.ts'),
+  generated: join(packageDir, 'src', 'client', 'guide.generated.ts'),
   clientArtifact: join(packageDir, 'client.js'),
   clientOut: join(packageDir, 'dist-client'),
   zh: join(repoRoot, 'USER_GUIDE.md'),
@@ -303,7 +303,7 @@ test('the guide renders as elements, never as injected markup', () => {
 test('authored guides and plugin README match registered DSH argument schemas', async () => {
   const host = await createReflexHost({ backend: 'mock' });
   try {
-    for (const [file, column] of [[PATHS.zh, 4], [PATHS.en, 4], [join(repoRoot, 'packages/dsh-reflex/README.md'), 2]] as const) {
+    for (const [file, column] of [[PATHS.zh, 4], [PATHS.en, 4], [join(packageDir, 'README.md'), 2]] as const) {
       const document = readFileSync(file, 'utf8');
       for (const name of host.runtime.toolSurface) {
         const definition = host.ctx.tools.get(name)!;

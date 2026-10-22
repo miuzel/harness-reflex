@@ -17,7 +17,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const vendorRoot = path.join(repoRoot, 'packages', 'dsh-reflex', 'src', 'vendor', 'harness-reflex');
+const vendorRoot = path.join(repoRoot, 'packages', 'dsh-harness-reflex', 'src', 'vendor', 'harness-reflex');
 const checkOnly = process.argv.includes('--check');
 
 /**
@@ -81,5 +81,5 @@ if (checkOnly) {
     console.log('vendored core is in sync');
   }
 } else {
-  console.log(written === 0 ? 'vendored core already in sync' : `synced ${written} file(s) into packages/dsh-reflex/src/vendor/harness-reflex`);
+  console.log(written === 0 ? 'vendored core already in sync' : `synced ${written} file(s) into packages/dsh-harness-reflex/src/vendor/harness-reflex`);
 }

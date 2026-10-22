@@ -2,7 +2,7 @@
 
 > This is the complete manual for the **`dsh-harness-reflex` plugin** and the
 > **`harness-reflex` core package**. The same text is embedded into
-> `packages/dsh-reflex/client.js`, so it can be read directly in the DSH
+> `packages/dsh-harness-reflex/client.js`, so it can be read directly in the DSH
 > settings panel under the **“Guide”** tab (it follows the DSH interface
 > language, Chinese or English).
 > Editing this file therefore requires re-running `npm run build:all`, otherwise
@@ -99,10 +99,10 @@ Every step of `npm run build:all` is required:
 
 1. `tsc`: root `src/` → `dist/`;
 2. `node scripts/link-dsh-deps.mjs`: symlinks this machine's `@deepseek-ai/*`
-   packages into `packages/dsh-reflex/node_modules/` (fully offline, no registry);
-3. `tsc -p packages/dsh-reflex/tsconfig.json`: plugin Host half → `packages/dsh-reflex/dist/`;
+   packages into `packages/dsh-harness-reflex/node_modules/` (fully offline, no registry);
+3. `tsc -p packages/dsh-harness-reflex/tsconfig.json`: plugin Host half → `packages/dsh-harness-reflex/dist/`;
 4. `node scripts/embed-user-guide.mjs` + `tsc -p tsconfig.client.json` +
-   `node packages/dsh-reflex/dist/client-bundle.js packages/dsh-reflex`:
+   `node packages/dsh-harness-reflex/dist/client-bundle.js packages/dsh-harness-reflex`:
    embeds this manual into the browser half and emits the single-file `client.js`.
 
 > The order is not interchangeable: `client.js` must be built after this

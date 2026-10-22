@@ -1,13 +1,13 @@
 # Claude Code 插件形态与 hooks 契约调研
 
-> 面向 v0.2.0「Claude Code 插件」的前置调研。目标：判断 Claude Code 能否承载 `packages/dsh-reflex`
+> 面向 v0.2.0「Claude Code 插件」的前置调研。目标：判断 Claude Code 能否承载 `packages/dsh-harness-reflex`
 > 式的自动干预（剪枝、停滞、收尾核验、失效纠偏），以及应当以什么形态交付。
 >
 > - 文档快照：2026-10-22，抓取自官方文档站 `code.claude.com/docs`（`docs.claude.com` 会 301 到该站）。
-> - 对照口径：`packages/dsh-reflex` 以 v0.2.0 集成分支 `0.2.0-test`（含 `src/interventions.ts`，提交 `ece3846`）为准；
+> - 对照口径：`packages/dsh-harness-reflex` 以 v0.2.0 集成分支 `0.2.0-test`（含 `src/interventions.ts`，提交 `ece3846`）为准；
 >   四项能力的内部分名为 `stagnation` / `prune` / `gate` / `closing`（见该分支 `src/config.ts` 的
 >   `INTERVENTION_CAPABILITIES`）。当前发布基线 `96ee842` 尚未包含该文件，其工具面为 8 个 `reflex_*`
->   （见 `packages/dsh-reflex/src/tools.ts`）；本报告第 5 节的差异判断以集成分支为准，并在需要处注明基线形状。
+>   （见 `packages/dsh-harness-reflex/src/tools.ts`）；本报告第 5 节的差异判断以集成分支为准，并在需要处注明基线形状。
 > - 标注约定：**【事实】** 有官方文档原文或本地源码支持；**【推断】** 由事实推导、官方未直接承诺；
 >   **【未验证】** 本次未找到官方依据或未在本机实测。
 > - 边界：只调研与写文档，不改代码、不改版本号、不提交 PR。
@@ -380,7 +380,7 @@ JSON 输出、超时与并发都在该页。
 
 ### 5.1 对照口径：DSH 的四项自动干预
 
-**【事实】** v0.2.0 集成分支的 `packages/dsh-reflex/src/interventions.ts` 模块头给出完整映射：
+**【事实】** v0.2.0 集成分支的 `packages/dsh-harness-reflex/src/interventions.ts` 模块头给出完整映射：
 
 | DSH hook | 能力 | 允许做什么 |
 | --- | --- | --- |
@@ -414,7 +414,7 @@ session log 保留且替换确实变短后才记 `saved`，替换发布一个由
 
 **【推断】** 下表 Claude Code 侧为能力推导，不是某个官方“对照表”。
 
-| 维度 | DSH `packages/dsh-reflex`（0.2.0 集成线） | Claude Code 插件（可做到） |
+| 维度 | DSH `packages/dsh-harness-reflex`（0.2.0 集成线） | Claude Code 插件（可做到） |
 | --- | --- | --- |
 | 决策工具 | 5 个进程内 `reflex_*`（route 默认关） | MCP stdio server 暴露同等工具；模型通过 `mcp__<server>__<tool>` 调用 |
 | 剪枝/停滞/台账 | 不占工具位：自动干预 + `/reflex-ledger` | 没有等价“自动层”；只能 hooks/mods 自建；台账需自建命令或工具 |
@@ -597,11 +597,11 @@ session log 保留且替换确实变短后才记 `saved`，替换发布一个由
 
 **本地可验证事实（v0.2.0 集成分支 `0.2.0-test`，提交 `ece3846`）**
 
-- `packages/dsh-reflex/src/interventions.ts`：模块头四能力映射；三态 off/observe/active；fail-open；
+- `packages/dsh-harness-reflex/src/interventions.ts`：模块头四能力映射；三态 off/observe/active；fail-open；
   per-turn/per-session 预算；剪枝 locator 与“验证后才记 saved”。
-- `packages/dsh-reflex/src/config.ts`：`INTERVENTION_CAPABILITIES = ['stagnation','prune','gate','closing']`。
-- `packages/dsh-reflex/src/tools.ts`：5 个工具（choice/score/route/screen/gate，route 默认关）。
-- 发布基线 `96ee842` 的 `packages/dsh-reflex/src/tools.ts`：8 个工具（含 prune/detect_stagnation/status_ledger），
+- `packages/dsh-harness-reflex/src/config.ts`：`INTERVENTION_CAPABILITIES = ['stagnation','prune','gate','closing']`。
+- `packages/dsh-harness-reflex/src/tools.ts`：5 个工具（choice/score/route/screen/gate，route 默认关）。
+- 发布基线 `96ee842` 的 `packages/dsh-harness-reflex/src/tools.ts`：8 个工具（含 prune/detect_stagnation/status_ledger），
   不含 `interventions.ts`。
 
 > 说明：以上本地路径用 `git show ece3846:<path>` 可复查；`0.2.0-test` 是 v0.2.0 的集成分支。

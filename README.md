@@ -54,7 +54,7 @@
 
 4. **DSH Host 插件（进程内集成，`dsh-harness-reflex`）**：
    - 除 stdio MCP 之外，同一套 System One 能力还以 **DSH Cordis Host 插件**形式在 `dsh` 进程内注册：
-     `packages/dsh-reflex/` 通过 `ctx.tools` 注册 **5 个可开关工具** `reflex_choice` / `reflex_score` /
+     `packages/dsh-harness-reflex/` 通过 `ctx.tools` 注册 **5 个可开关工具** `reflex_choice` / `reflex_score` /
      `reflex_route` / `reflex_screen` / `reflex_gate`，**默认开启前 4 个、`route` 默认关闭**。
    - **剪枝、停滞拦截、收尾核验与失效纠偏是自动干预**，不是工具：它们由宿主的
      `tools/post-execute`、`agent/pre-step`、`agent/turn-stopping` 钩子按 `interventions.mode`
@@ -70,7 +70,7 @@
    - 路由**上下文感知且带会话粘性**：决策请求带上本会话累积的上下文规模与当前物理模型，提示词写明
      「保留当前模型可省缓存、非必要不切」，名次相近（未超出 `stickyMargin`，默认 15%）时守住已在用的
      模型，只有明显更合适才切换；`model-route` 台账记 `currentModel` / `switched` / `contextTokens`。
-   - 详见 [`docs/dsh-plugin.md`](docs/dsh-plugin.md) 与 [`packages/dsh-reflex/README.md`](packages/dsh-reflex/README.md)。
+   - 详见 [`docs/dsh-plugin.md`](docs/dsh-plugin.md) 与 [`packages/dsh-harness-reflex/README.md`](packages/dsh-harness-reflex/README.md)。
 
 5. **Claude Code 插件三件套（v0.2.0）**：
    - `packages/claude-reflex/` 同时携带 **mod**（`turn.step` effort 接线）、**settings hooks**

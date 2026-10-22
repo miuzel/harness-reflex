@@ -1,6 +1,6 @@
 # Harness Reflex 发布手册（0.1.0）
 
-> **适用范围**：本仓库 `harness-reflex`（根包）与 `packages/dsh-reflex`（DSH 宿主插件）的 0.1.0 发布。
+> **适用范围**：本仓库 `harness-reflex`（根包）与 `packages/dsh-harness-reflex`（DSH 宿主插件）的 0.1.0 发布。
 > **状态**：0.1.0 代码面已收口——两包版本 `0.1.0`、插件改名 `dsh-harness-reflex`、文档统一口径、`release-pack` 27/27。
 > **0.1.0 尚未发布**：tag / npm publish / GitHub Release / 商店提交仍为**待负责人**的人工 gate。
 > **事实基准**：分支 `integration/v0.1.0` @ `9235039` + 本次 0.1.0 改动，核对日期 2026-10-21；环境 Node `v26.7.0`、npm `12.0.2`、pnpm `12.3.4`、dsh `0.2.1-rc.2`。
@@ -39,14 +39,14 @@
 
 | # | 阻塞 / 前置项 | 归属 | 状态 | 证据 / 待办 |
 |---|---|---|---|---|
-| B1 | 版本号同步到 `0.1.0` | 本次执行 | ✅ **已完成** | 根 `package.json`、`packages/dsh-reflex/package.json`、`panel-api.ts`、lock、测试/文档引用全部为 `0.1.0` |
+| B1 | 版本号同步到 `0.1.0` | 本次执行 | ✅ **已完成** | 根 `package.json`、`packages/dsh-harness-reflex/package.json`、`panel-api.ts`、lock、测试/文档引用全部为 `0.1.0` |
 | B2 | 打包与自检链路 | 本仓库 | ✅ **已具备** | `node scripts/release-pack.mjs` 实测 **27/27 checks passed**（2026-10-21，0.1.0） |
 | B3 | 真机安装 / 启动 / 面板 | 本仓库 | ✅ **已具备（0.1.0）** | 隔离 `DSH_HOME` + tarball `dsh plugin --profile web add --force` 成功；`/dsh-reflex/api/health` 返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`；`/panel` 可读；`/reflex-ledger` 可执行 |
 | B4 | npm 插件包名最终定名 | 负责人 | ✅ **已决策并落地** | `dsh-reflex` 已被他人占用（0.3.0）；最终采用社区惯例 `dsh-` 前缀 + 项目名，非 scoped 的 `dsh-harness-reflex`。主管已在 registry 确认 `npm view dsh-harness-reflex` 返回 E404（可用）。命名教训见 §1.1 |
 | B5 | npm 官方 registry 登录态 | 负责人（人工 gate） | ⚠️ **未登录** | `npm config get registry` = `https://registry.npmjs.org/`；`npm whoami` 返回 **E401**。发布前由负责人执行 `npm login` |
 | B6 | Git remote / tag / 公开仓库 | 负责人 | ⏳ 待办 | 当前 `git remote -v` 为空、`git tag -l` 为空；`gh` 已登录 `miuzel`，但 `miuzel/harness-reflex` 尚不存在（GraphQL Could not resolve） |
 | B7 | awesome-dsh-plugin / 商店收录 | 负责人（人工 gate） | ⏳ 待办 | `data/plugins/miuzel__harness-reflex.yml` 不存在（404）；仓库未建，不满足“仓库 ≥1 天、commits ≥10”的 CI 条件 |
-| B8 | `packages/dsh-reflex/client.js` 未入库 | 负责人决策 | ⏳ 待办 | 该文件由 `npm run build:all` 生成、被插件 `files` 白名单收录，但当前分支未跟踪；发布树必须先构建。是否入库由负责人决定 |
+| B8 | `packages/dsh-harness-reflex/client.js` 未入库 | 负责人决策 | ⏳ 待办 | 该文件由 `npm run build:all` 生成、被插件 `files` 白名单收录，但当前分支未跟踪；发布树必须先构建。是否入库由负责人决定 |
 | B9 | 既有文档的旧表述 | 本次执行 | ✅ **已完成** | 根/插件 README、`docs/dsh-plugin.md`、`USER_GUIDE.md`、`docs/USER_GUIDE.en.md` 已统一为「MCP 8 / DSH 5（默认 4）/ 自动干预 / `/reflex-ledger`」，并更新 `dsh-harness-reflex` 安装命令 |
 | B10 | 平台验证范围 | 本仓库 | ⚠️ 部分 | 本轮只在 Linux/WSL2 实测；原生 Windows / macOS **本版未验证**，发布正文必须如实标注 |
 | B11 | `src/release-packaging.test.ts` 固定产物名 | 本次执行 | ✅ **已完成** | 已改为按 `root.version` / `plugin.version` 动态生成，插件包名使用 `dsh-harness-reflex-<version>.tgz` |
@@ -90,15 +90,15 @@
 | 文件 | 处理 | 状态 |
 |---|---|---|
 | `package.json` | `version` → `0.1.0` | ✅ |
-| `packages/dsh-reflex/package.json` | `name` → `dsh-harness-reflex`；`version` → `0.1.0` | ✅ |
-| `packages/dsh-reflex/src/panel-api.ts` | `REFLEX_PLUGIN_VERSION = '0.1.0'` | ✅ |
-| `packages/dsh-reflex/cordis.patch.yml` | `name` → `'dsh-harness-reflex'`（`id` 保持 `dsh-reflex`） | ✅ |
-| `packages/dsh-reflex/src/client-bundle.ts` | `CLIENT_BUNDLE_ID` 从 `package.json.name` 派生（DSH loader 按包名注册） | ✅ |
+| `packages/dsh-harness-reflex/package.json` | `name` → `dsh-harness-reflex`；`version` → `0.1.0` | ✅ |
+| `packages/dsh-harness-reflex/src/panel-api.ts` | `REFLEX_PLUGIN_VERSION = '0.1.0'` | ✅ |
+| `packages/dsh-harness-reflex/cordis.patch.yml` | `name` → `'dsh-harness-reflex'`（`id` 保持 `dsh-reflex`） | ✅ |
+| `packages/dsh-harness-reflex/src/client-bundle.ts` | `CLIENT_BUNDLE_ID` 从 `package.json.name` 派生（DSH loader 按包名注册） | ✅ |
 | `USER_GUIDE.md` / `docs/USER_GUIDE.en.md` | 版本、包名、工具面、安装命令、路由 | ✅ |
-| `packages/dsh-reflex/README.md` / 根 `README.md` / `docs/dsh-plugin.md` | 同上 | ✅ |
+| `packages/dsh-harness-reflex/README.md` / 根 `README.md` / `docs/dsh-plugin.md` | 同上 | ✅ |
 | `src/release-packaging.test.ts` | 按 manifest 版本与包名断言产物 | ✅ |
 | `package-lock.json` | `npm install` 重新生成，根版本 `0.1.0` | ✅ |
-| `packages/dsh-reflex/client.js` | `npm run build:all` 重建（bundle id = `dsh-harness-reflex`） | ✅ |
+| `packages/dsh-harness-reflex/client.js` | `npm run build:all` 重建（bundle id = `dsh-harness-reflex`） | ✅ |
 
 注意：**不要用 `npm version` 一步到位**——它会自动创建 commit/tag，而 tag 属于负责人 gate。建议 `npm pkg set version=0.1.0`。
 
@@ -351,7 +351,7 @@ description:
 
 **当前状态（2026-10-22）**：已提交 PR #8539（awesome-dsh-plugin/awesome-dsh-plugin）。
 
-- 条目：`data/plugins/miuzel__harness-reflex--packages-dsh-reflex.yml`，`url` 指向 `tree/main/packages/dsh-reflex`，`name` 为 `miuzel/harness-reflex#dsh-reflex`，`category: tools`，附 `tarball` 指向 v0.1.0 Release 资产；
+- 条目：`data/plugins/miuzel__harness-reflex--packages-dsh-reflex.yml`（**历史提交名，按旧目录名派生，刻意保留**；目录更名后如重新提交应改为 `--packages-dsh-harness-reflex.yml`），`url` 指向 `tree/main/packages/dsh-harness-reflex`，`name` 为 `miuzel/harness-reflex#dsh-reflex`，`category: tools`，附 `tarball` 指向 v0.1.0 Release 资产；
 - 本地 `check-submission.mjs` 仅剩**仓库年龄**未过（需 1 天，创建于 2026-10-21T15:16Z，约 2026-10-22T15:16Z 自动清除，无需重提）；
 - 教训：单仓多包时条目必须指向**声明 `dsh.bundle` 的子包目录**，文件名用 `<owner>__<repo>--packages-<dir>.yml`；指向仓库根会被判为"装了也没有行为"。registry 发布不是上架的硬前提，但商店通常更偏好可 `npm install` 的包；若 B4 未解决，PR 需在描述中说明 tarball 安装方式，并接受维护者可能要求先解决包名问题。
 

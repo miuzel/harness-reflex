@@ -23,7 +23,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outputPath = path.join(repoRoot, 'packages', 'dsh-reflex', 'src', 'client', 'guide.generated.ts');
+const outputPath = path.join(repoRoot, 'packages', 'dsh-harness-reflex', 'src', 'client', 'guide.generated.ts');
 
 /** Source documents, in both supported languages. */
 const SOURCES = {

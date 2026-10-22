@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Link the local DeepSeek Harness (DSH) installation into this checkout so that
- * `packages/dsh-reflex` can be type-checked, built, and tested without
+ * `packages/dsh-harness-reflex` can be type-checked, built, and tested without
  * publishing it or reaching a registry.
  *
  * The plugin declares its Host contract as peerDependencies
@@ -27,7 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const pluginRoot = path.join(repoRoot, 'packages', 'dsh-reflex');
+const pluginRoot = path.join(repoRoot, 'packages', 'dsh-harness-reflex');
 
 /** Modules the plugin resolves from the Host at build/test time. */
 const HOST_MODULES = [

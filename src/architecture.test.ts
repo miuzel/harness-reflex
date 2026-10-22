@@ -20,7 +20,23 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const coreDir = join(repoRoot, 'src', 'core');
 const portsDir = join(repoRoot, 'src', 'ports');
 const adaptersDir = join(repoRoot, 'src', 'adapters');
-const pluginSrc = join(repoRoot, 'packages', 'dsh-reflex', 'src');
+/**
+ * Locate the DSH plugin package by its manifest name rather than its directory
+ * name, so renaming the directory cannot silently break this test.
+ */
+function findPluginDir(): string {
+  const packagesDir = join(repoRoot, 'packages');
+  for (const entry of readdirSync(packagesDir)) {
+    const manifestPath = join(packagesDir, entry, 'package.json');
+    if (!existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: string };
+    if (manifest.name === 'dsh-harness-reflex') return join(packagesDir, entry);
+  }
+  throw new Error('no package named dsh-harness-reflex under packages/');
+}
+
+const pluginDir = findPluginDir();
+const pluginSrc = join(pluginDir, 'src');
 const vendorRoot = join(pluginSrc, 'vendor', 'harness-reflex');
 
 /** The decision modules extracted in v0.2.0 S1, plus their shared text helper. */

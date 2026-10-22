@@ -398,7 +398,7 @@ Pi 连接 MCP server，把其 tools/resources 暴露给模型（mcp.md §1）：
 ## 7. 与 DSH 插件的能力差集
 
 > DSH 侧钩子名来自本仓库 `CLAUDE.md` 的宿主说明（`tools/post-execute`、`agent/pre-step`、`agent/turn-stopping`），
-> 以及 `packages/dsh-reflex` 的现行实现（`agent/request`、`agent/pre-step`、`ctx.tools.register`）。
+> 以及 `packages/dsh-harness-reflex` 的现行实现（`agent/request`、`agent/pre-step`、`ctx.tools.register`）。
 > 这些是 DSH 宿主契约，不是 pi 的 API。
 
 ### 7.1 四能力逐条对照

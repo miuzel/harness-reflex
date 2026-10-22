@@ -1,7 +1,7 @@
 # Harness Reflex 使用说明（v0.1.0）
 
 > 本文档是 **`dsh-harness-reflex` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
-> 同一份内容会内嵌进 `packages/dsh-reflex/client.js`，可在 DSH 设置面板的
+> 同一份内容会内嵌进 `packages/dsh-harness-reflex/client.js`，可在 DSH 设置面板的
 > **「使用说明 / Guide」** 标签页内直接阅读（跟随 DSH 界面语言中英切换）。
 > 因此修改本文档后必须重新执行 `npm run build:all`，否则面板里仍是上一次构建的副本
 > （`npm run test:plugin` 会用文档摘要做漂移校验）。
@@ -90,10 +90,10 @@ dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
 
 1. `tsc`：根包 `src/` → `dist/`；
 2. `node scripts/link-dsh-deps.mjs`：把本机 DSH 的 `@deepseek-ai/*` 软链进
-   `packages/dsh-reflex/node_modules/`（完全离线，不访问 registry）；
-3. `tsc -p packages/dsh-reflex/tsconfig.json`：插件 Host 半边 → `packages/dsh-reflex/dist/`；
+   `packages/dsh-harness-reflex/node_modules/`（完全离线，不访问 registry）；
+3. `tsc -p packages/dsh-harness-reflex/tsconfig.json`：插件 Host 半边 → `packages/dsh-harness-reflex/dist/`；
 4. `node scripts/embed-user-guide.mjs` + `tsc -p tsconfig.client.json` +
-   `node packages/dsh-reflex/dist/client-bundle.js packages/dsh-reflex`：
+   `node packages/dsh-harness-reflex/dist/client-bundle.js packages/dsh-harness-reflex`：
    把本文档内嵌进浏览器半边并产出单文件 `client.js`。
 
 > 构建顺序不可交换：`client.js` 必须晚于本文档的修改，否则面板显示的说明与仓库文档不一致。

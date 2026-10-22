@@ -91,7 +91,7 @@ function extract(tarball, destination) {
 /** Read the `files` allow-list of a package. */
 function manifests() {
   const root = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
-  const pluginDir = path.join(repoRoot, 'packages', 'dsh-reflex');
+  const pluginDir = path.join(repoRoot, 'packages', 'dsh-harness-reflex');
   const plugin = JSON.parse(fs.readFileSync(path.join(pluginDir, 'package.json'), 'utf8'));
   return { root, plugin, pluginDir };
 }
@@ -110,7 +110,7 @@ const newest = (dir) => {
 };
 for (const [label, sourceDir, products] of [
   ['root', path.join(repoRoot, 'src'), ['dist/index.js']],
-  ['plugin', path.join(repoRoot, 'packages', 'dsh-reflex', 'src'), ['packages/dsh-reflex/dist/index.js', 'packages/dsh-reflex/client.js']]
+  ['plugin', path.join(repoRoot, 'packages', 'dsh-harness-reflex', 'src'), ['packages/dsh-harness-reflex/dist/index.js', 'packages/dsh-harness-reflex/client.js']]
 ]) {
   const oldest = Math.min(...products.map((product) => fs.statSync(path.join(repoRoot, product)).mtimeMs));
   check(`${label}: the build is newer than the sources`, oldest >= newest(sourceDir), `run npm run build:all before packing`);
@@ -131,7 +131,7 @@ function packedFilename(stdout) {
 
 const rootPack = run('npm', ['pack', '--json', '--pack-destination', releaseDir]);
 const rootTarball = path.join(releaseDir, packedFilename(rootPack.stdout));
-const pluginPack = run('npm', ['pack', '--json', '--pack-destination', releaseDir], { cwd: path.join(repoRoot, 'packages', 'dsh-reflex') });
+const pluginPack = run('npm', ['pack', '--json', '--pack-destination', releaseDir], { cwd: path.join(repoRoot, 'packages', 'dsh-harness-reflex') });
 const pluginTarball = path.join(releaseDir, packedFilename(pluginPack.stdout));
 
 for (const [what, tarball] of [
@@ -410,7 +410,7 @@ if (!skipInstall) {
   fs.mkdirSync(path.dirname(packageDir), { recursive: true });
   fs.renameSync(pluginDir, packageDir);
   extract(rootTarball, path.join(modules, 'harness-reflex'));
-  const linkedFrom = path.join(repoRoot, 'packages', 'dsh-reflex', 'node_modules');
+  const linkedFrom = path.join(repoRoot, 'packages', 'dsh-harness-reflex', 'node_modules');
   const linked = [];
   // The host packages are supplied by DSH at run time (peerDependencies); the
   // locally linked copies stand in for that host during the import smoke.

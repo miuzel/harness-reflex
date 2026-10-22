@@ -21,7 +21,7 @@
 
 | 主题 | dsh-graph | 本仓库（已核对） |
 |---|---|---|
-| 包结构 | 单包（`dsh-graph`，host/client 合并） | **双包**：根 `harness-reflex`（core + stdio MCP + CLI）+ `packages/dsh-reflex`（DSH 插件 + 客户端面板） |
+| 包结构 | 单包（`dsh-graph`，host/client 合并） | **双包**：根 `harness-reflex`（core + stdio MCP + CLI）+ `packages/dsh-harness-reflex`（DSH 插件 + 客户端面板） |
 | 打包入口 | `bash scripts/build.sh` + `dist/` + `pnpm pack/publish` | **`node scripts/release-pack.mjs`**（`npm run release:pack`），产物直接落 `release/*.tgz` |
 | 产物 | `dsh-graph-<v>.tgz` 单包 | `release/harness-reflex-<v>.tgz` + `release/dsh-harness-reflex-<v>.tgz`（npm pack 命名）+ `SHA256SUMS` + `release-report.json` + `RELEASE-<v>.md` |
 | 自检 | 冻结验收脚本 / dist freshness 测试 | **27 项自检**（构建新鲜度 2、产物/版本 4、结构审计 10、内容断言 4、安装冒烟 7） |
@@ -70,14 +70,14 @@
 | 文件 | 需要处理的引用 |
 |---|---|
 | `package.json` | ✅ `"version": "0.1.0"` |
-| `packages/dsh-reflex/package.json` | ✅ `name: dsh-harness-reflex`、`version: 0.1.0` |
-| `packages/dsh-reflex/src/panel-api.ts` | ✅ `REFLEX_PLUGIN_VERSION = '0.1.0'` |
+| `packages/dsh-harness-reflex/package.json` | ✅ `name: dsh-harness-reflex`、`version: 0.1.0` |
+| `packages/dsh-harness-reflex/src/panel-api.ts` | ✅ `REFLEX_PLUGIN_VERSION = '0.1.0'` |
 | `USER_GUIDE.md` | ✅ 标题、§13、安装命令、包名与工具面 |
 | `docs/USER_GUIDE.en.md` | ✅ 同中文版；已 `npm run build:all` 重新内嵌 |
-| `packages/dsh-reflex/README.md` | ✅ 包名、vendor 说明、安装命令 |
+| `packages/dsh-harness-reflex/README.md` | ✅ 包名、vendor 说明、安装命令 |
 | `src/release-packaging.test.ts` | ✅ 产物名按 manifest 版本动态生成 |
 | `package-lock.json` | ✅ `npm install` 重新生成，根版本 `0.1.0` |
-| `packages/dsh-reflex/client.js` | ✅ `npm run build:all` 重建（bundle id = `dsh-harness-reflex`） |
+| `packages/dsh-harness-reflex/client.js` | ✅ `npm run build:all` 重建（bundle id = `dsh-harness-reflex`） |
 | `docs/dsh-plugin.md` | ✅ 顶部现行口径 + 历史章节标注 + 版本/产物/路由更新 |
 
 > 不存在的文件：本仓库没有 `pnpm-lock.yaml`（根用 `package-lock.json`，插件无独立 lock）；没有 `CHANGELOG.md`；没有 `LICENSE` 文件（`package.json` 声明 MIT，发布前是否补 LICENSE 由负责人决定）。
@@ -102,5 +102,5 @@
 2. ✅ 插件 `README.md` 已改为「运行时零 `harness-reflex` 依赖，核心 vendored 进 `dist/vendor`」。
 3. ✅ `docs/dsh-plugin.md` 顶部新增现行口径，历史章节保留并标注以现行口径为准。
 4. ✅ `package-lock.json` 已由 `npm install` 重新生成，根版本 `0.1.0`。
-5. 仍待负责人决定：`packages/dsh-reflex/client.js` 是否入库（当前分支未跟踪，发布树必须先构建）。
+5. 仍待负责人决定：`packages/dsh-harness-reflex/client.js` 是否入库（当前分支未跟踪，发布树必须先构建）。
 6. ✅ `USER_GUIDE.md` §2 架构表已改为「5 个可开关工具，默认 4 个」。

@@ -52,7 +52,7 @@
 
 插件依赖 Host 的 `@deepseek-ai/*` 包。本机 npm registry 不可写（离线 / `EROFS`），因此**不需要**在插件目录
 里 `npm install`：仓库根目录的 `scripts/link-dsh-deps.mjs` 会把本机已安装的 DSH 依赖软链到
-`packages/dsh-reflex/node_modules/`（`harness-reflex` 指向仓库根，`@deepseek-ai/*` 指向 DSH 安装目录）。
+`packages/dsh-harness-reflex/node_modules/`（`harness-reflex` 指向仓库根，`@deepseek-ai/*` 指向 DSH 安装目录）。
 
 ```bash
 # 仓库根目录执行：构建根包 → 链接 DSH 依赖 → 构建插件
@@ -73,7 +73,7 @@ DSH_HOST_MODULES=/path/to/dsh/node_modules npm run build:all
 # 从发布 tarball 安装（同版本重装必须 --force）
 dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
 # 开发时也可以直接装目录（会链接当前构建）
-dsh plugin --profile web add ./packages/dsh-reflex
+dsh plugin --profile web add ./packages/dsh-harness-reflex
 ```
 
 插件的配置项（全部可选，schemastery 提供默认值）：
@@ -222,7 +222,7 @@ npm run test:mutation    # 负向对照：注入故障，要求被测试或编�
 ## 已知边界
 
 - 仓库内开发时，`scripts/link-dsh-deps.mjs` 把 `harness-reflex` 与 Host 模块软链进
-  `packages/dsh-reflex/node_modules/`（`--check` 在未就绪时退出码 1，不触碰 registry）；**发布形态不依赖任何
+  `packages/dsh-harness-reflex/node_modules/`（`--check` 在未就绪时退出码 1，不触碰 registry）；**发布形态不依赖任何
   `harness-reflex` 版本范围**：`npm run build:all` 会把根包源码编译进 `dist/vendor/harness-reflex`，tarball
   自包含，安装时只需 Host 提供的 peer 模块。插件 tarball 采用 npm 标准命名
   `release/dsh-harness-reflex-<version>.tgz`（见根 [`README.md`](../../README.md) 的发布产物一节）。

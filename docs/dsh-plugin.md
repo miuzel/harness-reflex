@@ -1,7 +1,7 @@
 # DSH Host 插件：`dsh-harness-reflex` 工程说明
 
 > 本文记录「把 Harness Reflex 的 System One 能力以 DSH Cordis Host 插件形式集成」这一目标的实现方式、
-> 验收对照与验证证据。插件源码在 [`packages/dsh-reflex/`](../packages/dsh-reflex/)。
+> 验收对照与验证证据。插件源码在 [`packages/dsh-harness-reflex/`](../packages/dsh-harness-reflex/)。
 >
 > **现行口径（0.1.0）**：npm 包名 `dsh-harness-reflex`（Cordis 插件 id 仍是 `dsh-reflex`）
 > - MCP 面（根包 stdio server）：**8 个工具**，含 `reflex_prune`/`reflex_detect_stagnation`/`reflex_status_ledger`
@@ -12,7 +12,7 @@
 
 ## 1. 交付形态
 
-- 新增 workspace 包 **`dsh-harness-reflex`**（`packages/dsh-reflex/`），TS 源码 + 插件元数据入库，`dist/` 为构建产物。
+- 新增 workspace 包 **`dsh-harness-reflex`**（`packages/dsh-harness-reflex/`），TS 源码 + 插件元数据入库，`dist/` 为构建产物。
 - 仓库根包 `harness-reflex` 对插件暴露一个新增的共享投影模块 `src/core/score.ts`，并让 ledger 支持
   「纯内存」模式（`new DecisionLedger(null)`），使 Host 内嵌场景不写用户项目。
 - 不改动已发布的对外 MCP 行为；stdio MCP 仍是 8 个 `reflex_*` 工具；DSH 面是 5 个可开关工具（默认 4 个）。
@@ -35,7 +35,7 @@
 
 - 新增**内嵌使用说明与双语查看**（g-005）：仓库文档 [`USER_GUIDE.md`](../USER_GUIDE.md)（中文）与
   [`docs/USER_GUIDE.en.md`](./USER_GUIDE.en.md)（English）经 `scripts/embed-user-guide.mjs` 生成为
-  `packages/dsh-reflex/src/client/guide.generated.ts`（构建产物，已 gitignore），随浏览器半边打进 `client.js`，
+  `packages/dsh-harness-reflex/src/client/guide.generated.ts`（构建产物，已 gitignore），随浏览器半边打进 `client.js`，
   在设置页「使用说明 / Guide」tab 内渲染，并显示文档来源与内容摘要（digest）以便核对版本。
 - 新增**发布打包与核验**：`scripts/release-pack.mjs`（`npm run release:pack` / `npm run release`）把根包与插件包
   打进 `release/`，逐项核验真实 entry 列表（必需文件、零死链、零未声明运行时依赖、无临时/绝对路径），
@@ -45,11 +45,11 @@
 
 | 判据 | 实现 | 证据 |
 | --- | --- | --- |
-| ① 符合 DSH Cordis Host 插件规范 | `package.json`（`name: dsh-harness-reflex`、`exports`、`dsh.bundle.patch`、peerDependencies）→ [`packages/dsh-reflex/package.json`](../packages/dsh-reflex/package.json)；`cordis.patch.yml` 经 YAML 解析得 `[{insert:[{id:dsh-reflex,name:'dsh-harness-reflex'}]}]`；`locale/{zh,en}.json` 均含 `meta.title/description`；`src/index.ts` 导出 `name`/`inject = ['tools', 'llm', 'commands']`/`Config`/`apply(ctx, config)` | `plugin module satisfies the Cordis Host plugin contract`、`Config is a schemastery schema that carries the deployment defaults`；`node -e "yaml.parse(...)"` 校验通过 |
+| ① 符合 DSH Cordis Host 插件规范 | `package.json`（`name: dsh-harness-reflex`、`exports`、`dsh.bundle.patch`、peerDependencies）→ [`packages/dsh-harness-reflex/package.json`](../packages/dsh-harness-reflex/package.json)；`cordis.patch.yml` 经 YAML 解析得 `[{insert:[{id:dsh-reflex,name:'dsh-harness-reflex'}]}]`；`locale/{zh,en}.json` 均含 `meta.title/description`；`src/index.ts` 导出 `name`/`inject = ['tools', 'llm', 'commands']`/`Config`/`apply(ctx, config)` | `plugin module satisfies the Cordis Host plugin contract`、`Config is a schemastery schema that carries the deployment defaults`；`node -e "yaml.parse(...)"` 校验通过 |
 | ② 原生工具注入 + 严格参数校验 + 可调用 | `src/tools.ts` 用 `defineTool` 声明 **5 个可开关工具**（默认 4 个，`route` 关；必填/类型/枚举/嵌套 `additionalProperties: false`），并补一道顶层未声明参数拦截；`src/bridge.ts` 的 `ReflexRuntime` 提供全部实现；prune/stagnation 由 `src/interventions.ts` 自动执行 | `apply registers every enabled tool with a model-visible description`、5 个能力各自的行为测试、`every tool rejects undeclared, missing, mistyped, and out-of-enum arguments`（18 个反例 + 1 个成功对照） |
 | ③ 生命周期完全可逆 | 注册/观察/释放收在单个 `ctx.effect`：卸载时摘除 `tools/change` 观察者 → 逆序注销已注册工具（默认 4、最多 5）→ `/reflex-ledger` 注销 → `runtime.dispose()`（幂等、内存台账清空） | `disposing the context unregisters every tool and disposes the runtime`、`unloading the plugin fiber releases tools, the observer, and the runtime`、`the runtime a Host receives is disposable exactly once and fully`、`a second activation after a full unload rebuilds a working surface`、`two activations on one context own disjoint surfaces and release in any order` |
 | ④ `npm run build` 成功 + 新旧测试全绿 | 根包脚本新增 `build:all` / `test:plugin` / `test:all` / `test:mutation`；`scripts/link-dsh-deps.mjs` 负责离线依赖链接 | `npm run build:all` exit 0；`npm test` = 113/113；`npm run test:plugin` = 419/419；`npm run test:mutation` = 51/51 故障被抓（50 测试 + 1 编译器）；`npm run release:pack` = 27/27 |
-| 包名与路由稳定 | npm 包名 `dsh-harness-reflex`；Cordis id `dsh-reflex`；patch `name: 'dsh-harness-reflex'`；`/dsh-reflex/api/*` 与 `data-reflex-*` 不变 | `grep -rn "dsh-harness-reflex" packages/dsh-reflex/package.json packages/dsh-reflex/cordis.patch.yml`；路由测试断言旧路径仍通过 |
+| 包名与路由稳定 | npm 包名 `dsh-harness-reflex`；Cordis id `dsh-reflex`；patch `name: 'dsh-harness-reflex'`；`/dsh-reflex/api/*` 与 `data-reflex-*` 不变 | `grep -rn "dsh-harness-reflex" packages/dsh-harness-reflex/package.json packages/dsh-harness-reflex/cordis.patch.yml`；路由测试断言旧路径仍通过 |
 
 ## 3. 架构
 
@@ -291,7 +291,7 @@ DSH Web GUI (loader)
 
 ```bash
 npm run build:all      # 根包 tsc → 链接 DSH 依赖 → 插件 tsc → 生成内嵌文档 → 客户端 tsc + 打包  exit 0
-                       #   末步产出 packages/dsh-reflex/client.js
+                       #   末步产出 packages/dsh-harness-reflex/client.js
                        #   (295019 bytes, 9 modules, externals: react)
 npm test               # 根包测试：tests 113 pass 113 fail 0
 npm run test:plugin    # 插件测试：tests 419 pass 419 fail 0
@@ -305,7 +305,7 @@ npm run release:pack   # 打包 release/：27/27 核验通过，两份 tarball +
 客户端半边的四套测试都按 DSH loader 的方式读这个产物，源码改了但没重新打包会被 `client-contract.test.ts`
 （版本号/说明符/注入 id/语言包）与 `client-page.test.ts`（整页行为）直接报出来。
 
-思考等级的决策质量（意图表与断言见 `packages/dsh-reflex/src/effort.test.ts`，18 条带标签的任务文本；
+思考等级的决策质量（意图表与断言见 `packages/dsh-harness-reflex/src/effort.test.ts`，18 条带标签的任务文本；
 两条路径的命中数都被测试钉死，漂移会在 `npm run test:plugin` 里报出每一条 miss）：
 
 ```
@@ -315,8 +315,8 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 
 单次决策耗时：mock backend 下取整为 0 ms（亚毫秒级，无网络、无生成），测试断言 `< 50 ms`。
 
-负向对照（`packages/dsh-reflex/scripts/mutation-check.mjs`）在 gitignore 的
-`packages/dsh-reflex/tmp/mutation/` 里复制源码（含 `package.json` / `client.js` / `tsconfig.client.json`），
+负向对照（`packages/dsh-harness-reflex/scripts/mutation-check.mjs`）在 gitignore 的
+`packages/dsh-harness-reflex/tmp/mutation/` 里复制源码（含 `package.json` / `client.js` / `tsconfig.client.json`），
 先确认副本基线为绿（186 passed），再逐条注入故障。副本会**重建客户端产物**，因此注入到 `src/client/**`
 的故障和注入到 Host 半边的一样能被测试抓住（否则测试只会读到未受影响的旧 bundle）：
 
@@ -443,28 +443,28 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 
 新增：
 
-- `packages/dsh-reflex/`（`package.json`、`cordis.patch.yml`、`locale/{zh,en}.json`、`tsconfig.json`、
+- `packages/dsh-harness-reflex/`（`package.json`、`cordis.patch.yml`、`locale/{zh,en}.json`、`tsconfig.json`、
   `README.md`、`scripts/mutation-check.mjs`、`src/{index,config,bridge,tools,testing}.ts`、
   `src/{plugin,tools,lifecycle}.test.ts`）
-- `packages/dsh-reflex/src/router.ts`（`VirtualModelRouter`：池校验、System 1 决策、降级、审计）
-- `packages/dsh-reflex/src/virtual-adapter.ts`（`ReflexVirtualAdapter`：虚拟 provider 的适配器表面 + 派发层兜底）
-- `packages/dsh-reflex/src/routing.ts`（`installModelRouting`：注册虚拟路由 + `agent/pre-step`/`agent/request` 拦截）
-- `packages/dsh-reflex/src/{router,routing}.test.ts`（17 + 19 个新测试）
-- `packages/dsh-reflex/src/effort.ts`（`EffortInterceptor`：触发判定、System 1 决策、线索投票、投影、状态）
-- `packages/dsh-reflex/src/session-audit.ts`（`plugin:dsh-reflex/effort` 记录的写入与回读）
-- `packages/dsh-reflex/src/{effort,effort-routing}.test.ts`（17 + 12 个新测试）
-- `packages/dsh-reflex/src/panel-api.ts`（面板的 Host 投影与路由：快照投影、loopback 边界、HEAD/405/400/204 语义）
-- `packages/dsh-reflex/src/panel-mount.ts`（`mountReflexPanel`：把面板路由挂进 `ctx.webServer`，单所有者 + 可逆）
-- `packages/dsh-reflex/src/panel-api.test.ts` + `panel-mount.test.ts`（22 + 12 个新测试）
-- `packages/dsh-reflex/src/plugin.test.ts`（+2：System 1 连接块的默认值/校验、api key 只按环境变量名解析）
-- `packages/dsh-reflex/src/client/{index,locale,panel,store,view}.ts`（浏览器半边：槽位注册、zh/en 文案、
+- `packages/dsh-harness-reflex/src/router.ts`（`VirtualModelRouter`：池校验、System 1 决策、降级、审计）
+- `packages/dsh-harness-reflex/src/virtual-adapter.ts`（`ReflexVirtualAdapter`：虚拟 provider 的适配器表面 + 派发层兜底）
+- `packages/dsh-harness-reflex/src/routing.ts`（`installModelRouting`：注册虚拟路由 + `agent/pre-step`/`agent/request` 拦截）
+- `packages/dsh-harness-reflex/src/{router,routing}.test.ts`（17 + 19 个新测试）
+- `packages/dsh-harness-reflex/src/effort.ts`（`EffortInterceptor`：触发判定、System 1 决策、线索投票、投影、状态）
+- `packages/dsh-harness-reflex/src/session-audit.ts`（`plugin:dsh-reflex/effort` 记录的写入与回读）
+- `packages/dsh-harness-reflex/src/{effort,effort-routing}.test.ts`（17 + 12 个新测试）
+- `packages/dsh-harness-reflex/src/panel-api.ts`（面板的 Host 投影与路由：快照投影、loopback 边界、HEAD/405/400/204 语义）
+- `packages/dsh-harness-reflex/src/panel-mount.ts`（`mountReflexPanel`：把面板路由挂进 `ctx.webServer`，单所有者 + 可逆）
+- `packages/dsh-harness-reflex/src/panel-api.test.ts` + `panel-mount.test.ts`（22 + 12 个新测试）
+- `packages/dsh-harness-reflex/src/plugin.test.ts`（+2：System 1 连接块的默认值/校验、api key 只按环境变量名解析）
+- `packages/dsh-harness-reflex/src/client/{index,locale,panel,store,view}.ts`（浏览器半边：槽位注册、zh/en 文案、
   纯视图模型、轮询+提交、设计 token 渲染）
-- `packages/dsh-reflex/src/client-bundle.ts`（`tokenize`/`collectRequires`/`buildBundle`/`verifyClientPackage`：
+- `packages/dsh-harness-reflex/src/client-bundle.ts`（`tokenize`/`collectRequires`/`buildBundle`/`verifyClientPackage`：
   把 `dist-client/**` 打成单一 `window.__ModuleLoader__` 包并核对 externals）
-- `packages/dsh-reflex/src/client-bundle.test.ts` + `client-page.test.ts` + `client-contract.test.ts`
+- `packages/dsh-harness-reflex/src/client-bundle.test.ts` + `client-page.test.ts` + `client-contract.test.ts`
   （7 + 16 + 7 个新测试：打包器单元测试、VM 内整页端到端、清单/产物/注入 id 契约）
-- `packages/dsh-reflex/client.js`（构建产物，入库）
-- `packages/dsh-reflex/tsconfig.client.json`
+- `packages/dsh-harness-reflex/client.js`（构建产物，入库）
+- `packages/dsh-harness-reflex/tsconfig.client.json`
 - `scripts/link-dsh-deps.mjs`
 - `docs/dsh-plugin.md`（本文）
 - `src/core/score.ts`、`src/core/ledger.test.ts`、`src/core/score.test.ts`、`src/mcp/server.test.ts`
@@ -473,12 +473,12 @@ interceptor hits:  18/18 = 1.0000     # System 1 优先 + 兜底（16 条走 Sys
 
 - `package.json`（`build:all` / `test` glob 修正 / `test:plugin` / `test:all` / `test:mutation`）
 - `.gitignore`（新增 `tmp/`、`dist-client/`）
-- `packages/dsh-reflex/package.json`（`exports` 增加 `./client`/`./locale/*.json`，`files` 增加 `client.js`，
+- `packages/dsh-harness-reflex/package.json`（`exports` 增加 `./client`/`./locale/*.json`，`files` 增加 `client.js`，
   新增 `dsh.client` 与 `build:client` 脚本）
-- `packages/dsh-reflex/src/index.ts`（`apply` 的 effect 里增加 `mountReflexPanel`，卸载时一并摘除）
-- `packages/dsh-reflex/src/config.ts`（`systemOne` 块：`backend/baseUrl/model/apiKeyEnv/timeoutMs` +
+- `packages/dsh-harness-reflex/src/index.ts`（`apply` 的 effect 里增加 `mountReflexPanel`，卸载时一并摘除）
+- `packages/dsh-harness-reflex/src/config.ts`（`systemOne` 块：`backend/baseUrl/model/apiKeyEnv/timeoutMs` +
   `resolveSystemOneConfig`/`resolveApiKey`，供面板的「System 1 后端」页读写）
-- `packages/dsh-reflex/scripts/mutation-check.mjs`（基线 95 → 161；scratch 副本补 `package.json`/`client.js`/
+- `packages/dsh-harness-reflex/scripts/mutation-check.mjs`（基线 95 → 161；scratch 副本补 `package.json`/`client.js`/
   `tsconfig.client.json` 并重建客户端产物，使 `src/client/**` 的故障也能被测试抓住；新增 6 条故障：5 条 panel + 1 条 System 1 连接参数）
 - `package.json`（`build:all` 末尾追加 `build:plugin-client`）
 - `src/core/ledger.ts`（`customPath === null` = 纯内存 + `getLogPath()`；`LedgerEntry.type` 增加 `'model-route'` 与 `'effort-decision'`）
@@ -501,17 +501,17 @@ g-006（路由上下文感知与会话粘性）增量：
 - `src/backend/types.ts`（`RouteRequest` 增加 `state`/`instructions`，候选增加可选 `current`）
 - `src/backend/{jev,simple-jev}.ts`（Jev 把 `state`/`instructions`/`context` 当数据发；logits 后端把上下文渲染进 prompt）
 - `src/core/route.ts`（`selectBest` 的 options 与 `CandidateItem` 透传新增字段）
-- `packages/dsh-reflex/src/router.ts`（`estimateContextTokens`/`buildCacheAffinityInstruction`/`CONTEXT_CHARS_PER_TOKEN`/
+- `packages/dsh-harness-reflex/src/router.ts`（`estimateContextTokens`/`buildCacheAffinityInstruction`/`CONTEXT_CHARS_PER_TOKEN`/
   `DEFAULT_STICKY_MARGIN`/`CURRENT_MODEL_NOTE`、`stickyMargin` 选项、`#preferIncumbent` 粘性闸门、
   `RouteDecision` 的 `currentModel/switched/contextTokens/contextChars`、台账与降级路径的新字段）
-- `packages/dsh-reflex/src/routing.ts`（`AgentRoutingFacts` 逐 agent 记上下文规模与当前物理模型、
+- `packages/dsh-harness-reflex/src/routing.ts`（`AgentRoutingFacts` 逐 agent 记上下文规模与当前物理模型、
   `measureMessages`/`rememberStep`/`rememberTarget`/`recallFacts`，`agent/request` 带上 `state`/`instructions`）
-- `packages/dsh-reflex/src/bridge.ts`（决策 seam 透传 `input`）
-- `packages/dsh-reflex/src/panel-api.ts`（`PanelLedgerRow` 投影 `currentModel`/`switched`/`contextTokens`）
-- `packages/dsh-reflex/src/{router,routing,panel-api,tools}.test.ts`、`src/mcp/server.test.ts`
+- `packages/dsh-harness-reflex/src/bridge.ts`（决策 seam 透传 `input`）
+- `packages/dsh-harness-reflex/src/panel-api.ts`（`PanelLedgerRow` 投影 `currentModel`/`switched`/`contextTokens`）
+- `packages/dsh-harness-reflex/src/{router,routing,panel-api,tools}.test.ts`、`src/mcp/server.test.ts`
   （新增 11 + 4 + 2 条测试；后两者把两处独立计时字段的比较改为「钉住数值、只校验类型」，消除既有的
   负载敏感抖动）
-- `packages/dsh-reflex/scripts/mutation-check.mjs`（基线 161 → 186；新增 7 条故障：上下文规模、亲和策略、
+- `packages/dsh-harness-reflex/scripts/mutation-check.mjs`（基线 161 → 186；新增 7 条故障：上下文规模、亲和策略、
   粘性闸门、台账字段、跨轮记忆、路由上报上下文、面板 switch 投影）
 - `USER_GUIDE.md` / `docs/USER_GUIDE.en.md`（虚拟 Provider 一节补「上下文感知与会话粘性」小节）
 - `docs/dsh-plugin.md`（本文：§4 第 32–36 条、§5 计数、§6 边界、§12 验收对照）
@@ -533,14 +533,14 @@ g-006（路由上下文感知与会话粘性）增量：
 | ① 详尽使用说明（插件架构 / 虚拟 Provider 模型池 / 自适应思考等级 / System 1 后端 / MCP↔原生工具对照） | [`USER_GUIDE.md`](../USER_GUIDE.md)（中文，13 节）与 [`docs/USER_GUIDE.en.md`](./USER_GUIDE.en.md)（English，同构 13 节）：架构图、安装与构建、`SYSTEM_ONE_BACKEND` 接入、虚拟 Provider 与模型池配置、`reflex`/`auto` 思考等级、设置面板说明、MCP 8 工具 ↔ DSH 5 可开关能力对照表、决策账本、测试与发布、FAQ、版本兼容 | `guide.test.ts`：两份文档摘要与产物一致、节号齐全、各自包含 `npm run build:all` / `dsh plugin --profile web add` / `settings.section` / `client.js` / `SYSTEM_ONE_BACKEND` / `virtualProvider` / `reasoningEffort` / `reflex-auto` 与 8 个工具名；两份文档都能被渲染器解析出 ≥13 个标题、≥3 张表（无空/错位单元格）、≥6 个带语言标注的代码块 |
 | ② 设置页 UI 内可查看说明（独立 Tab + 中英双语） | `src/client/store.ts` 的 `PANEL_TABS` 增加 `'guide'`；`src/client/view.ts` 的 `GuideTab` 渲染标题/导语/来源摘要 + `renderMarkdown(t('guideBody'))`；`locale.ts` zh `使用说明` / en `Guide`，正文随 Host 语言切换 | `client-page.test.ts`：`the guide page renders the shipped user guide inside the panel`（探针 `Harness Reflex 使用说明`、`1. Harness Reflex 是什么`、`虚拟 Provider 与模型池`、`npm run build:all`、`reflex_detect_stagnation`，并断言渲染出 h1/h2/table/pre/li 与 `/文档来源 USER_GUIDE\.md · 摘要 [0-9a-f]{12}/`）、`the guide page follows the Host language`（en 界面读英文文档）、tab 文案断言包含 `使用说明` / `Guide` |
 | ③ 文档与查看功能在构建/打包产物中完整生效 | `build:plugin-client` 与插件 `build:client` 都先跑 `scripts/embed-user-guide.mjs`；`client.js` 内联两份文档与摘要；根包 `files` 白名单新增 `USER_GUIDE.md`（`docs/**/*.md` 已覆盖英文版） | `npm run build:all` exit 0（`client-bundle: wrote …/client.js (172049 bytes, 8 modules, externals: react)`）；`npm run release:pack`：`plugin: the shipped guide is the repository revision`、`root: the shipped guide is the repository revision`（比对 release tarball 内文档与仓库文档的 sha256）、`plugin: the browser half is one self-contained artifact` |
-| ④ 补齐相关自动化测试 | 新增 `packages/dsh-reflex/src/guide.test.ts`（5 条）、扩展 `client-page.test.ts`（+2 条）、新增根包 `src/release-packaging.test.ts`（6 条打包清单测试） | `npm run test:plugin` = 419/419；`npm test` = 113/113；`the plugin manifest ships the browser half and the guide it renders`、`the plugin declares every host package its build imports`、`the root files allow-list ships the release promises and nothing else` |
+| ④ 补齐相关自动化测试 | 新增 `packages/dsh-harness-reflex/src/guide.test.ts`（5 条）、扩展 `client-page.test.ts`（+2 条）、新增根包 `src/release-packaging.test.ts`（6 条打包清单测试） | `npm run test:plugin` = 419/419；`npm test` = 113/113；`the plugin manifest ships the browser half and the guide it renders`、`the plugin declares every host package its build imports`、`the root files allow-list ships the release promises and nothing else` |
 | ⑤ 最终集成验收与 release tarball | `scripts/release-pack.mjs`：真实 `npm pack` 两份包 → 解压核验（必需文件 / 禁运测试产物与临时目录 / 无本地绝对路径 / 零死链 / 零未声明运行时依赖 / bin 可执行位）→ 根包离线 `npm install` 冒烟（`bin --help`、具名 import、stdio MCP `tools/list` 八个工具）→ 插件按包名（node_modules/dsh-harness-reflex）解压后 `import` 冒烟 → `SHA256SUMS` + `release-report.json` + `RELEASE-<version>.md` | `npm run release:pack` 27/27 通过：`release/harness-reflex-0.1.0.tgz`（73 entries）、`release/dsh-harness-reflex-0.1.0.tgz`（102 entries）；`smoke: the extracted plugin resolves and exposes apply()`；`a packed release directory is internally consistent`（重算 SHA256SUMS） |
 
 ## 12. 路由上下文感知与会话粘性验收对照（g-006）
 
 | 判据 | 实现 | 证据 |
 | --- | --- | --- |
-| ① System 1 路由请求带上会话累积上下文规模与当前物理模型 | `packages/dsh-reflex/src/routing.ts`：`AgentRoutingFacts` 按 agent 累计 `agent/pre-step` 观测到的字符数（`measureMessages`，上限 64 个 agent），`recallFacts` 在 `agent/request` 里取回，`estimateContextTokens(chars) = ceil(chars/4)`；`RouteDecisionInput` 作为决策 seam 的第 4 个参数透传到 `RouteRequest.state.{currentModel,contextTokens,contextChars}`，`src/core/route.ts` 与 `src/bridge.ts` 只做透传 | `the decision request carries the session context size and current model`（`state.currentModel='deepseek:chat'`、`contextChars=12000`、`contextTokens=3000`）、`an explicit token count wins over the estimate from characters`、`estimateContextTokens rounds characters up at the documented ratio`、`each session defends its own model and its own context size`（两个 agent 各自上报自己的 `contextChars`，tokens = `ceil(chars/4)`）、`selectBest forwards the session facts and the policy to the backend`、`routing-reports-no-context` 变异对照 |
+| ① System 1 路由请求带上会话累积上下文规模与当前物理模型 | `packages/dsh-harness-reflex/src/routing.ts`：`AgentRoutingFacts` 按 agent 累计 `agent/pre-step` 观测到的字符数（`measureMessages`，上限 64 个 agent），`recallFacts` 在 `agent/request` 里取回，`estimateContextTokens(chars) = ceil(chars/4)`；`RouteDecisionInput` 作为决策 seam 的第 4 个参数透传到 `RouteRequest.state.{currentModel,contextTokens,contextChars}`，`src/core/route.ts` 与 `src/bridge.ts` 只做透传 | `the decision request carries the session context size and current model`（`state.currentModel='deepseek:chat'`、`contextChars=12000`、`contextTokens=3000`）、`an explicit token count wins over the estimate from characters`、`estimateContextTokens rounds characters up at the documented ratio`、`each session defends its own model and its own context size`（两个 agent 各自上报自己的 `contextChars`，tokens = `ceil(chars/4)`）、`selectBest forwards the session facts and the policy to the backend`、`routing-reports-no-context` 变异对照 |
 | ② 决策提示词注入「保留当前模型可省缓存、非必要不切」的偏好 | `router.ts` 的 `buildCacheAffinityInstruction(facts)`（无当前模型 / 当前模型不在池里 / 建议保留 三种措辞）→ `RouteRequest.instructions`；`state` 给结构化后端；候选描述追加 `CURRENT_MODEL_NOTE = '[current model — keeping it preserves the prompt cache]'` 且带 `current: true`；`src/backend/route-prompt.ts` 是唯一渲染点，`system-one-logits` 渲染进 prompt、`JevDecisionBackend` 发 `state`/`instructions`/`context` | `the incumbent candidate is marked for the decision, in both readings`、`buildCacheAffinityInstruction states the policy, not a verdict`、`the logits backend puts the affinity facts and policy in the prompt it scores`、`the Jev gateway is handed the same facts as data, policy and rendered context`、`a request without affinity renders exactly the historical context block` + `a request without affinity posts exactly the historical Jev body`（无亲和性时请求逐字段与历史一致）、`affinity-policy-not-stated` / `affinity-drops-token-estimate` 变异对照 |
 | ③ 当前模型尚可胜任时稳定保留，只有明显超出才切换 | `#preferIncumbent`：挑战者须 `score > 当前分` **且** `score >= 当前分 × (1 + stickyMargin)`（`DEFAULT_STICKY_MARGIN = 0.15`，相对门槛以兼容 mock/概率/logit 三种量纲）才算「明显更合适」；否则守住当前模型并把 `reason` 记为 `sticky-affinity`；当前模型不在池内时不阻拦，按名次走 | `a session is not switched for a marginal score difference`（0.5 vs 0.45 → 守住 `deepseek:chat`，`reason='sticky-affinity'`）、`a challenger that only ties the incumbent never displaces it`、`a clearly better candidate still displaces the current model`（0.95 vs 0.2 → `switched=true`）、`stickyMargin=0 switches on any strict improvement`、`a current model outside the pool is reported but cannot be defended`、集成测试 `a second turn keeps the physical model the session already warmed`（真实 waterfall + 真实 mock backend：第二轮并列分不再退回配置顺序）、`each session defends its own model and its own context size`、`sticky-gate-always-switches` / `routing-forgets-routed-model` 变异对照 |
 | ④ `model-route` 台账记录 `currentModel` / `switched` / `contextTokens` 与原因 | `routeModel` 的台账 `details` 增加 `currentModel`（首轮为 `null`，字段恒在）、`switched`（`formatTargetName(target) !== decision.currentModel`）、`contextTokens`、`contextChars`，保留 `reason`（`matched` / `sticky-affinity` / `degraded`…）；降级路径 `#degrade` 同样写这四个字段；`panel-api` 的 `projectRow` 把三者投影给面板（`currentModel` 为 `null` 时不投影） | `a first decision has no incumbent and no switch to report`（`currentModel=null`、`switched=false`、`contextTokens=0`）、`a degraded decision still reports the session facts and the switch it caused`、`a session is not switched…` 与 `a clearly better candidate…` 对台账字段的断言、`a routing decision projects its cache-affinity audit fields`、`a first decision with no incumbent projects no currentModel`、`affinity-audit-loses-current-model` / `panel-drops-switched-flag` 变异对照 |

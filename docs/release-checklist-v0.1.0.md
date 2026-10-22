@@ -20,26 +20,26 @@ V=0.1.0
 
   ```bash
   npm pkg set version="$V"
-  (cd packages/dsh-reflex && npm pkg set version="$V")
-  node -p "require('./package.json').version + ' / ' + require('./packages/dsh-reflex/package.json').version"
+  (cd packages/dsh-harness-reflex && npm pkg set version="$V")
+  node -p "require('./package.json').version + ' / ' + require('./packages/dsh-harness-reflex/package.json').version"
   # 期望：0.1.0 / 0.1.0
   ```
 
 - [x] 版本常量与测试引用同步（执行记录）：
 
-  - `packages/dsh-reflex/src/panel-api.ts` → `REFLEX_PLUGIN_VERSION = '0.1.0'`
+  - `packages/dsh-harness-reflex/src/panel-api.ts` → `REFLEX_PLUGIN_VERSION = '0.1.0'`
   - `src/release-packaging.test.ts` 产物名改为按 manifest 版本动态生成（插件包为 `dsh-harness-reflex-<version>.tgz`）
-  - `packages/dsh-reflex/package.json` → `name: dsh-harness-reflex`、`cordis.patch.yml` 的 `name` 同步（`id` 不变）
-  - `USER_GUIDE.md`、`docs/USER_GUIDE.en.md`、`packages/dsh-reflex/README.md` 的当前版本声明
+  - `packages/dsh-harness-reflex/package.json` → `name: dsh-harness-reflex`、`cordis.patch.yml` 的 `name` 同步（`id` 不变）
+  - `USER_GUIDE.md`、`docs/USER_GUIDE.en.md`、`packages/dsh-harness-reflex/README.md` 的当前版本声明
   - `package-lock.json`：`npm install --package-lock-only --ignore-scripts`
 
 - [x] 当前版本引用不再有 alpha.2 残留（只查会随版本变化的文件，发布文档本身可保留历史引用）：
 
   ```bash
   grep -n "0\.1\.0-alpha\.2" \
-    package.json packages/dsh-reflex/package.json \
-    packages/dsh-reflex/src/panel-api.ts src/release-packaging.test.ts \
-    USER_GUIDE.md docs/USER_GUIDE.en.md packages/dsh-reflex/README.md
+    package.json packages/dsh-harness-reflex/package.json \
+    packages/dsh-harness-reflex/src/panel-api.ts src/release-packaging.test.ts \
+    USER_GUIDE.md docs/USER_GUIDE.en.md packages/dsh-harness-reflex/README.md
   # 期望：无输出
   ```
 
@@ -67,7 +67,7 @@ V=0.1.0
   npm run build:all
   ```
 
-  通过判据：exit 0；`packages/dsh-reflex/client.js` 生成且 >100 000 字节。
+  通过判据：exit 0；`packages/dsh-harness-reflex/client.js` 生成且 >100 000 字节。
 
 - [ ] 根包测试：
 
