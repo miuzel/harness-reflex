@@ -3,8 +3,8 @@
 > v0.2.0 S3 的交付说明。设计依据：`docs/design/v0.2.0-harness-plugins.md` §2.3/§4.1/§4.2；
 > 官方契约依据：`docs/research/claude-code-harness.md`。
 > 插件目录：`packages/claude-reflex/`。
-> **本环境没有 `claude` 二进制**，所以「本环境已验证」一栏只包含可离线复现的部分；
-> 真实 `claude -p` 的结论全部放在「需用户本机验证」一栏，不冒充已通过。
+> 真机验证已做：Claude Code 2.1.307/2.1.308，经 `claude-kimi` 启动器跑 `scripts/claude-e2e.sh`，
+> 9 条断言全过（`docs/claude-code.md` §6）。仍无法在本机覆盖的部分单独列在 §7 下半表，不冒充已通过。
 
 ## 1. 交付物与三件套
 
@@ -204,28 +204,56 @@ scripts/claude-e2e.sh --keep   # 保留临时 state / stream 文件
 脚本所有路径都基于 `$PWD`/`BASH_SOURCE`，不写死用户目录；状态写临时目录并在退出时清理。
 真实会话需要可用的模型凭据；脚本用 `--dangerously-skip-permissions` 让 prompt 里的 Bash 命令无需人工确认。
 
-## 7. 本环境已验证 / 需用户本机验证
+## 7. 已验证 / 未验证
 
-| 本环境已验证（无 `claude`，离线可复现） | 证据 |
-| --- | --- |
-| manifest / hooks / `.mcp.json` / mod 入口结构完整 | `packages/claude-reflex/test/structure.test.mjs` |
-| 7 事件模拟 stdin 的 stdout 形状与退出码 | `packages/claude-reflex/test/hooks.test.mjs`「all seven events…」 |
-| 默认剪枝/停滞/纠偏 active、收尾 observe；`CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active` 可 opt-in | 同上 + `resolveHookModes` 断言 |
-| observe / off 与未安装的模型可见输出逐字节相同；active 更短且 locator 还原 | 同上「off and observe…」 |
-| 坏 JSON 放行（exit 0、`{}`）；后端崩溃 / 超时放行且会话账本记 `error` | 同上「bad input, a crashing backend and a timeout…」 |
-| `.mcp.json` 启动的 server 返回根包 8 个工具 | `structure.test.mjs` 真实 `tools/list` 握手 |
-| `SubagentStop` 默认不 spawn（哨兵 matcher） | `structure.test.mjs` 配置断言 |
-| `scripts/claude-e2e.sh` 语法与静态阶段 | `bash -n` + 脚本 Phase 0 |
+### 7.1 真机已验证（Claude Code 2.1.307/2.1.308 经 `claude-kimi`）
 
-| 需用户本机验证 | 原因 |
+| 已验证 | 证据 |
 | --- | --- |
-| `claude plugin validate` 的真实结论 | 本环境 `claude --version` exit 1（无二进制） |
-| `claude -p` 真实会话里 Stop 真的 block，且第二次放行 | 需要 `claude` 与模型凭据 |
-| 真实 host 的 `tool_response` 形状与 `updatedToolOutput` 被采信 | 只能用模拟 stdin 覆盖形状 |
-| observe 在真实会话中 diff=0 | 脚本已写断言，但需本机执行 |
-| mod 在 v2.1.287+ 的加载与 `turn.step` effort 生效 | 需要 mods 运行时 |
+| 插件真的被加载、hooks 真的执行 | `--plugin-dir` 后状态目录出现 `sessions/cc-*/{state.json,meta.json,ledger.jsonl,events.jsonl}` |
+| `claude plugin validate` | PASS（e2e Phase 1） |
+| 会话内剪枝生效、原文可还原 | ledger `prune applied=true`；`originals/<digest>.txt` 与原始输出逐字节一致（`original=8239 retained=8240`） |
+| 收尾核验真的拦、且第二次放行 | ledger `closing-block=1` + `stop-hook-active=1` |
+| observe 零副作用 | baseline 与 observe 的模型可见结果逐字节相同（8239 bytes） |
+| 静态契约 / 7 事件形状 / 坏 JSON 放行 / 超时放行 | `packages/claude-reflex/test/{structure,hooks}.test.mjs`、`src/hook/hook.test.ts` |
+| `SubagentStop` 默认不 spawn | `structure.test.mjs` 哨兵 matcher 断言 |
+| `.mcp.json` 的 server 返回根包 8 个工具 | `structure.test.mjs` 真实 `tools/list` 握手 |
+
+### 7.2 仍未验证
+
+| 未验证 | 原因 |
+| --- | --- |
+| 模型是否真的"看到" `updatedToolOutput` 的内容 | Claude Code 的 transcript 保留原文，只能证到 hook 输出正确 + 原文可还原，无法从外部证到模型读到的文本 |
+| mod 的 `turn.step` effort 在 v2.1.287+ 真实生效 | 需要观测 mods 运行时；本机 mod 加载无报错，但未观测到 effort 真的改变请求 |
 | WSL 桌面 / 企业策略下的加载面 | 取决于用户环境 |
-| 收尾核验转 active 的误报率 | 需要真实模型行为样本 |
+| 收尾核验转 active 的误报率 | 需要更多真实模型行为样本 |
+
+### 7.3 `/hooks` 为空 vs 钩子不生效（两种不同故障）
+
+先分清两种现象，它们的根因不同：
+
+| `/hooks` 里看到 | 含义 | 修法 |
+| --- | --- | --- |
+| `No hooks configured for this event` | 当前会话**没有加载插件**（`/hooks` 只反映本会话已加载的插件与 settings.json；插件没加载就什么都不显示） | 用 `--plugin-dir` 启动，或按 §2.2 安装 |
+| `Hooks · 7 hooks on 7 events`，每条前面标 `[Plugin] ... harness-reflex@inline` | 插件已加载，钩子已注册 | 若功能仍不生效，看下一条 |
+
+插件加载正常时，`/hooks` 的 `PreToolUse` 下面应是这样一行：
+
+```
+[Plugin] harness-reflex hook pretooluse   harness-reflex@inline · Bash|Edit|Write|MultiEdit|mcp__.* · command
+```
+
+**第二种故障：钩子注册了但跑不起来。** hooks 以裸名 `harness-reflex` 启动（`.mcp.json` 同理），
+`PATH` 里没有这个可执行文件时，每次事件都在启动阶段失败，而失败是**静默的**——hooks 的约定
+就是"出问题一律放行"。想看到原因必须开 debug：
+
+```bash
+claude --plugin-dir packages/claude-reflex --debug=hooks
+# SessionEnd hook [harness-reflex hook sessionend] failed: Executable not found in $PATH: "harness-reflex"
+```
+
+所以正确顺序是 §2：先 `npm link`（或 `npm i -g harness-reflex`）确认 `harness-reflex --help` 能用，
+再 `--plugin-dir`。
 
 ## 用自定义启动器跑 e2e（例如 `claude-kimi`）
 
