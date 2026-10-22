@@ -10,8 +10,10 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import { readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { MockDecisionBackend } from '../backend/mock.js';
@@ -22,6 +24,7 @@ import { EVENT_BUDGETS, parseHookEvent } from './contract.js';
 import { dedupeKeyFor, runHook, type HookConfig } from './run.js';
 
 const CLI = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const NOW = Date.parse('2026-10-22T10:00:00.000Z');
 const roots: string[] = [];
 
@@ -138,7 +141,38 @@ test('event aliases cover the six required events plus SubagentStop', () => {
   assert.equal(parseHookEvent('subagentstop'), 'substop');
   assert.equal(parseHookEvent('sessionstart'), 'sessionstart');
   assert.equal(parseHookEvent('sessionend'), 'sessionend');
+  // `post-tool` / `pre-tool` are what the AGY bundle used to emit; the alias
+  // keeps that wiring working instead of silently no-oping.
+  assert.equal(parseHookEvent('post-tool'), 'posttooluse');
+  assert.equal(parseHookEvent('pre-tool'), 'pretooluse');
   assert.equal(parseHookEvent('nonsense'), undefined);
+});
+
+test('every hook command a bundled harness ships names a real event', async () => {
+  const shipped = [
+    join(repoRoot, '.agents', 'plugins', 'harness-reflex', 'hooks.json'),
+    join(repoRoot, 'packages', 'claude-reflex', 'hooks', 'hooks.json')
+  ];
+  for (const file of shipped) {
+    const config = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const seen = new Set<string>();
+    // The bundle shapes differ (Claude nests under `hooks`, AGY keys by guard),
+    // so scan the whole document for the dispatcher call.
+    JSON.stringify(config, (key, value: unknown) => {
+      if (key === 'args' && Array.isArray(value)) {
+        const index = value.indexOf('hook');
+        if (index >= 0 && typeof value[index + 1] === 'string') seen.add(value[index + 1] as string);
+      }
+      if (typeof value === 'string' && /\bhook\s+([a-z-]+)/i.test(value)) {
+        seen.add(/\bhook\s+([a-z-]+)/i.exec(value)![1] as string);
+      }
+      return value;
+    });
+    assert.ok(seen.size > 0, `${file} wires no hook command`);
+    for (const event of seen) {
+      assert.notEqual(parseHookEvent(event), undefined, `${file} wires unknown hook event "${event}"`);
+    }
+  }
 });
 
 test('PreToolUse: a normal call allows silently and records one ledger line', async () => {

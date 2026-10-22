@@ -48,7 +48,7 @@
 1. **跨 Harness 零门槛适配**：
    - **Claude Code**：标准 MCP 协议（`.mcp.json`），提供 `reflex_gate`、`reflex_prune`、`reflex_detect_stagnation` 等工具。
    - **Codex CLI**：`.codex/config.json` 原生 MCP 挂载。
-   - **Antigravity (AGY)**：支持全功能 Bundle 插件（`.agents/plugins/harness-reflex/`），内嵌 `plugin.json`、`mcp_config.json`、`hooks.json` 与 `rules/AGENTS.md`。
+   - **Antigravity (AGY)**：Bundle 插件（`.agents/plugins/harness-reflex/`），内嵌 `plugin.json`、`mcp_config.json`、`hooks.json` 与 `rules/AGENTS.md`；hooks 调用与 Claude Code 相同的 `harness-reflex hook <event>` 分发器，自动干预能力取决于 AGY 是否消费 hook 输出（以宿主实测为准）。
 
 2. **全套 System One 工具链（MCP 面 8 个工具，由根包 stdio server 暴露给外部客户端）**：
    - **底层通用 API**：

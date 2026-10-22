@@ -45,7 +45,7 @@ export class AgyAdapter {
             hooks: [
               {
                 type: 'command',
-                command: `node "${binaryPath}" hook post-tool`
+                command: `node "${binaryPath}" hook posttooluse`
               }
             ]
           }

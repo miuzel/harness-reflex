@@ -58,8 +58,10 @@ export const EVENT_BUDGETS: Record<HookEvent, EventBudget> = {
 export function parseHookEvent(raw: string | undefined): HookEvent | undefined {
   if (!raw) return undefined;
   const name = raw.trim().toLowerCase().replace(/[-_]/g, '');
-  if (name === 'pretooluse') return 'pretooluse';
-  if (name === 'posttooluse') return 'posttooluse';
+  // `post-tool` / `pre-tool` are what a few bundlers spell the Claude Code
+  // events as, so the alias table normalizes them instead of silently no-oping.
+  if (name === 'pretooluse' || name === 'pretool') return 'pretooluse';
+  if (name === 'posttooluse' || name === 'posttool') return 'posttooluse';
   if (name === 'posttoolusefailure' || name === 'postfailure') return 'postfailure';
   if (name === 'stop') return 'stop';
   if (name === 'subagentstop' || name === 'substop') return 'substop';
