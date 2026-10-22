@@ -162,9 +162,19 @@ npm run release                          # test:all + test:mutation + release:pa
 
 ## 4. 发布树与 tag 策略
 
-### 4.1 现状
+### 4.1 现状（2026-10-22 更新）
 
-- 仓库当前**没有 tag**，`main` 停在 `96ee842`，集成分支 `integration/v0.1.0` 在 `9235039`（0.1.0 改动在其后）；
+- `main` 已与 GitHub `miuzel/harness-reflex` 同步（tag `v0.1.0` 指向发布提交 `538ec7b`，其后仅文档提交），集成分支 `integration/v0.1.0` 为发布树；
+- **旁路镜像**：`gitlab` remote → `https://gitlab.aseit.cn/mingxuan.zhang/harness-reflex.git`（private，project id 1696）。`main` 与 tag `v0.1.0` 已推送并核对 40 位 SHA 全等；
+- 镜像**只推 `main` 与发布 tag**，不用 `git push --mirror`（避免把临时分支推过去）；token 不落盘、不写进 remote URL；
+- 推送模板（token 来自 `pass show token/gitlab`，需先解锁 gpg-agent）：
+
+  ```bash
+  source ~/.zshrc.d/gitlab.zsh
+  git push "https://oauth2:${GITLAB_TOKEN}@gitlab.aseit.cn/mingxuan.zhang/harness-reflex.git" HEAD:refs/heads/main
+  git push "https://oauth2:${GITLAB_TOKEN}@gitlab.aseit.cn/mingxuan.zhang/harness-reflex.git" v0.1.0
+  ```
+
 - 发布动作（合并、tag、push）**只由负责人执行**；执行 attempt 不建/不推 tag。
 
 ### 4.2 推荐策略
