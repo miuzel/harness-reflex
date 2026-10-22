@@ -1,0 +1,13 @@
+{
+  "name": "harness-reflex-claude-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code plugin: mod, settings hooks and MCP config for the harness-reflex decision runtime.",
+  "files": [
+    ".claude-plugin/",
+    ".mcp.json",
+    "hooks/",
+    "README.md"
+  ]
+}

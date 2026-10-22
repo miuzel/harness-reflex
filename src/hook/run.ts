@@ -122,8 +122,19 @@ export interface HookRunOptions {
   store?: FileStateStore;
   clock?: HookClock;
   config?: Partial<HookConfig>;
+  /** Explicit per-capability modes; when omitted, they are resolved from `env`. */
+  modes?: Partial<HookModeMap>;
   readStdin?: () => Promise<HookStdin>;
   stderr?: (message: string) => void;
+}
+
+/** A stable label for `meta.mode`, the only place a single mode string is stored. */
+function modeLabel(modes: HookModeMap): string {
+  const values = [modes.stagnation, modes.prune, modes.gate, modes.closing];
+  if (values.every((value) => value === 'active')) return 'active';
+  if (values.every((value) => value === 'off')) return 'off';
+  if (values.every((value) => value === 'observe')) return 'observe';
+  return 'mixed';
 }
 
 /** Resolve `HARNESS_REFLEX_MODE`; an unknown value falls back to `active`. */
@@ -131,6 +142,58 @@ export function resolveHookMode(env: NodeJS.ProcessEnv = process.env): HookMode 
   const raw = env.HARNESS_REFLEX_MODE?.trim().toLowerCase();
   if (raw === 'off' || raw === 'observe' || raw === 'active') return raw;
   return 'active';
+}
+
+/** The capability names the hook's three-state policy speaks in. */
+export type HookCapability = 'stagnation' | 'prune' | 'gate' | 'closing';
+
+/** One resolved mode per capability. */
+export type HookModeMap = Record<HookCapability, HookMode>;
+
+/**
+ * The S3 default: the three tool-call interventions act, the closing check only
+ * observes. A closing block is the most destructive action available (it keeps
+ * the user's turn open), so it ships opt-in (design §4.2).
+ */
+export const DEFAULT_CAPABILITY_MODES: HookModeMap = {
+  stagnation: 'active',
+  prune: 'active',
+  gate: 'active',
+  closing: 'observe'
+};
+
+/** One explicit three-state value, or `undefined` when unset/unknown. */
+function explicitMode(raw: string | undefined): HookMode | undefined {
+  const value = raw?.trim().toLowerCase();
+  return value === 'off' || value === 'observe' || value === 'active' ? value : undefined;
+}
+
+/**
+ * Resolve the per-capability modes.
+ *
+ * Precedence, highest first:
+ * 1. `HARNESS_REFLEX_MODE` — one global override, kept for the S2 fixtures and
+ *    for users who want to silence or shadow the whole layer;
+ * 2. a capability's own `HARNESS_REFLEX_<CAP>_MODE`;
+ * 3. the plugin's `userConfig` option, exported as `CLAUDE_PLUGIN_OPTION_<KEY>`
+ *    (only `closing` has one: `closing_mode`, default `observe`);
+ * 4. the S3 defaults in {@link DEFAULT_CAPABILITY_MODES}.
+ *
+ * @param env - environment to read.
+ * @returns one mode per capability.
+ */
+export function resolveHookModes(env: NodeJS.ProcessEnv = process.env): HookModeMap {
+  const global = explicitMode(env.HARNESS_REFLEX_MODE);
+  if (global) return { stagnation: global, prune: global, gate: global, closing: global };
+  return {
+    stagnation: explicitMode(env.HARNESS_REFLEX_STAGNATION_MODE) ?? DEFAULT_CAPABILITY_MODES.stagnation,
+    prune: explicitMode(env.HARNESS_REFLEX_PRUNE_MODE) ?? DEFAULT_CAPABILITY_MODES.prune,
+    gate: explicitMode(env.HARNESS_REFLEX_GATE_MODE) ?? DEFAULT_CAPABILITY_MODES.gate,
+    closing:
+      explicitMode(env.HARNESS_REFLEX_CLOSING_MODE) ??
+      explicitMode(env.CLAUDE_PLUGIN_OPTION_CLOSING_MODE) ??
+      DEFAULT_CAPABILITY_MODES.closing
+  };
 }
 
 /**
@@ -273,7 +336,7 @@ class HookRuntime {
   readonly #store: FileStateStore;
   readonly #backend: DecisionBackend;
   readonly #config: HookConfig;
-  readonly #mode: HookMode;
+  readonly #modes: HookModeMap;
   readonly #sessionId: string;
   readonly #clock: HookClock;
   readonly #stderr: (message: string) => void;
@@ -284,7 +347,7 @@ class HookRuntime {
     store: FileStateStore;
     backend: DecisionBackend;
     config: HookConfig;
-    mode: HookMode;
+    modes: HookModeMap;
     sessionId: string;
     clock: HookClock;
     stderr: (message: string) => void;
@@ -292,7 +355,7 @@ class HookRuntime {
     this.#store = args.store;
     this.#backend = args.backend;
     this.#config = args.config;
-    this.#mode = args.mode;
+    this.#modes = args.modes;
     this.#sessionId = args.sessionId;
     this.#clock = args.clock;
     this.#stderr = args.stderr;
@@ -314,11 +377,14 @@ class HookRuntime {
 
   /** The mode's resolved policy, shared by every capability. */
   #policy() {
-    const mode = this.#mode;
+    const modes = this.#modes;
+    const mode = modes.stagnation !== 'off' || modes.prune !== 'off' || modes.gate !== 'off' || modes.closing !== 'off'
+      ? 'active'
+      : 'off';
     return {
       enabled: mode !== 'off',
       mode,
-      capabilities: { stagnation: mode, prune: mode, gate: mode, closing: mode },
+      capabilities: { ...modes },
       maxInterventionsPerTurn: this.#config.maxInterventionsPerTurn,
       maxJudgmentsPerTurn: this.#config.maxJudgmentsPerTurn,
       maxJudgmentsPerSession: this.#config.maxJudgmentsPerSession,
@@ -512,6 +578,15 @@ class HookRuntime {
 
   /** PreToolUse: deny a provably repeated call, otherwise allow silently. */
   async #preToolUse(ctx: HandlerContext): Promise<HookOutput> {
+    if (this.#modes.stagnation === 'off') {
+      return this.#finish(ctx.key, emptyHookOutput(), {
+        type: 'stagnation',
+        backend: this.#backend.name,
+        latencyMs: 0,
+        applied: false,
+        skipReason: 'capability-off'
+      }, undefined, ctx.eventSeen);
+    }
     const toolName = stringField(ctx.payload.tool_name) ?? 'unknown';
     const inputDigest = digestOf(canonicalJson(ctx.payload.tool_input ?? null));
     const signature = `${toolName}:${inputDigest}`;
@@ -618,13 +693,14 @@ class HookRuntime {
         `${verdict.recommendedIntervention ?? 'Change the approach or inspect the previous failure.'}`,
       600
     );
-    const output = this.#mode === 'active' ? preToolUseDeny(reason) : emptyHookOutput();
+    const mode = this.#modes.stagnation;
+    const output = mode === 'active' ? preToolUseDeny(reason) : emptyHookOutput();
     return this.#finish(ctx.key, output, {
       type: 'stagnation',
       backend: this.#backend.name,
       latencyMs,
-      applied: this.#mode === 'active',
-      shadow: this.#mode !== 'active',
+      applied: mode === 'active',
+      shadow: mode !== 'active',
       isStuck: true,
       judged: true,
       details: { patternType: verdict.patternType ?? 'repetition', confidence: verdict.confidence }
@@ -633,6 +709,16 @@ class HookRuntime {
 
   /** PostToolUse: replace an oversized result with its verified reduction. */
   async #postToolUse(ctx: HandlerContext): Promise<HookOutput> {
+    if (this.#modes.prune === 'off') {
+      return this.#finish(ctx.key, emptyHookOutput(), {
+        type: 'prune',
+        backend: this.#backend.name,
+        latencyMs: 0,
+        applied: false,
+        tokensSaved: 0,
+        skipReason: 'capability-off'
+      }, undefined, ctx.eventSeen);
+    }
     const toolName = stringField(ctx.payload.tool_name) ?? 'unknown';
     const text = toolResponseText(ctx.payload.tool_response);
     const failed = toolResponseFailed(ctx.payload.tool_response);
@@ -684,11 +770,12 @@ class HookRuntime {
       tailChars: this.#config.pruneTailChars,
       locator
     });
+    const pruneMode = this.#modes.prune;
     const originalTokens = estimateTokens(text);
     let installed = composed.text;
     let retained = false;
     let evicted: string[] = [];
-    if (this.#mode === 'active') {
+    if (pruneMode === 'active') {
       const retention = this.#store.retainOriginal(this.#sessionId, digest, text);
       retained = retention.retained;
       evicted = retention.evicted;
@@ -713,14 +800,14 @@ class HookRuntime {
         retention: 'none'
       }, event, ctx.eventSeen);
     }
-    const shadow = this.#mode !== 'active';
-    const saved = this.#mode === 'active' && retained ? Math.max(0, originalTokens - prunedTokens) : 0;
-    const output = this.#mode === 'active' ? postToolUseReplace(installed) : emptyHookOutput();
+    const shadow = pruneMode !== 'active';
+    const saved = pruneMode === 'active' && retained ? Math.max(0, originalTokens - prunedTokens) : 0;
+    const output = pruneMode === 'active' ? postToolUseReplace(installed) : emptyHookOutput();
     return this.#finish(ctx.key, output, {
       type: 'prune',
       backend: this.#backend.name,
       latencyMs,
-      applied: this.#mode === 'active',
+      applied: pruneMode === 'active',
       shadow,
       judged: true,
       tokensSaved: saved,
@@ -738,6 +825,15 @@ class HookRuntime {
 
   /** PostToolUseFailure: attach one correction after a failing run. */
   async #postToolUseFailure(ctx: HandlerContext): Promise<HookOutput> {
+    if (this.#modes.gate === 'off') {
+      return this.#finish(ctx.key, emptyHookOutput(), {
+        type: 'gate',
+        backend: this.#backend.name,
+        latencyMs: 0,
+        applied: false,
+        skipReason: 'capability-off'
+      }, undefined, ctx.eventSeen);
+    }
     const toolName = stringField(ctx.payload.tool_name) ?? 'unknown';
     const errorText = toolResponseText(ctx.payload.error) || 'tool call failed';
     const inputDigest = digestOf(canonicalJson(ctx.payload.tool_input ?? null));
@@ -799,13 +895,14 @@ class HookRuntime {
         'Stop retrying the same call. Read the error, change the input or the approach, and verify a smaller step before retrying.',
       600
     );
-    const output = this.#mode === 'active' ? postToolUseFailureContext(context) : emptyHookOutput();
+    const gateMode = this.#modes.gate;
+    const output = gateMode === 'active' ? postToolUseFailureContext(context) : emptyHookOutput();
     return this.#finish(ctx.key, output, {
       type: 'gate',
       backend: this.#backend.name,
       latencyMs: 0,
-      applied: this.#mode === 'active',
-      shadow: this.#mode !== 'active',
+      applied: gateMode === 'active',
+      shadow: gateMode !== 'active',
       details: { failures, tool: toolName }
     }, event, ctx.eventSeen);
   }
@@ -834,6 +931,17 @@ class HookRuntime {
         latencyMs: 0,
         applied: false,
         skipReason: 'skippedLockContention'
+      }, event, ctx.eventSeen);
+    }
+    // The turn counter and per-turn budgets were reset above; only the judgment
+    // and the action are skipped when closing is off.
+    if (this.#modes.closing === 'off') {
+      return this.#finish(ctx.key, emptyHookOutput(), {
+        type: 'closing',
+        backend: this.#backend.name,
+        latencyMs: 0,
+        applied: false,
+        skipReason: 'capability-off'
       }, event, ctx.eventSeen);
     }
     if (stopHookActive) {
@@ -947,13 +1055,14 @@ class HookRuntime {
         'Address the contradiction or restate the claim with the evidence that supports it.',
       900
     );
-    const output = this.#mode === 'active' ? stopBlock(reason) : emptyHookOutput();
+    const closingMode = this.#modes.closing;
+    const output = closingMode === 'active' ? stopBlock(reason) : emptyHookOutput();
     return this.#finish(ctx.key, output, {
       type: 'closing',
       backend: this.#backend.name,
       latencyMs,
-      applied: this.#mode === 'active',
-      shadow: this.#mode !== 'active',
+      applied: closingMode === 'active',
+      shadow: closingMode !== 'active',
       passed: false,
       judged: true,
       details: { contradicted: contradicted.slice(0, 5), evidenceChars: evidence.retainedChars }
@@ -962,12 +1071,16 @@ class HookRuntime {
 
   /** SessionStart: create the session, apply retention, announce the mode. */
   #sessionStart(): HookOutput {
-    this.#store.ensureSession(this.#sessionId, this.#mode);
+    const modes = this.#modes;
+    this.#store.ensureSession(this.#sessionId, modeLabel(modes));
     this.#store.gcSessions(undefined, this.#sessionId);
     this.#store.gcOriginals(this.#sessionId);
-    if (this.#mode !== 'active') return emptyHookOutput();
+    const active = (['stagnation', 'prune', 'gate'] as const).filter((capability) => modes[capability] === 'active');
+    if (active.length === 0 && modes.closing !== 'active') return emptyHookOutput();
+    const closing = modes.closing === 'active' ? 'closing=active' : 'closing=observe';
     return sessionStartContext(
-      'harness-reflex: mode=active (prune/stagnation/closing). Oversized tool results may be reduced; repeated calls and contradicted completion claims are flagged.'
+      `harness-reflex: mode=active (${active.length > 0 ? active.join('/') : 'none'}, ${closing}). ` +
+        'Oversized tool results may be reduced; repeated calls, repeated failures, and contradicted completion claims are flagged.'
     );
   }
 
@@ -1021,7 +1134,8 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     stderr(`harness-reflex hook: unknown event "${eventArg ?? ''}" (expected one of pretooluse, posttooluse, postfailure, stop, substop, sessionstart, sessionend)`);
     return { output: emptyHookOutput(), code: 0, error: 'unknown-event' };
   }
-  const mode = resolveHookMode(env);
+  const modes: HookModeMap = { ...resolveHookModes(env), ...(options.modes ?? {}) };
+  const mode = modeLabel(modes);
   if (mode === 'off') return { output: emptyHookOutput(), code: 0 };
   const clock = options.clock ?? clockFromEnv(env);
   let stdin: HookStdin;
@@ -1054,7 +1168,7 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
   if (event === 'sessionstart' || event === 'sessionend') {
     const store = options.store ?? new FileStateStore({ root: resolveStateRoot(env), clock });
     const backend = options.backend ?? createDecisionBackend();
-    const runtime = new HookRuntime({ store, backend, config, mode, sessionId, clock, stderr });
+    const runtime = new HookRuntime({ store, backend, config, modes, sessionId, clock, stderr });
     const timeoutMs = config.eventBudgets[event].budgetMs;
     const output = await withTimeout(
       Promise.resolve().then(() => runtime.handle(event, payload, config.eventBudgets[event])),
@@ -1088,7 +1202,7 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     store.releaseDecisionClaim(sessionId, key);
     return { output: emptyHookOutput(), code: 0 };
   }
-  const runtime = new HookRuntime({ store, backend, config, mode, sessionId, clock, stderr });
+  const runtime = new HookRuntime({ store, backend, config, modes, sessionId, clock, stderr });
   const timeoutMs = config.eventBudgets[event].budgetMs;
   const output = await withTimeout(
     runtime.handle(event, payload, config.eventBudgets[event]),

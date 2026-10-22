@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "harness-reflex": {
+      "command": "harness-reflex",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

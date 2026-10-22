@@ -1,0 +1,116 @@
+{
+  "modules": [
+    "./register.js"
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "pretooluse"
+            ],
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "posttooluse"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "postfailure"
+            ],
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "stop"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "__disabled_by_default__",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "substop"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "sessionstart"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "harness-reflex",
+            "args": [
+              "hook",
+              "sessionend"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

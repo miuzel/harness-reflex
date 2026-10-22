@@ -1,0 +1,45 @@
+{
+  "name": "claude-reflex",
+  "displayName": "Harness Reflex",
+  "version": "0.1.0",
+  "description": "Automatic pruning, stagnation checks, failure corrections and stop-time closing verification for Claude Code, backed by the harness-reflex decision runtime. Ships a mod, settings hooks and the 8-tool MCP server.",
+  "author": {
+    "name": "miuzel"
+  },
+  "license": "MIT",
+  "keywords": [
+    "system-one",
+    "context-pruning",
+    "stagnation-detection",
+    "verification",
+    "hooks",
+    "mcp"
+  ],
+  "userConfig": {
+    "closing_mode": {
+      "type": "string",
+      "title": "Closing verification mode",
+      "description": "observe records what a Stop block would have said without blocking; active blocks a turn whose completion claim its own tool evidence contradicts; off disables the check. Default: observe.",
+      "options": [
+        "observe",
+        "active",
+        "off"
+      ],
+      "default": "observe"
+    },
+    "effort_level": {
+      "type": "string",
+      "title": "Effort level (mod only)",
+      "description": "When set, the mod asks Claude Code for this effort level on every model request. off leaves the user's selection untouched. Mods require Claude Code v2.1.287 or later.",
+      "options": [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "off"
+    }
+  }
+}

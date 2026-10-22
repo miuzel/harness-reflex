@@ -72,6 +72,14 @@
      模型，只有明显更合适才切换；`model-route` 台账记 `currentModel` / `switched` / `contextTokens`。
    - 详见 [`docs/dsh-plugin.md`](docs/dsh-plugin.md) 与 [`packages/dsh-reflex/README.md`](packages/dsh-reflex/README.md)。
 
+5. **Claude Code 插件三件套（v0.2.0）**：
+   - `packages/claude-reflex/` 同时携带 **mod**（`turn.step` effort 接线）、**settings hooks**
+     （PreToolUse / PostToolUse / PostToolUseFailure / Stop / SubagentStop（默认关）/ SessionStart / SessionEnd，
+     逐事件调用 `harness-reflex hook <event>`）与 **MCP server**（根包 8 个 `reflex_*` 工具）。
+   - 剪枝、停滞、失效纠偏 **active**；收尾核验默认 **observe**，可在插件配置里 opt-in 成 `active`。
+   - 安装、配置、限制与「本环境已验证 / 需你本机验证」两栏见
+     [`docs/claude-code.md`](docs/claude-code.md)；真实 `claude -p` e2e 见 `scripts/claude-e2e.sh`。
+
 ---
 
 ## 快速安装与配置
@@ -152,7 +160,8 @@ node dist/cli/index.js ledger
 ```bash
 npm test                 # 根包：ledger / score / route / route-prompt / MCP 表面 / 打包清单
 npm run test:plugin      # DSH 插件：注册、严格校验、工具面与 /reflex-ledger、生命周期、虚拟 provider 路由（含上下文感知与会话粘性）、设置面板与使用说明
-npm run test:all         # 构建根包 + 插件，然后跑两套测试
+npm run test:claude-plugin  # Claude Code 插件：manifest/hooks/.mcp.json、7 事件、observe diff=0、崩溃放行
+npm run test:all         # 构建根包 + 插件，然后跑三套测试
 npm run test:mutation    # 负向对照：注入故障，要求被测试（或编译器）抓住
 ```
 
