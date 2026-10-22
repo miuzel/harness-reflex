@@ -27,9 +27,9 @@
 
 - 新增**客户端设置面板**（g-004）：插件声明 `dsh.client`（`platform: 'web'` + 消费的客户端能力 + `external: ['react']`）
   与 `exports['./client']`，产出单一浏览器包 `client.js`；面板注册到 `settings.section` 槽位（id `reflex`、`order 55`），
-  提供 6 个 tab：概览（实时决策指标）/ 虚拟 Provider 池（增删候选、绑定物理 provider/model、标签、上下移）/
-  推理强度（开关、默认档、触发规则、置信度下限）/ System 1 后端（backend、baseUrl、model、API key 环境变量、超时）/
-  决策账本（近 N 条 + 一键清空）/ **使用说明**（内嵌中英文用户手册）。Host 半边新增 `src/panel-api.ts`（投影 + loopback 路由）与
+  提供 8 个 tab（`PANEL_TABS`）：概览（实时决策指标）/ 虚拟 Provider 池（增删候选、绑定物理 provider/model、标签、上下移）/
+  推理强度（单一 Reflex（自适应）开关、兜底档、置信度下限）/ System 1 后端（backend、baseUrl、model、API key 环境变量、超时）/
+  自动干预（模式与四能力）/ 工具开关（5 个可开关工具）/ 决策账本（近 N 条 + 一键清空）/ **使用说明**（内嵌中英文用户手册）。Host 半边新增 `src/panel-api.ts`（投影 + loopback 路由）与
   `src/panel-mount.ts`（挂载），浏览器半边在 `src/client/**`。设计 token 全部走 `--dsw-alias-*`（带兜底值），
   zh/en 文案齐备，**不引入任何新的外部重量级依赖**（bundle 的 externals 只有 `react`，它是 GUI 自身的 seed）。
 
@@ -245,8 +245,8 @@ DSH Web GUI (loader)
 28. **面板挂在 `settings.section` 槽位，且只在 Host 半边在时出现**：槽位注册（`id:'reflex'`、`order:55`、
     `label` 取自 locale 的 `title`）与 locale 字典都在 `ctx.slots.inject` 的 effect 里；只有当前命名空间
     真的被 serve（`whileServed` 回调触发）时才注册，所以「Host 半边没装」不会留下一张空页面。
-    文案 zh/en 双份齐备，页面跟随 Host 语言。面板主体是 6 个 tab：概览 / 虚拟 Provider / 推理强度 /
-    System 1 后端 / 决策账本 / 使用说明。
+    文案 zh/en 双份齐备，页面跟随 Host 语言。面板主体是 8 个 tab：概览 / 虚拟 Provider / 推理强度 /
+    System 1 后端 / 自动干预 / 工具开关 / 决策账本 / 使用说明。
 
 ### 内嵌使用说明与双语查看（g-005）
 
@@ -260,7 +260,7 @@ DSH Web GUI (loader)
     HTML 字符串——`renderInline` 把内联代码、粗体、链接变成真实元素，其余标记一律当文本，**没有
     `dangerouslySetInnerHTML`，所以文档里的尖括号不可能变成注入面**。表格解析要求每行单元格数与表头一致，
     不齐的行不会被拼成错位的表。
-31. **「使用说明」是设置页的第 6 个 tab，而不是外链**：`PANEL_TABS` 增加 `'guide'`，`GuideTab` 渲染标题/
+31. **「使用说明」是设置页的第 8 个 tab，而不是外链**：`PANEL_TABS` 增加 `'guide'`，`GuideTab` 渲染标题/
     导语/提示/来源摘要 + 解析后的正文；tab 文案 `使用说明` / `Guide` 随 Host 语言切换，正文也随语言切换
     （中文界面读 `USER_GUIDE.md`，英文界面读 `docs/USER_GUIDE.en.md`）。面板自身仍然只走 loopback 路由，
     文档内容随 `client.js` 一起加载，**离线可用、不新增任何运行时依赖**。
