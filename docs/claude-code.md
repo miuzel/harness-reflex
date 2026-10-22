@@ -241,6 +241,7 @@ CLAUDE_LAUNCHER=claude-kimi PATH="$PWD/dist/cli:$PATH" scripts/claude-e2e.sh
 - 函数在 stdout 打印的横幅（如 `starting claude with arguments ...`）会被过滤掉，只保留 `{...}` 的 stream-json 行。
 - 需要临时状态目录时脚本会用仓库内 `tmp/`（不是 `/tmp`）：沙箱宿主可能不允许 hook 写 `/tmp`，状态写不进去会让断言看起来像"没生效"。
 - 只想验静态契约与 `claude plugin validate`、不跑真实会话：`CLAUDE_LAUNCHER=... scripts/claude-e2e.sh` 在未登录时会以 exit 2 停下并说明。
+- active 会话重试一次：模型是否真的执行那条失败命令、是否随后声称完成，属于模型行为而非插件行为；没出现完成声明时脚本换一个干净状态目录重跑。每次 attempt 用独立状态目录，且**只把最终采用的那次计为一条断言**，所以总结恒为 `9 passed`，不会因为重试变成 `10 passed`。
 
 断言口径（真实会话部分）：
 

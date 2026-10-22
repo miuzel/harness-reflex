@@ -216,25 +216,38 @@ if [ "$SKIPPED" -eq 0 ]; then
 # Whether the model actually runs the failing command and then claims success
 # is model behaviour, not plugin behaviour. Retry once when the claim never
 # arrives, so a flaky narration does not read as a product failure.
+#
+# Each attempt gets its own state dir, and only the attempt we adopt is counted:
+# the summary must keep a fixed number of assertions, otherwise a retry reads as
+# "10 passed" while a first-try success reads as "9 passed" for the same result.
+ACTIVE_BEST=0
 for attempt in 1 2; do
-  rm -rf "$STATE_ACTIVE"
-  mkdir -p "$STATE_ACTIVE"
+  ACTIVE_STATE_THIS="$STATE_ACTIVE/a$attempt"
+  rm -rf "$ACTIVE_STATE_THIS"
+  mkdir -p "$ACTIVE_STATE_THIS"
   if (
-    export HARNESS_REFLEX_STATE_DIR="$STATE_ACTIVE" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active
+    export HARNESS_REFLEX_STATE_DIR="$ACTIVE_STATE_THIS" SYSTEM_ONE_BACKEND=mock CLAUDE_PLUGIN_OPTION_CLOSING_MODE=active
     run_claude -p "${CLAUDE_FLAGS[@]}" --plugin-dir "$PLUGIN"
-  ) >"$TMP/active.jsonl" 2>"$TMP/active.err" <"$PROMPT_FILE"; then
-    filter_stream "$TMP/active.jsonl"
-    pass "active session completed (attempt $attempt)"
+  ) >"$TMP/active.$attempt.jsonl" 2>"$TMP/active.$attempt.err" <"$PROMPT_FILE"; then
+    filter_stream "$TMP/active.$attempt.jsonl"
+    [ "$ACTIVE_BEST" -ne 0 ] || ACTIVE_BEST=$attempt
   else
-    cat "$TMP/active.err" >&2
-    fail "active claude -p session failed"
+    cat "$TMP/active.$attempt.err" >&2
+    # A failed retry must not discard the session that already succeeded.
+    [ "$ACTIVE_BEST" -ne 0 ] || fail "active claude -p session failed"
     break
   fi
-  if grep -rq '"type":"closing"[^}]*"applied":true' "$STATE_ACTIVE" 2>/dev/null; then
+  if grep -rq '"type":"closing"[^}]*"applied":true' "$ACTIVE_STATE_THIS" 2>/dev/null; then
+    ACTIVE_BEST=$attempt
     break
   fi
   echo "note: no contradicted completion claim in attempt $attempt (model narration); retrying once" >&2
 done
+if [ "$ACTIVE_BEST" -ne 0 ]; then
+  pass "active session completed (attempt $ACTIVE_BEST)"
+  cp "$TMP/active.$ACTIVE_BEST.jsonl" "$TMP/active.jsonl"
+  STATE_ACTIVE="$STATE_ACTIVE/a$ACTIVE_BEST"
+fi
 fi
 
 echo "== Phase 3: assertions =="
