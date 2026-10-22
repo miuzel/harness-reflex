@@ -6,6 +6,22 @@
 
 ---
 
+## 先分清两个「面」（写文档、剪视频、写脚本前必看）
+
+同一个插件在不同宿主里露出不同形状，**工具数量与自动化程度都不同**，混着讲会自相矛盾：
+
+| | A. MCP 面（Claude Code / Codex / AGY） | B. DSH 宿主插件面（`dsh-harness-reflex`） |
+|---|---|---|
+| 工具 | **8 个**：`choice` `score` `route` `screen` `gate` `prune` `detect_stagnation` `status_ledger` | **5 个可开关**：`choice` `score` `route` `screen` `gate`；默认开 4 个，`route` 默认关 |
+| 剪枝 / 停滞 / 收尾核验 | 需要模型**主动调用工具** | **自动干预**：`tools/post-execute`、`agent/pre-step`、`agent/turn-stopping` 钩子执行，模型不调也会发生 |
+| 账本 | `reflex_status_ledger` 工具 | `/reflex-ledger` 命令 或 设置面板「账本」页（不占工具位） |
+| 模型与思考等级 | 不涉及（由宿主决定） | 自动：虚拟 Provider 候选池 + 自适应 `reasoningEffort` |
+| 设置面板 | 无 | 6 个页签（概览 / 虚拟 Provider / 推理强度 / System 1 后端 / 自动干预 / 工具开关 / 账本 / 使用说明） |
+
+一句话：**A 面是工具集，B 面是「工具 + 自动干预 + 路由」**。讲到具体数字前，先说清在讲哪个面。
+
+---
+
 ## 核心特性与架构
 
 ```
