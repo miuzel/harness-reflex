@@ -15,3 +15,8 @@ packages/dsh-harness-reflex/src/client/guide.generated.ts
 release/*.tgz
 release/SHA256SUMS
 release/release-report.json
+
+# Scaffold written by `claude plugin validate`; types/.gitignore only covers
+# the declaration files, so the shared tsconfig is ignored here explicitly.
+packages/claude-reflex/.claude-plugin/types/tsconfig.json
+packages/claude-reflex/tsconfig.json

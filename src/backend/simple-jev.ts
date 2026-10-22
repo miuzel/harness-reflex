@@ -12,6 +12,12 @@ import {
   RouteResponse
 } from './types.js';
 import { buildRouteContext } from './route-prompt.js';
+import {
+  LOGITS_DEFAULT_API_KEY,
+  LOGITS_DEFAULT_BASE_URL,
+  LOGITS_DEFAULT_MODEL,
+  LOGITS_DEFAULT_TIMEOUT_MS
+} from './defaults.js';
 
 export interface SimpleJevConfig {
   vllmBaseUrl?: string;
@@ -39,20 +45,20 @@ export class LogitsSystemOneBackend implements DecisionBackend {
       process.env.SYSTEM_ONE_BASE_URL ||
       process.env.VLLM_BASE_URL ||
       process.env.OPENAI_BASE_URL ||
-      'http://localhost:8000'
+      LOGITS_DEFAULT_BASE_URL
     ).replace(/\/$/, '');
     this.apiKey =
       config?.apiKey ||
       process.env.SYSTEM_ONE_API_KEY ||
       process.env.VLLM_API_KEY ||
       process.env.OPENAI_API_KEY ||
-      'dummy';
+      LOGITS_DEFAULT_API_KEY;
     this.model =
       config?.model ||
       process.env.SYSTEM_ONE_MODEL ||
       process.env.VLLM_MODEL ||
-      'Qwen/Qwen2.5-7B-Instruct';
-    this.timeoutMs = config?.timeoutMs || 8000;
+      LOGITS_DEFAULT_MODEL;
+    this.timeoutMs = config?.timeoutMs || LOGITS_DEFAULT_TIMEOUT_MS;
   }
 
   /**

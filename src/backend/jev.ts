@@ -19,6 +19,12 @@ import {
   StagnationCheckResponse
 } from './types.js';
 import { CURRENT_MODEL_MARK, buildRouteContext } from './route-prompt.js';
+import {
+  JEV_DEFAULT_API_KEY,
+  JEV_DEFAULT_BASE_URL,
+  JEV_DEFAULT_MODEL,
+  JEV_DEFAULT_TIMEOUT_MS
+} from './defaults.js';
 
 export interface JevBackendConfig {
   baseUrl?: string;
@@ -107,11 +113,11 @@ export interface SystemOneResponse {
 export const SYSTEMONE_ENDPOINT_PATH = '/v1/systemone';
 
 /** Endpoint used when neither configuration nor environment supplies a base. */
-export const DEFAULT_SYSTEMONE_ENDPOINT = `https://api.typesafe.ai${SYSTEMONE_ENDPOINT_PATH}`;
+export const DEFAULT_SYSTEMONE_ENDPOINT = JEV_DEFAULT_BASE_URL;
 
 /** Illustration of a choice request, for docs and drift checks. */
 export const CHOICE_REQUEST_EXAMPLE = {
-  model: 'jev-latest',
+  model: JEV_DEFAULT_MODEL,
   state: {},
   questions: {
     q: { type: 'choice', instructions: 'Which option is better?', criteria: { a: 'the first option', b: 'the second option' } }
@@ -1137,13 +1143,13 @@ export class JevDecisionBackend implements DecisionBackend {
       config?.apiKey ||
       process.env.SYSTEM_ONE_API_KEY ||
       process.env.JEV_API_KEY ||
-      '';
+      JEV_DEFAULT_API_KEY;
     this.model =
       config?.model ||
       process.env.SYSTEM_ONE_MODEL ||
       process.env.JEV_MODEL ||
-      'jev-latest';
-    this.timeoutMs = config?.timeoutMs || 10000;
+      JEV_DEFAULT_MODEL;
+    this.timeoutMs = config?.timeoutMs || JEV_DEFAULT_TIMEOUT_MS;
     this.pruneJudgeMinChars = resolvePruneJudgeMinChars(config?.pruneJudgeMinChars);
   }
 

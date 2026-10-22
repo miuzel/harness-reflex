@@ -118,13 +118,13 @@ export const zh = {
   helpBackend:
     '用途：选择决策后端实现；格式：auto / mock / jev / vllm 之一；默认：auto；留空：按 auto 处理，由环境自动挑选可用后端。',
   helpBaseUrl:
-    '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址。',
+    '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
   helpModel:
-    '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型。',
+    '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型（jev 为 jev-latest，simple-jev 为 Qwen/Qwen2.5-7B-Instruct）。',
   helpApiKeyEnv:
-    '用途：存放 API Key 的环境变量名（不是密钥本身）；格式：大写环境变量名，例如 JEV_API_KEY；默认：未设置；留空：由环境自动发现，密钥永远不会写进设置文档。',
+    '用途：存放 API Key 的环境变量名（不是密钥本身）；格式：大写环境变量名，例如 JEV_API_KEY；默认：未设置；留空：由后端按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 依次兜底，密钥永远不会写进设置文档。',
   helpTimeoutMs:
-    '用途：单次后端请求的超时时间；格式：毫秒整数；默认：未设置；留空：使用后端默认超时，小于 100 会被拒绝。',
+    '用途：单次后端请求的超时时间；格式：毫秒整数；默认：未设置；留空：使用后端默认超时（jev 10000 ms、simple-jev 8000 ms），小于 100 会被拒绝。',
   helpToolPrefix:
     '用途：所有 reflex_* 工具注册名的前缀；格式：小写字母、数字与下划线；默认：reflex_；留空：按默认前缀注册，空字符串会被拒绝。',
   helpPruneThreshold:
@@ -452,13 +452,13 @@ export const en: Record<keyof typeof zh, string> = {
   helpBackend:
     'Use: choose the decision backend implementation; Format: one of auto / mock / jev / vllm; Default: auto; Blank: treated as auto, which picks an available backend from the environment.',
   helpBaseUrl:
-    'Use: the System One gateway or OpenAI-compatible logits endpoint; Format: http(s) URL; Default: not set; Blank: use the environment or the backend default address.',
+    'Use: the System One gateway or OpenAI-compatible logits endpoint; Format: http(s) URL; Default: not set; Blank: use the environment or the backend default address (jev: https://api.typesafe.ai/v1/systemone, simple-jev: http://localhost:8000).',
   helpModel:
-    'Use: the model id the backend asks for; Format: non-empty string; Default: not set; Blank: use the environment or the backend default model.',
+    'Use: the model id the backend asks for; Format: non-empty string; Default: not set; Blank: use the environment or the backend default model (jev: jev-latest, simple-jev: Qwen/Qwen2.5-7B-Instruct).',
   helpApiKeyEnv:
-    'Use: the name of the environment variable holding the API key, never the key itself; Format: an uppercase environment variable name, e.g. JEV_API_KEY; Default: not set; Blank: discovered from the environment, and the secret never enters the settings document.',
+    'Use: the name of the environment variable holding the API key, never the key itself; Format: an uppercase environment variable name, e.g. JEV_API_KEY; Default: not set; Blank: the backend falls back in order to SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY, and the secret never enters the settings document.',
   helpTimeoutMs:
-    'Use: the per-request backend timeout; Format: integer milliseconds; Default: not set; Blank: use the backend default, and values below 100 are rejected.',
+    'Use: the per-request backend timeout; Format: integer milliseconds; Default: not set; Blank: use the backend default (10000 ms for jev, 8000 ms for simple-jev), and values below 100 are rejected.',
   helpToolPrefix:
     'Use: the prefix of every registered reflex_* tool name; Format: lowercase letters, digits and underscores; Default: reflex_; Blank: register with the default prefix, and an empty string is rejected.',
   helpPruneThreshold:

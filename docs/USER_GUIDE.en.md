@@ -124,16 +124,24 @@ plugin options; resolution order is “plugin config > environment > default moc
 | Official Jev / System One API | `jev` | `POST {BASE_URL}/v1/...`, requires an API key |
 
 ```bash
-# Official Jev
-export SYSTEM_ONE_BACKEND=jev
+# Official Jev: only the key is required
 export SYSTEM_ONE_API_KEY="your-api-key"
-export SYSTEM_ONE_BASE_URL="https://api.typesafe.ai/v1/systemone"
 
-# Self-hosted vLLM (OpenAI compatible)
-export SYSTEM_ONE_BACKEND=simple-jev
+# Self-hosted vLLM (OpenAI compatible): only the endpoint is required
 export SYSTEM_ONE_BASE_URL="http://localhost:8000"
-export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
+export SYSTEM_ONE_BACKEND=simple-jev     # optional: VLLM_BASE_URL/OPENAI_BASE_URL alone selects simple-jev
 ```
+
+With `SYSTEM_ONE_BACKEND` unset the choice is derived: `SYSTEM_ONE_API_KEY`/`JEV_API_KEY` present → `jev`;
+`VLLM_BASE_URL`/`OPENAI_BASE_URL` present → `simple-jev`; neither → `mock`.
+
+The other two variables default per backend, so “default mock” says nothing about them:
+
+| Variable | `jev` | `simple-jev` |
+| --- | --- | --- |
+| `SYSTEM_ONE_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | `http://localhost:8000` |
+| `SYSTEM_ONE_MODEL` | `jev-latest` | `Qwen/Qwen2.5-7B-Instruct` |
+| `SYSTEM_ONE_API_KEY` | **none** (empty; the service rejects the request) | `dummy` (local servers usually ignore it) |
 
 Plugin options (editable on the “System 1 backend” page, or in the DSH plugin config):
 
@@ -141,9 +149,9 @@ Plugin options (editable on the “System 1 backend” page, or in the DSH plugi
 | --- | --- | --- |
 | `backend` | `auto` | `auto` derives from the environment; may be pinned to `mock` / `vllm` / `jev` (`vllm` is the logits read-out; the env name is `simple-jev`) |
 | `baseUrl` | unset | System 1 endpoint; unset uses the backend default |
-| `model` | unset | Server-side model id (required by `vllm` / `simple-jev`) |
-| `apiKeyEnv` | `SYSTEM_ONE_API_KEY` | Stores the **variable name only**; the secret never enters the settings document |
-| `timeoutMs` | `2000` | Per-decision timeout; a timeout follows the “System 1 unavailable” degradation path |
+| `model` | unset | Server-side model id; unset uses the backend default (`jev-latest` / `Qwen/Qwen2.5-7B-Instruct`) |
+| `apiKeyEnv` | unset | Stores the **variable name only**; the secret never enters the settings document. Unset falls back to the backend's own chain (`SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`) |
+| `timeoutMs` | unset | Per-decision timeout; unset uses the **backend default — 10000 ms for `jev`, 8000 ms for `simple-jev`**, not one shared value; a timeout follows the “System 1 unavailable” degradation path |
 
 Calibration (optional): fit a PAVA/ECE curve with the `calibrate` engine over a
 labelled sample, then point `calibrationPath` at that JSON and the runtime will
@@ -654,7 +662,7 @@ stdio MCP `tools/list` for real.
 | A virtual model errors instead of dispatching | The pool is empty and `routing.fallback` is unset; add candidates or a fallback target |
 | Text is not routed as expected | Check `routing.enabled`, the virtual model id spelling, and whether the agent actually requested that virtual model |
 | Reasoning effort never changes | The policy is unset (no intervention), or the caller chose a concrete `reasoningEffort` explicitly on the request |
-| System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page |
+| System 1 decisions always fall back | `timeoutMs` too small, `baseUrl` unreachable, or `minConfidence` too high; check the latest decision and backend state on the Overview page. Note the timeout has **no single default**: unset means 10000 ms for `jev` and 8000 ms for `simple-jev` |
 | The in-panel guide is stale | `USER_GUIDE.md` changed without a rebuild; run `npm run build:all` |
 | A closed tool is still being called | The registry takes effect on the next load; reload the plugin and check that the key is the **suffix** (`gate`, not `reflex_gate`). `prune`/`detect_stagnation`/`status_ledger` are commands now and are refused by the validator |
 | `reflex_route` is missing from the default tool list | Expected: `route` is off by default; switch it on in the Tools page (or set `tools: { enabled: { route: true } }`) |

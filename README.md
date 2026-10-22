@@ -140,19 +140,25 @@ dsh plugin --profile web add dsh-harness-reflex@0.1.0
 默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
 
 ```bash
-# 切换 Provider A：官方 Jev API
-export SYSTEM_ONE_BACKEND=jev
+# 切换 Provider A：官方 Jev API（只有 key 是必填，地址与模型都有默认值）
 export SYSTEM_ONE_API_KEY="your-api-key"
-export SYSTEM_ONE_BASE_URL="https://api.typesafe.ai/v1/systemone"
 
 # 切换 Provider B：通用 open-weights 模型 logits 读出 (vLLM / simple-jev / OpenAI 兼容接口)
-export SYSTEM_ONE_BACKEND=simple-jev
-export SYSTEM_ONE_BASE_URL="http://localhost:8000"
-export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
+export SYSTEM_ONE_BASE_URL="http://localhost:8000"   # 只有地址是必填
+export SYSTEM_ONE_BACKEND=simple-jev                 # 或不写：检测到 VLLM_BASE_URL/OPENAI_BASE_URL 会自动选中
 
-# 切换 Provider C：离线/本地基准模拟后端 (默认)
+# 切换 Provider C：离线/本地基准模拟后端（什么都不设时的默认）
 export SYSTEM_ONE_BACKEND=mock
 ```
+
+不设 `SYSTEM_ONE_BACKEND` 时按顺序自动判定：有 `SYSTEM_ONE_API_KEY`/`JEV_API_KEY` → `jev`；
+有 `VLLM_BASE_URL`/`OPENAI_BASE_URL` → `simple-jev`；都没有 → `mock`。
+
+| 变量 | 默认值 |
+| --- | --- |
+| `SYSTEM_ONE_BASE_URL` | `jev`：`https://api.typesafe.ai/v1/systemone`；`simple-jev`：`http://localhost:8000` |
+| `SYSTEM_ONE_MODEL` | `jev`：`jev-latest`；`simple-jev`：`Qwen/Qwen2.5-7B-Instruct` |
+| `SYSTEM_ONE_API_KEY` | `jev`：无（空串，请求会被服务端拒绝）；`simple-jev`：`dummy`（本地服务通常不校验） |
 
 ---
 

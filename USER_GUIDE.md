@@ -113,16 +113,24 @@ dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
 | 官方 Jev / System One API | `jev` | `POST {BASE_URL}/v1/...`，需 API Key |
 
 ```bash
-# 官方 Jev
-export SYSTEM_ONE_BACKEND=jev
+# 官方 Jev：只有 key 是必填
 export SYSTEM_ONE_API_KEY="your-api-key"
-export SYSTEM_ONE_BASE_URL="https://api.typesafe.ai/v1/systemone"
 
-# 自托管 vLLM（OpenAI 兼容）
-export SYSTEM_ONE_BACKEND=simple-jev
+# 自托管 vLLM（OpenAI 兼容）：只有地址是必填
 export SYSTEM_ONE_BASE_URL="http://localhost:8000"
-export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
+export SYSTEM_ONE_BACKEND=simple-jev     # 省略也能判定：检测到 VLLM_BASE_URL/OPENAI_BASE_URL 即为 simple-jev
 ```
+
+不显式设 `SYSTEM_ONE_BACKEND` 时的判定顺序：有 `SYSTEM_ONE_API_KEY`/`JEV_API_KEY` → `jev`；
+有 `VLLM_BASE_URL`/`OPENAI_BASE_URL` → `simple-jev`；都没有 → `mock`。
+
+三份默认值都取决于后端，不要凭「默认 mock」推断另外两个：
+
+| 变量 | `jev` | `simple-jev` |
+| --- | --- | --- |
+| `SYSTEM_ONE_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | `http://localhost:8000` |
+| `SYSTEM_ONE_MODEL` | `jev-latest` | `Qwen/Qwen2.5-7B-Instruct` |
+| `SYSTEM_ONE_API_KEY` | **无**（空串，请求会被服务端拒绝） | `dummy`（本地服务通常不校验） |
 
 插件配置项（可在设置面板「System 1 后端」页编辑，或写进 DSH 插件配置）：
 
@@ -130,9 +138,9 @@ export SYSTEM_ONE_MODEL="Qwen/Qwen2.5-7B-Instruct"
 | --- | --- | --- |
 | `backend` | `auto` | `auto` 按环境变量判定，也可强制 `mock` / `vllm` / `jev`（`vllm` 即 logits 读出，环境变量侧名 `simple-jev`） |
 | `baseUrl` | 省略 | System 1 服务地址；省略时用后端默认值 |
-| `model` | 省略 | 服务端模型 ID（`simple-jev` 必填） |
-| `apiKeyEnv` | `SYSTEM_ONE_API_KEY` | **只记录环境变量名**，密钥本身不进入设置文档 |
-| `timeoutMs` | `2000` | 单次判定超时；超时按 `System 1 不可用` 走降级路径 |
+| `model` | 省略 | 服务端模型 ID；省略时用后端默认值（`jev-latest` / `Qwen/Qwen2.5-7B-Instruct`） |
+| `apiKeyEnv` | 省略 | **只记录环境变量名**，密钥本身不进入设置文档；省略时由后端各自从环境变量兜底（`SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`） |
+| `timeoutMs` | 省略 | 单次判定超时；省略时用**后端默认值 `jev` 10000 ms / `simple-jev` 8000 ms**，不是统一值；超时按 `System 1 不可用` 走降级路径 |
 
 校准曲线（可选）：用 `calibrate` 引擎基于历史标注集拟合 ECE/PAVA 曲线，再用
 `calibrationPath` 指向该 JSON，运行时会自动修正过度自信的原始概率。
@@ -541,7 +549,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | 虚拟模型报错而不是派发 | 候选池为空且没有 `routing.fallback`；补候选或配置兜底目标 |
 | 文本没有按预期被路由 | 检查 `routing.enabled`、虚拟模型 ID 拼写，以及 Agent 是否真的请求了该虚拟模型 |
 | 推理强度没变化 | 策略设置为省略 = 不干预；或者调用方在请求里显式选择了具体档位 |
-| System 1 判定总是走兜底 | `timeoutMs` 过小、`baseUrl` 不可达，或 `minConfidence` 过高；先看「概览」页的最近决策与后端状态 |
+| System 1 判定总是走兜底 | `timeoutMs` 过小、`baseUrl` 不可达，或 `minConfidence` 过高；先看「概览」页的最近决策与后端状态。注意超时**没有统一默认值**：省略时 `jev` 用 10000 ms、`simple-jev` 用 8000 ms |
 | 面板里的使用说明是过时副本 | 修改 `USER_GUIDE.md` 后未重新构建；执行 `npm run build:all` |
 | 关掉某个工具后模型仍在调用它 | 注册表在下一次加载时生效；重载插件后再看，并确认键名写的是**后缀**（`gate`，不是 `reflex_gate`）。`prune`/`detect_stagnation`/`status_ledger` 已不是工具，写进 `tools.enabled` 会被校验器拒绝 |
 | 默认工具清单里没有 `reflex_route` | 属预期：`route` 默认关闭，需要在工具开关页打开（或写 `tools: { enabled: { route: true } }`） |

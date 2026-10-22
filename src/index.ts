@@ -1,4 +1,5 @@
 export * from './backend/types.js';
+export * from './backend/defaults.js';
 export * from './backend/mock.js';
 export * from './backend/jev.js';
 export * from './backend/simple-jev.js';
