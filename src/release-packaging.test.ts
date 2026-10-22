@@ -259,9 +259,12 @@ test('the packed tarball is self-contained with no unpublishable dependencies', 
 //#region the release directory
 
 test('a packed release directory is internally consistent', () => {
-  if (!existsSync(releaseDir)) {
-    // Nothing packed yet: `npm run release` produces this directory.
-    assert.ok(true);
+  // `release/` is tracked only by its notes file; the artifacts and SHA256SUMS
+  // are produced by `npm run release` and are not committed. A fresh checkout
+  // therefore has the directory without a manifest, which means "not packed
+  // here yet", not "the release is broken".
+  if (!existsSync(join(releaseDir, 'SHA256SUMS'))) {
+    assert.ok(true, 'nothing packed in this tree yet');
     return;
   }
   const sums = readFileSync(join(releaseDir, 'SHA256SUMS'), 'utf8').trim().split('\n');
