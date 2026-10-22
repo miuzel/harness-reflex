@@ -53,7 +53,8 @@ and each surface's actual tool definitions for argument and validation boundarie
 └──────────────────────────────────┘  ┌────────────▼───────────────────┐
                                       │ client.js browser panel (React) │
                                       │ Overview / Virtual provider /   │
-                                      │ Effort / Backend / Ledger /Guide│
+                                      │ Effort / Backend / Interventions│
+                                      │ Tools / Ledger / Guide          │
                                       └────────────────────────────────┘
 ```
 
