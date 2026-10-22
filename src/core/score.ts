@@ -3,8 +3,8 @@ import { DecisionBackend } from '../backend/types.js';
 /**
  * Continuous 0.0 – 1.0 scoring projected from a System One multi-class choice.
  *
- * Shared by every surface (stdio MCP server, DSH Host tools) so the score a
- * model sees never depends on which adapter called it.
+ * Shared by every surface (stdio MCP server, in-process host tools) so the score
+ * a model sees never depends on which adapter called it.
  */
 
 export interface ScoreRequest {

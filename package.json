@@ -39,7 +39,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "build:all": "npm run build && node scripts/embed-user-guide.mjs && node scripts/link-dsh-deps.mjs && tsc -p packages/dsh-reflex/tsconfig.json && npm run build:plugin-client",
+    "build:all": "npm run build && node scripts/sync-vendor-core.mjs && node scripts/embed-user-guide.mjs && node scripts/link-dsh-deps.mjs && tsc -p packages/dsh-reflex/tsconfig.json && npm run build:plugin-client",
+    "sync:core": "node scripts/sync-vendor-core.mjs",
     "build:plugin-client": "node scripts/embed-user-guide.mjs && tsc -p packages/dsh-reflex/tsconfig.client.json && node packages/dsh-reflex/dist/client-bundle.js packages/dsh-reflex",
     "watch": "tsc --watch",
     "start": "node dist/cli/index.js",

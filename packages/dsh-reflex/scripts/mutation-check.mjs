@@ -379,7 +379,7 @@ const MUTATIONS = [
       "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
       '      return downstream;',
       '    }',
-      '    if (!this.#actionWithinBudget(state)) {'
+      '    if (!actionWithinBudget(state, this.#config)) {'
     ].join('\n'),
     to: [
       "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
@@ -392,14 +392,14 @@ const MUTATIONS = [
     name: 'prune-observe-action-unbooked',
     area: 'a planned action is booked in both modes',
     file: 'src/interventions.ts',
-    from: ['      this.#bookAction(state);', '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'].join('\n'),
+    from: ['      bookAction(state);', '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'].join('\n'),
     to: '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'
   },
   {
     name: 'prune-applied-action-unbooked',
     area: 'an installed reduction is booked',
     file: 'src/interventions.ts',
-    from: ['    this.#bookAction(state);', '    this.#conclude(', '      plan,'].join('\n'),
+    from: ['    bookAction(state);', '    this.#conclude(', '      plan,'].join('\n'),
     to: ['    this.#conclude(', '      plan,'].join('\n')
   },
   // Stagnation exemptions for legitimate waits (g-012): the structured identity

@@ -69,7 +69,6 @@
  *
  * @module dsh-reflex/interventions
  */
-import { createHash } from 'node:crypto';
 import type { Context } from '@deepseek-ai/cordis';
 import { MessageId, boundContextSummary } from '@deepseek-ai/dsh-llm';
 import type { ContentBlock, ContextFormed, UserMessage } from '@deepseek-ai/dsh-llm';
@@ -84,7 +83,47 @@ import {
 } from './config.js';
 import { appendInterventionRecord, pruneLocator, type InterventionAuditRecord } from './session-audit.js';
 import type { ReflexGateService, StagnationDetector, ToolResultPruner } from './vendor/harness-reflex/index.js';
-import type { ActionStep, PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
+import type { PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
+import { claimCandidates } from './vendor/harness-reflex/core/closing.js';
+import {
+  assembleEvidence,
+  evidenceOf,
+  failureOf,
+  type EvidenceEntry
+} from './vendor/harness-reflex/core/evidence.js';
+import {
+  applyCharge,
+  emptyBucket,
+  judgmentCharge,
+  runJudgment,
+  suspicionOf,
+  type CostCharge,
+  type InterventionCostBucket,
+  type JudgmentCharge,
+  type JudgmentOutcome,
+  type StagnationSuspicion,
+  type ObservedStep
+} from './vendor/harness-reflex/core/judge.js';
+import {
+  actionWithinBudget,
+  bookAction,
+  modeOf,
+  serves as policyServes,
+  spendJudgment
+} from './vendor/harness-reflex/core/policy.js';
+import { applyPruneFloor } from './vendor/harness-reflex/core/prune-plan.js';
+import { clip, digestOf, estimateTokens, hasTextBlock, textOfContent } from './vendor/harness-reflex/core/text.js';
+
+// The decision primitives keep their historic import path: a caller that already
+// imports the intervention surface does not need a second one for them.
+export { claimCandidates } from './vendor/harness-reflex/core/closing.js';
+export { assembleEvidence, evidenceOf, FAILURE_MARKER, failureOf } from './vendor/harness-reflex/core/evidence.js';
+export { countTrailingFailures, countTrailingRepeats, detectOscillation, suspicionOf } from './vendor/harness-reflex/core/judge.js';
+export { applyPruneFloor, pruneFloorPlan, pruneMarker } from './vendor/harness-reflex/core/prune-plan.js';
+export { digestOf, estimateTokens, textOfContent } from './vendor/harness-reflex/core/text.js';
+export type { EvidenceEntry, EvidencePriority } from './vendor/harness-reflex/core/evidence.js';
+export type { InterventionCostBucket } from './vendor/harness-reflex/core/judge.js';
+export type { PruneFloorOptions, PruneFloorPlan } from './vendor/harness-reflex/core/prune-plan.js';
 
 /**
  * Producer-owned source kind of every message this plugin appends.
@@ -102,10 +141,6 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-/** Default share of a floored reduction's context budget taken from the head. */
-const FLOOR_HEAD_CHARS = 400;
-/** Default share of a floored reduction's context budget taken from the tail. */
-const FLOOR_TAIL_CHARS = 400;
 /** Characters of one observed step's input or output retained for judging. */
 const STEP_CHARS = 600;
 /** Steps one agent's detection window may retain. */
@@ -120,16 +155,6 @@ const CLAIM_CHARS = 4000;
  * character budget (not this count) decides what the judgment reads.
  */
 const MAX_EVIDENCE = 16;
-/** Characters of one evidence line. */
-const EVIDENCE_CHARS = 400;
-/** Characters of one result's tail summary. */
-const EVIDENCE_TAIL_CHARS = 240;
-/** Characters of the "other" (non-diagnostic, non-tail) fallback per result. */
-const EVIDENCE_OTHER_CHARS = 120;
-/** Completion claim candidates submitted to one closing judgment. */
-const MAX_CLAIMS = 3;
-/** Minimum sentence length worth classifying as a claim candidate. */
-const MIN_CLAIM_CHARS = 8;
 /** Agent states retained before the least recently used is dropped. */
 const MAX_AGENTS = 64;
 /** Reductions memoized per activation, bounded by least recent use. */
@@ -160,26 +185,6 @@ const PRUNE_MIN_LINES = 4;
  * never kept. A hundred kilobyte log line stays readable and bounded.
  */
 const MAX_RETAINED_CHARS = 100_000;
-
-/**
- * Matches the failure markers that make a result a *candidate* for the closing
- * evidence. A hit is a safety floor: the line is kept whatever the budget says.
- * A miss is never a "failure-free" conclusion — the tail summary goes to System
- * One, which decides what the result means.
- */
-export const FAILURE_MARKER = /(\berror\b|\berrors\b|\bfailed\b|\bfailure\b|\bfailures\b|\bfail\b|exit code [1-9]|\bnot ok\b|\bFAIL\b|\bexception\b|\btraceback\b)/i;
-
-/**
- * Prefilter for a failure *suspicion* — the deterministic trigger that makes a
- * closing judgment worth buying. It is broader than {@link FAILURE_MARKER}
- * because `{ok:false}`, a timeout, and a Chinese error must reach System One
- * too; none of these decides anything by itself.
- */
-const FAILURE_CUE = new RegExp(
-  `${FAILURE_MARKER.source}|\\bok\\b\\s*[:=]\\s*false|"ok"\\s*:\\s*false|\\btimed?\\s*out\\b|\\btimeout\\b|`
-    + '失败|错误|异常|超时|无法|未通过|仍有失败|还有失败|报错',
-  'i'
-);
 
 /** The action names one plan may carry. */
 export type InterventionAction =
@@ -455,20 +460,6 @@ export function annotateWaitHistory(steps: readonly ObservedStep[], signature: s
   });
 }
 
-/** One step of one agent's detection window. */
-interface ObservedStep {
-  /** `tool:argumentsDigest` — the identity a repetition is measured on. */
-  signature: string;
-  tool: string;
-  input: string;
-  output: string;
-  error: string;
-  failed: boolean;
-  turn: number;
-  at: number;
-  /** Whether the step was a legitimate wait query (see {@link isWaitQuery}). */
-  wait?: boolean;
-}
 
 /**
  * The window a stagnation trigger and its judgment are measured on.
@@ -516,34 +507,6 @@ interface AgentState {
   denied: Set<string>;
   /** Calls this engine refused, keyed by the call identity. */
   refused: Set<string>;
-}
-
-/** One token and latency account of a mode or a capability. */
-export interface InterventionCostBucket {
-  /** Decisions planned. */
-  plans: number;
-  /** Decisions whose plan was executed. */
-  applied: number;
-  /** System 1 judgments paid for. */
-  judgments: number;
-  /** Judgments served from the per-turn verdict memo instead of a new call. */
-  memoHits: number;
-  /** Milliseconds spent in local, deterministic work. */
-  localLatencyMs: number;
-  /** Milliseconds spent waiting for System 1. */
-  remoteLatencyMs: number;
-  /** Tokens the judgments reasoned about. */
-  judgeTokens: number;
-  /** Tokens of the payloads decisions were made about. */
-  originalTokens: number;
-  /** Tokens the candidates would carry. */
-  candidateTokens: number;
-  /** Tokens the candidates would have saved. */
-  potentialSavedTokens: number;
-  /** Tokens actually removed from the model-visible surface. */
-  actualSavedTokens: number;
-  /** Tokens actually added to the model-visible surface. */
-  injectedTokens: number;
 }
 
 /** The baseline side of the accounting: what the hooks were shown, untouched. */
@@ -614,23 +577,6 @@ export interface InterventionEngineOptions {
   audit?: (record: InterventionAuditRecord, session: unknown) => void;
 }
 
-/** A fresh, zeroed cost bucket. */
-function emptyBucket(): InterventionCostBucket {
-  return {
-    plans: 0,
-    applied: 0,
-    judgments: 0,
-    memoHits: 0,
-    localLatencyMs: 0,
-    remoteLatencyMs: 0,
-    judgeTokens: 0,
-    originalTokens: 0,
-    candidateTokens: 0,
-    potentialSavedTokens: 0,
-    actualSavedTokens: 0,
-    injectedTokens: 0
-  };
-}
 
 /**
  * The payload half of a prune decision's audit fields.
@@ -669,834 +615,6 @@ function pruneDiagnosticsOf(response: PruneResponse): InterventionSkipDetail {
   };
 }
 
-/**
- * Tokens one text costs, at the ledger's shared four-characters-per-token rate.
- * @param text - any text.
- * @returns the estimated token count.
- */
-export function estimateTokens(text: string): number {
-  return text.length === 0 ? 0 : Math.ceil(text.length / 4);
-}
-
-/**
- * Stable short digest of one value, used as a tool-call identity.
- * @param value - the text to digest.
- * @returns sixteen hexadecimal characters.
- */
-export function digestOf(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
-}
-
-/**
- * Concatenate the text blocks of one content list.
- * @param content - message or result content.
- * @returns the text, in block order.
- */
-export function textOfContent(content: readonly ContentBlock[] | undefined): string {
-  if (!content) return '';
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') {
-      parts.push((block as { text?: string }).text ?? '');
-    }
-  }
-  return parts.join('\n');
-}
-
-/**
- * Whether one content list carries at least one text block.
- * @param content - message or result content.
- * @returns whether there is text to rewrite.
- */
-export function hasTextBlock(content: readonly ContentBlock[] | undefined): boolean {
-  if (!content) return false;
-  for (const block of content) {
-    if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') return true;
-  }
-  return false;
-}
-
-/**
- * Bound one text to a character budget, marking the cut.
- * @param text - any text.
- * @param max - maximum characters to keep.
- * @returns the bounded text.
- */
-function clip(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}…`;
-}
-
-// ── what counts as a failed result ──────────────────────────────────────────
-
-/**
- * The exit status one tool result carries in its own canonical value.
- *
- * A shell result is *reported*, not errored: a command that exits 1 returns a
- * successful `ToolExecutionResult` whose `value.exitCode` is the whole truth. The
- * distinction matters twice over — a correction that never fires because the
- * failure looked like a success, and a closing check that reads a green claim
- * over a red build — so the status is taken from the tool's own structured field
- * whenever the payload exposes one.
- *
- * @param value - the result's canonical value, when it has one.
- * @returns the exit status, or `undefined` when the value is not a shell result.
- */
-export function structuredExitStatus(value: unknown): { exitCode: number; signal?: string } | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const candidate = value as { exitCode?: unknown; signal?: unknown };
-  if (typeof candidate.exitCode !== 'number' || !Number.isFinite(candidate.exitCode)) return undefined;
-  const status: { exitCode: number; signal?: string } = { exitCode: candidate.exitCode };
-  if (typeof candidate.signal === 'string') status.signal = candidate.signal;
-  return status;
-}
-
-/**
- * Whether the text ends in the Host's own exit marker for a failed command.
- *
- * The marker is the last line of the model-facing content, so anchoring it to the
- * end of the text keeps an *ordinary* result that merely mentions "exit code 1"
- * in its body from being misread as a failure. This is the fallback for a result
- * that carries no structured value — a Virtual tool, a replay from an older
- * record — not a replacement for {@link structuredExitStatus}.
- * @param text - the model-facing text.
- * @returns whether the last marker line reports a non-zero exit or a signal.
- */
-export function exitMarkerFailure(text: string): boolean {
-  const match = /(?:^|\n)\[exit code: ([0-9]+)\]\s*$/.exec(text);
-  if (match) return Number(match[1]) !== 0;
-  return /(?:^|\n)\[killed by signal: [^\]\n]+\]\s*$/.test(text);
-}
-
-/**
- * Whether one result is a failure the interventions may act on.
- *
- * Three sources, in order of authority: the Host's own `isError` flag, the exit
- * status inside the tool's structured value, and the exit marker the Host appends
- * to the text. A text heuristic over words like "failed" is deliberately absent:
- * a test log that prints the word is not a failing command, and treating it as
- * one would both spend a judgment on it and block a legitimate retry.
- *
- * @param result - the execution-local result.
- * @param text - the effective model-facing text of that result.
- * @returns whether the result proves a failure.
- */
-export function failureOf(result: Readonly<ToolExecutionResult> | undefined, text: string): boolean {
-  if (!result) return false;
-  if (result.isError === true) return true;
-  const status = structuredExitStatus((result as { value?: unknown }).value);
-  if (status) return status.exitCode !== 0 || status.signal !== undefined;
-  return exitMarkerFailure(text);
-}
-
-/**
- * Priority of one closing-evidence candidate when the budget truncates.
- *
- * `diagnostic` lines are the safety floor: a FAILURE_MARKER hit is kept even
- * past the budget. `tail` summaries carry the structured/status facts of every
- * observed result (so `{ok:false}`, a timeout, or a Chinese error reaches System
- * One). `other` is the head fallback, dropped first.
- */
-export type EvidencePriority = 'diagnostic' | 'tail' | 'other';
-
-/** One candidate the closing judgment may read. */
-export interface EvidenceEntry {
-  /** Tool that produced the result. */
-  tool: string;
-  /** Bounded line or summary. */
-  text: string;
-  /** Truncation priority (lower is safer). */
-  priority: EvidencePriority;
-  /** Whether the result behind this entry is a failure suspicion. */
-  suspect: boolean;
-}
-
-/** The primitive structured facts one result exposes, for the tail summary. */
-function structuredFacts(
-  result: Readonly<ToolExecutionResult> | undefined
-): Record<string, string | number | boolean> {
-  const facts: Record<string, string | number | boolean> = {};
-  if (!result) return facts;
-  if (result.isError !== undefined) facts.isError = result.isError === true;
-  const status = structuredExitStatus((result as { value?: unknown }).value);
-  if (status) {
-    facts.exitCode = status.exitCode;
-    if (status.signal !== undefined) facts.signal = status.signal;
-  }
-  let value: unknown = (result as { value?: unknown }).value;
-  if (typeof value === 'string' && /^\s*[{[]/.test(value)) {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      value = undefined;
-    }
-  }
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    const record = value as Record<string, unknown>;
-    for (const key of ['ok', 'status', 'timedOut', 'timeout', 'isError', 'exitCode', 'signal']) {
-      const field = record[key];
-      if (typeof field === 'string' || typeof field === 'number' || typeof field === 'boolean') facts[key] = field;
-    }
-  }
-  return facts;
-}
-
-/** Whether structured facts alone prove (or at least suspect) a failure. */
-function factsSuspectFailure(facts: Readonly<Record<string, string | number | boolean>>): boolean {
-  if (facts.isError === true) return true;
-  if (typeof facts.exitCode === 'number' && facts.exitCode !== 0) return true;
-  if (typeof facts.signal === 'string' && facts.signal.length > 0) return true;
-  if (facts.ok === false || facts.timedOut === true || facts.timeout === true) return true;
-  if (typeof facts.status === 'string' && /fail|error|timeout|timed_?out/i.test(facts.status)) return true;
-  return false;
-}
-
-/**
- * Turn one observed result into closing-evidence candidates.
- *
- * The regex is a prefilter and a floor, never a conclusion: matching lines are
- * kept whatever else happens, and a non-matching result still contributes its
- * tail summary (with the structured facts) to System One. A result is a failure
- * *suspicion* when a structured fact, a marker line, or a broader cue says so;
- * what the result really means is decided by `gate.verify`.
- *
- * @param tool - tool name that produced the result.
- * @param result - the execution-local result.
- * @param text - the effective model-facing text.
- * @returns bounded candidates, diagnostics first.
- */
-export function evidenceOf(
-  tool: string,
-  result: Readonly<ToolExecutionResult> | undefined,
-  text: string
-): EvidenceEntry[] {
-  const entries: EvidenceEntry[] = [];
-  const lines = text.split(/\r?\n/);
-  const diagnostics = lines.filter((line) => FAILURE_MARKER.test(line));
-  for (const line of diagnostics) {
-    const clipped = clip(line.trim(), EVIDENCE_CHARS);
-    if (clipped.length > 0) entries.push({ tool, text: clipped, priority: 'diagnostic', suspect: true });
-  }
-  const facts = structuredFacts(result);
-  const factText = Object.keys(facts).length > 0 ? `{${JSON.stringify(facts)}} ` : '';
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  const tail = clip(`${factText}${collapsed}`, EVIDENCE_TAIL_CHARS);
-  if (tail.length > 0) {
-    entries.push({
-      tool,
-      text: `${tool} tail: ${tail}`,
-      priority: 'tail',
-      suspect:
-        failureOf(result, text)
-        || diagnostics.length > 0
-        || factsSuspectFailure(facts)
-        || FAILURE_CUE.test(text)
-    });
-  }
-  if (diagnostics.length === 0) {
-    const head = clip(collapsed, EVIDENCE_OTHER_CHARS);
-    if (head.length > 0) {
-      entries.push({ tool, text: `${tool}: ${head}`, priority: 'other', suspect: FAILURE_CUE.test(text) });
-    }
-  }
-  return entries;
-}
-
-/**
- * Assemble the turn's evidence candidates into one budgeted string.
- *
- * Priority order is diagnostic → tail → other. A diagnostic line is the safety
- * floor and is never dropped; everything else competes for the budget and the
- * dropped characters are reported so the truncation is auditable.
- *
- * @param entries - candidates, oldest first.
- * @param budget - character budget of the assembled text.
- * @returns assembled text plus the kept/dropped character counts.
- */
-export function assembleEvidence(
-  entries: readonly EvidenceEntry[],
-  budget: number
-): { text: string; retainedChars: number; truncatedChars: number } {
-  const lines: string[] = [];
-  let retained = 0;
-  let truncated = 0;
-  for (const priority of ['diagnostic', 'tail', 'other'] as const) {
-    for (const entry of entries) {
-      if (entry.priority !== priority) continue;
-      const size = entry.text.length + (lines.length > 0 ? 1 : 0);
-      const fits = priority === 'diagnostic' || retained + size <= budget;
-      if (!fits) {
-        truncated += size;
-        continue;
-      }
-      lines.push(entry.text);
-      retained += size;
-    }
-  }
-  return { text: lines.join('\n'), retainedChars: retained, truncatedChars: truncated };
-}
-
-/**
- * The floor decision of one reduction, computed from lengths alone.
- *
- * {@link pruneFloorPlan} returns the *decision*: whether the floor applies and
- * the size that decision was modelled on. {@link applyPruneFloor} returns the
- * same decision next to the size the composed text *really* has, because line
- * alignment and duplicate removal move that size. Callers account for the text
- * a mode really installs, so the composed numbers are the authoritative ones.
- */
-export interface PruneFloorPlan {
-  /** Whether the floor form replaces the judged candidate. */
-  floored: boolean;
-  /**
-   * Whether the installed reduction fell short of the floor's promised share.
-   *
-   * True exactly when the composition could not build a form that both carries
-   * `floorRatio` of the original and stays smaller than it, so the judged
-   * candidate itself was installed. It is what separates "nothing was reduced"
-   * from "the reduction was real, but it did not reach the floor's promise"; a
-   * plan that never needed the floor reports `false`.
-   */
-  floorMissed: boolean;
-  /** Characters the installed text carries: modelled by the plan, real once composed. */
-  resultChars: number;
-  /** Characters the installed form does not carry. */
-  omittedChars: number;
-  /** Context characters taken from the head of the original. */
-  headChars: number;
-  /** Context characters taken from the tail of the original. */
-  tailChars: number;
-  /**
-   * Marker characters the installed form carries, summed over its sides.
-   *
-   * Zero when nothing is floored, one marker when only the mandatory locator side
-   * fits, two when the share's budget can pay for a matching marker after the
-   * candidate. Publishing it is what lets {@link applyPruneFloor} rebuild exactly
-   * the form whose size the plan promised.
-   */
-  markerChars: number;
-  /**
-   * Whether a floor-missed install wanted the locator marker but could not carry it.
-   *
-   * The marker is what tells a reader that the reduction happened and where the
-   * full payload lives, so a candidate that fits only *without* it is still
-   * installed — the reduction is real — but the omission is recorded instead of
-   * being silently dropped. Always `false` when `floorMissed` is false.
-   */
-  markerOmitted: boolean;
-}
-
-/** The floor options shared by the plan and the composition. */
-export interface PruneFloorOptions {
-  /** Lowest share of the original a reduction may keep. */
-  floorRatio: number;
-  /** Default split of the context budget, in characters. */
-  headChars?: number;
-  /** Default split of the context budget, in characters. */
-  tailChars?: number;
-  /**
-   * Length of the marker the installed form carries per side.
-   *
-   * A caller that composes a locator-carrying form passes the real marker
-   * length here; a caller that only accounts for it passes the same number. That
-   * is what keeps the predicted size and the installed size identical in both
-   * modes.
-   */
-  markerChars?: number;
-}
-
-/**
- * Decide the deterministic floor of one reduction from lengths alone.
- *
- * Lengths are enough because the floor form is fixed: context, marker, candidate,
- * marker, context. Deciding it this way is what lets `observe` account for the
- * *same* candidate `active` would install without building it.
- *
- * The floor is a *share*, not a suggestion. `pruneFloorRatio` says how much of
- * the original must survive, so the context budget is derived from it rather than
- * capped by the head/tail hints: a candidate that keeps 8% of a long payload is
- * not "floored" to 8% plus two small slices, it is widened until the installed
- * form really carries the promised share. The head/tail hints only decide how
- * that budget is split. A plan that cannot reach the share — because the marker
- * alone would eat the whole allowance — is refused, so a reduction never grows
- * the context.
- *
- * @param originalChars - length of the raw payload.
- * @param candidateChars - length of the judged candidate.
- * @param options - floor ratio, split hints, and marker length.
- * @returns the floor decision.
- */
-export function pruneFloorPlan(
-  originalChars: number,
-  candidateChars: number,
-  options: PruneFloorOptions
-): PruneFloorPlan {
-  if (candidateChars === 0 || candidateChars >= originalChars) {
-    return idleFloorPlan(originalChars);
-  }
-  const marker = Math.max(0, options.markerChars ?? 0);
-  const head = Math.max(0, options.headChars ?? FLOOR_HEAD_CHARS);
-  const tail = Math.max(0, options.tailChars ?? FLOOR_TAIL_CHARS);
-  const share = Math.min(1, Math.max(0, options.floorRatio));
-  const target = Math.ceil(originalChars * share);
-  // The judged candidate is already the installed text when the floor does not
-  // apply, and it carries no marker; only a deeper cut pays for the marker.
-  if (candidateChars >= target) {
-    return {
-      floored: false,
-      floorMissed: false,
-      resultChars: candidateChars,
-      omittedChars: originalChars - candidateChars,
-      headChars: 0,
-      tailChars: 0,
-      markerChars: 0,
-      markerOmitted: false
-    };
-  }
-  // One marker side is mandatory: it carries the locator of the original. The
-  // second is bought only when the share's budget leaves room for it. A candidate
-  // that cannot even pay for the mandatory marker is still a real reduction, so
-  // it is installed *without* the marker and the omission is recorded: dropping
-  // it would trade a smaller answer for the whole payload over a missing line.
-  if (candidateChars + marker >= originalChars) {
-    return {
-      floored: false,
-      floorMissed: true,
-      resultChars: candidateChars,
-      omittedChars: originalChars - candidateChars,
-      headChars: 0,
-      tailChars: 0,
-      markerChars: 0,
-      markerOmitted: true
-    };
-  }
-  let budget = Math.max(candidateChars + marker, Math.min(originalChars, target));
-  let markerChars = marker;
-  let context = budget - candidateChars - markerChars;
-  if (context >= marker) {
-    markerChars += marker;
-    context -= marker;
-  }
-  const split = splitContext(context, head, tail);
-  const resultChars = candidateChars + markerChars + context;
-  if (resultChars >= originalChars) return idleFloorPlan(originalChars);
-  return {
-    floored: true,
-    floorMissed: false,
-    resultChars,
-    omittedChars: originalChars - resultChars,
-    headChars: split.head,
-    tailChars: split.tail,
-    markerChars,
-    markerOmitted: false
-  };
-}
-
-/**
- * Split one context budget between the head and the tail.
- *
- * The hints describe the *shape* of the context, not its ceiling, so a large
- * budget keeps their proportion instead of stopping at their sum. A zero-shaped
- * split degrades to an even one rather than dropping the context.
- * @param context - characters available for context.
- * @param head - head hint.
- * @param tail - tail hint.
- * @returns the two slice lengths, summing to the context.
- */
-function splitContext(context: number, head: number, tail: number): { head: number; tail: number } {
-  const total = head + tail;
-  const headChars = total <= 0 ? Math.ceil(context / 2) : Math.ceil((context * head) / total);
-  return { head: Math.min(context, headChars), tail: context - Math.min(context, headChars) };
-}
-
-/** The plan of a reduction that is not happening. */
-function idleFloorPlan(originalChars: number): PruneFloorPlan {
-  return {
-    floored: false,
-    floorMissed: false,
-    resultChars: originalChars,
-    omittedChars: 0,
-    headChars: 0,
-    tailChars: 0,
-    markerChars: 0,
-    markerOmitted: false
-  };
-}
-
-/** The marker one floored reduction carries on each side of its candidate. */
-export function pruneMarker(locator: string): string {
-  return `\n… [reflex prune: full original retrievable as ${locator}] …\n`;
-}
-
-/**
- * The marker a floor-missed install appends after its candidate.
- *
- * The floored form opens with the marker because the head has just ended with a
- * newline. A candidate that already ends with one needs no blank line before the
- * marker, so only the leading newline is dropped in that case; the trailing
- * newline is the same one the floored form carries.
- * @param candidate - the judged candidate about to be installed.
- * @param marker - the locator marker.
- * @returns the suffix to append.
- */
-function pruneMarkerSuffix(candidate: string, marker: string): string {
-  return candidate.endsWith('\n') ? marker.slice(1) : marker;
-}
-
-/** Split one payload into whole lines, the terminator kept with its line. */
-function floorLines(text: string): string[] {
-  return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-}
-
-/** The identity of one line for the duplicate test: its text without its terminator. */
-function floorLineIdentity(line: string): string {
-  return line.replace(/\r?\n$/, '').replace(/\r$/, '');
-}
-
-/**
- * How many whole lines of the head a budget can pay for.
- *
- * The head never crosses its budget and never stops inside a line: a cut that
- * cannot pay for the next line stops before it, so the kept prefix is always a
- * run of complete lines.
- * @param lines - the payload, split into whole lines.
- * @param budget - characters the head may spend.
- * @returns the number of lines to keep from the top.
- */
-function alignedHeadLines(lines: readonly string[], budget: number): number {
-  let used = 0;
-  let count = 0;
-  for (const line of lines) {
-    if (used + line.length > budget) break;
-    used += line.length;
-    count += 1;
-  }
-  return count;
-}
-
-/**
- * How many whole lines of the tail a budget needs.
- *
- * The tail is the *shortest* run of complete lines from the end that still
- * carries the budget. A payload whose lines are longer than the budget cannot
- * honour it with a line-aligned suffix; the caller refuses instead of cutting
- * one, because half a line is not a shorter answer but a broken one.
- * @param lines - the payload, split into whole lines.
- * @param budget - characters the tail must carry.
- * @returns the number of lines to keep from the bottom.
- */
-function alignedTailLines(lines: readonly string[], budget: number): number {
-  if (budget <= 0) return 0;
-  let used = 0;
-  let count = 0;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    used += lines[index]!.length;
-    count += 1;
-    if (used >= budget) break;
-  }
-  return count;
-}
-
-/**
- * Drop the candidate lines the kept context already shows verbatim.
- *
- * The judgment reads the whole payload, so its extract repeats the lines a
- * reader can already see around it — `BEGIN`, `RESULT`, `END` in the trace that
- * prompted this. Repeating them is pure cost: the same line twice in one
- * message. Removal is per line and verbatim, so a diagnostic the context does
- * *not* carry always survives.
- * @param candidate - the judged extract.
- * @param head - the kept head.
- * @param tail - the kept tail.
- * @returns the candidate without the lines the context already shows.
- */
-function dedupeCandidateLines(candidate: string, head: string, tail: string): string {
-  const seen = new Set([...floorLines(head), ...floorLines(tail)].map(floorLineIdentity));
-  const lines = floorLines(candidate);
-  if (seen.size === 0 || lines.length === 0) return candidate;
-  return lines.filter((line) => !seen.has(floorLineIdentity(line))).join('');
-}
-
-/** One composed floor form and the sizes it really kept. */
-interface ComposedFloor {
-  text: string;
-  headChars: number;
-  tailChars: number;
-  markerChars: number;
-}
-
-/**
- * Compose one floored form out of whole lines of the original.
- * @param lines - the original, split into whole lines.
- * @param headCount - lines kept from the top.
- * @param tailCount - lines kept from the bottom.
- * @param candidate - the judged extract.
- * @param marker - the locator marker.
- * @param secondMarker - the closing marker, or `''` when the share cannot pay for it.
- * @returns the installed text and the sizes it really carries.
- */
-function composeFloorLines(
-  lines: readonly string[],
-  headCount: number,
-  tailCount: number,
-  candidate: string,
-  marker: string,
-  secondMarker: string
-): ComposedFloor {
-  const head = lines.slice(0, headCount).join('');
-  const tail = tailCount === 0 ? '' : lines.slice(lines.length - tailCount).join('');
-  const middle = dedupeCandidateLines(candidate, head, tail);
-  // The marker opens with a newline so it sits on its own line after the head.
-  // With no head there is nothing to separate it from, and a leading blank line
-  // would be the first thing a reader sees.
-  const lead = head.length === 0 ? marker.replace(/^\n/, '') : marker;
-  const closing = middle.length === 0 ? '' : secondMarker;
-  return {
-    text: `${head}${lead}${middle}${closing}${tail}`,
-    headChars: head.length,
-    tailChars: tail.length,
-    markerChars: lead.length + closing.length
-  };
-}
-
-/**
- * The plan of a floor the composition refused.
- *
- * A refusal is *not* a reason to throw the candidate away. The candidate is the
- * reduction the judgment already produced, and a floor that cannot widen it
- * without either breaking the share or growing past the original has simply
- * missed the floor, not invalidated the reduction: installing the candidate is
- * strictly better than carrying the whole payload. So the candidate is installed
- * with `floored: false` (no head/tail form was built) and `floorMissed: true`
- * (the promised share is not carried), and the sizes are booked against the text
- * that is really installed.
- *
- * The locator marker is appended when the candidate can still pay for it, so the
- * reader sees that a prune happened and where the full payload lives. When the
- * marker would push the install to the original's size or past it, the reduction
- * wins and the marker is omitted — recorded as `markerOmitted: true`, never
- * silently dropped.
- *
- * Only a candidate that is not actually smaller leaves the original untouched —
- * that is a real "no reduction", and the caller's own degradation path owns it.
- *
- * @param original - the raw payload.
- * @param candidate - the judged reduction the composition could not widen.
- * @param marker - the locator marker a floor-missed install wants to carry.
- * @returns the text to install and the floor decision that says why.
- */
-function refusedFloor(original: string, candidate: string, marker: string): PruneFloorPlan & { text: string } {
-  if (candidate.length >= original.length) {
-    return { ...idleFloorPlan(original.length), text: original };
-  }
-  const suffix = pruneMarkerSuffix(candidate, marker);
-  if (candidate.length + suffix.length < original.length) {
-    return {
-      floored: false,
-      floorMissed: true,
-      resultChars: candidate.length + suffix.length,
-      omittedChars: original.length - candidate.length - suffix.length,
-      headChars: 0,
-      tailChars: 0,
-      markerChars: suffix.length,
-      markerOmitted: false,
-      text: `${candidate}${suffix}`
-    };
-  }
-  return {
-    floored: false,
-    floorMissed: true,
-    resultChars: candidate.length,
-    omittedChars: original.length - candidate.length,
-    headChars: 0,
-    tailChars: 0,
-    markerChars: 0,
-    markerOmitted: true,
-    text: candidate
-  };
-}
-
-/**
- * Enforce the deterministic floor of a judged reduction.
- *
- * The judgment proposes; this floor disposes. A candidate that cut deeper than
- * {@link ResolvedInterventionsConfig.pruneFloorRatio} of the original is replaced
- * by a form that keeps the head and the tail — the two places a compiler error, a
- * stack-trace summary, and a final result usually are — around the judgment's own
- * extract, with explicit markers that name where the full original was retained.
- * A candidate that is not actually smaller is refused outright, so a "reduction"
- * can never grow the context.
- *
- * The context is composed out of *whole lines* of the original, never out of
- * character slices: a cut that lands mid-line leaves the reader a fragment like
- * `=] progress 092`, which is not a shorter answer but a broken one. The head is
- * the longest run of complete lines its budget can pay for, the tail the shortest
- * run of complete lines that still carries its own, and any candidate line the
- * kept context already shows verbatim is dropped as a duplicate. Alignment and
- * removal move the real size, so the decision's modelled size is replaced here by
- * the size the text really has: a form that would fall short of the promised
- * share, or that would not be smaller than the original at all, is refused. A
- * refusal installs the judgment's own candidate with `floorMissed: true` rather
- * than the original — the candidate is a real reduction, and dropping it would
- * trade a smaller answer for the whole payload just because the floor form could
- * not be built.
- *
- * @param original - the raw payload.
- * @param candidate - the judged reduction.
- * @param options - floor options plus the locator the replacement publishes.
- * @returns the text to install, the floor decision, and the sizes involved.
- */
-export function applyPruneFloor(
-  original: string,
-  candidate: string,
-  options: PruneFloorOptions & { locator: string }
-): PruneFloorPlan & { text: string } {
-  const marker = pruneMarker(options.locator);
-  const plan = pruneFloorPlan(original.length, candidate.length, { ...options, markerChars: marker.length });
-  if (!plan.floored) {
-    return { ...plan, text: plan.resultChars === candidate.length ? candidate : original };
-  }
-  const lines = floorLines(original);
-  const share = Math.min(1, Math.max(0, options.floorRatio));
-  const target = Math.ceil(original.length * share);
-  const secondMarker = plan.markerChars > marker.length ? marker : '';
-  let headCount = alignedHeadLines(lines, plan.headChars);
-  if (headCount === 0 && plan.headChars > 0 && lines.length > 0) {
-    // A first line longer than the head budget: taking it whole keeps a real line
-    // where a cut could only produce a fragment. Whether the enlarged form is
-    // installable at all is decided by the size checks below.
-    headCount = 1;
-  }
-  let tailCount = alignedTailLines(lines, plan.tailChars);
-  if (headCount + tailCount > lines.length) return refusedFloor(original, candidate, marker);
-  let composed = composeFloorLines(lines, headCount, tailCount, candidate, marker, secondMarker);
-  // The share is a promise, and rounding to a boundary or dropping duplicates can
-  // fall short of it: widen by whole lines until the form really carries the
-  // share. A payload with no room left is refused by the checks below, never
-  // installed short.
-  while (composed.text.length < target) {
-    // Grow the smaller side first, so the two keep their configured proportion.
-    const order = composed.headChars <= composed.tailChars ? [0, 1] : [1, 0];
-    let grew = false;
-    for (const side of order) {
-      const nextHead = side === 0 ? headCount + 1 : headCount;
-      const nextTail = side === 1 ? tailCount + 1 : tailCount;
-      if (nextHead + nextTail > lines.length) continue;
-      const next = composeFloorLines(lines, nextHead, nextTail, candidate, marker, secondMarker);
-      if (next.text.length <= composed.text.length) continue;
-      headCount = nextHead;
-      tailCount = nextTail;
-      composed = next;
-      grew = true;
-      break;
-    }
-    if (!grew) break;
-  }
-  if (composed.text.length >= original.length || composed.text.length < target) {
-    return refusedFloor(original, candidate, marker);
-  }
-  return {
-    ...plan,
-    resultChars: composed.text.length,
-    omittedChars: original.length - composed.text.length,
-    headChars: composed.headChars,
-    tailChars: composed.tailChars,
-    markerChars: composed.markerChars,
-    text: composed.text
-  };
-}
-
-/**
- * Count the identical trailing repeats of one signature.
- * @param steps - observed steps, oldest first.
- * @param signature - the identity to count.
- * @returns the length of the trailing run of that signature.
- */
-export function countTrailingRepeats(steps: readonly ObservedStep[], signature: string): number {
-  let count = 0;
-  for (let index = steps.length - 1; index >= 0; index -= 1) {
-    if (steps[index]!.signature !== signature) break;
-    count += 1;
-  }
-  return count;
-}
-
-/**
- * Count the trailing consecutive failures.
- * @param steps - observed steps, oldest first.
- * @returns the length of the trailing run of failing steps.
- */
-export function countTrailingFailures(steps: readonly ObservedStep[]): number {
-  let count = 0;
-  for (let index = steps.length - 1; index >= 0; index -= 1) {
-    if (!steps[index]!.failed) break;
-    count += 1;
-  }
-  return count;
-}
-
-/**
- * Whether the window's tail alternates between exactly two call identities.
- *
- * `A B A B` is the cheapest loop to miss and among the most wasteful to run:
- * neither call repeats consecutively, so a consecutive-repeat trigger never
- * fires.
- * @param steps - observed steps, oldest first.
- * @param window - how many trailing steps to inspect.
- * @returns whether the tail oscillates.
- */
-export function detectOscillation(steps: readonly ObservedStep[], window: number): boolean {
-  const tail = steps.slice(Math.max(0, steps.length - window));
-  if (tail.length < 4) return false;
-  const signatures = new Set(tail.map((step) => step.signature));
-  if (signatures.size !== 2) return false;
-  for (let index = 2; index < tail.length; index += 1) {
-    if (tail[index]!.signature !== tail[index - 2]!.signature) return false;
-  }
-  return true;
-}
-
-/** Why a deterministic pre-trigger wants a judgment. */
-export interface StagnationSuspicion {
-  suspicious: boolean;
-  /** The pattern the trigger suspects, before System 1 confirms it. */
-  pattern?: 'repetition' | 'oscillation' | 'failing_retry';
-  /** Human-readable trigger facts, for the audit record. */
-  note: string;
-  /** How many steps the pattern was measured on. */
-  repeats: number;
-}
-
-/**
- * Decide, locally and deterministically, whether a judgment is worth spending.
- *
- * This is the cost gate of the whole module: the expensive path is a System 1
- * call, and it only opens when the *cheap* path already sees a pattern. A single
- * distinctive call is never judged, however large its output.
- *
- * @param steps - observed steps, oldest first.
- * @param options - thresholds, window, and the current call identity.
- * @returns the suspicion, with `suspicious: false` when nothing justifies a call.
- */
-export function suspicionOf(
-  steps: readonly ObservedStep[],
-  options: { repeatThreshold: number; failureThreshold: number; window: number; signature: string }
-): StagnationSuspicion {
-  const window = steps.slice(Math.max(0, steps.length - options.window));
-  const repeats = countTrailingRepeats(window, options.signature);
-  if (repeats >= options.repeatThreshold) {
-    return { suspicious: true, pattern: 'repetition', note: `identical call repeated ${repeats}x`, repeats };
-  }
-  const failures = countTrailingFailures(window);
-  if (failures >= options.failureThreshold) {
-    return { suspicious: true, pattern: 'failing_retry', note: `${failures} consecutive failing steps`, repeats: failures };
-  }
-  if (detectOscillation(window, options.window)) {
-    return { suspicious: true, pattern: 'oscillation', note: `two calls alternating over ${window.length} steps`, repeats: window.length };
-  }
-  return { suspicious: false, note: 'no local pattern', repeats: 0 };
-}
-
-/** One memoized reduction, keyed by the payload's digest within one session. */
 interface PruneMemo {
   /** The real reduction, absent until the mode that installs one has computed it. */
   text?: string;
@@ -1561,32 +679,6 @@ export interface PruneRetention {
   /** Committed log position, when the sink can report one. */
   seq?: number;
 }
-
-/** What one judgment cost, charged exactly once per judgment. */
-interface JudgmentCharge {
-  judgments: number;
-  memoHits: number;
-  localLatencyMs: number;
-  remoteLatencyMs: number;
-  judgeTokens: number;
-}
-
-/** One charge against a mode's and a capability's account. */
-interface Charge {
-  judgments?: number;
-  memoHits?: number;
-  localLatencyMs?: number;
-  remoteLatencyMs?: number;
-  judgeTokens?: number;
-  originalTokens?: number;
-  candidateTokens?: number;
-  potentialSavedTokens?: number;
-  actualSavedTokens?: number;
-  injectedTokens?: number;
-}
-
-/** The verdict that stands in when no judgment could be spent. */
-const EMPTY_VERDICT: StagnationCheckResponse = { isStuck: false, confidence: 0, latencyMs: 0 };
 
 /**
  * The automatic-intervention engine of one plugin activation.
@@ -1693,7 +785,7 @@ export class InterventionEngine {
    * @returns its resolved three-state mode.
    */
   modeOf(capability: InterventionCapability): InterventionMode {
-    return this.config.capabilities[capability];
+    return modeOf(this.#config, capability);
   }
 
   /**
@@ -1702,8 +794,7 @@ export class InterventionEngine {
    * @returns whether at least one of them is not `off`.
    */
   serves(...capabilities: InterventionCapability[]): boolean {
-    if (!this.config.enabled) return false;
-    return capabilities.some((capability) => this.modeOf(capability) !== 'off');
+    return policyServes(this.#config, ...capabilities);
   }
 
   /** The whole activation's accounting. */
@@ -1857,7 +948,7 @@ export class InterventionEngine {
         this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: exec.agent });
         return downstream;
       }
-      if (!this.#actionWithinBudget(state)) {
+      if (!actionWithinBudget(state, this.#config)) {
         this.#skip('intervention-cap', { capability: 'stagnation', state, agent: exec.agent });
         return downstream;
       }
@@ -1872,7 +963,7 @@ export class InterventionEngine {
         judgeSteps,
         waitSuspected ? waitGoalOf(exec, waitShape ?? 'poll-shape', priorSame + 1) : undefined
       );
-      const judgment = this.#judgmentCharge(verdict, started, this.#now());
+      const judgment = judgmentCharge(verdict, started, this.#now());
       // Denial is latched per signature whether or not it was applied: in observe
       // mode the refusal is what would have happened, and `denied` is what keeps
       // the *next* identical attempt from being judged again in the same turn.
@@ -1913,7 +1004,7 @@ export class InterventionEngine {
       // otherwise its column would over-count the very thing it is measuring.
       state.refused.add(callKeyOf(exec));
       state.applied.add(`stagnation:${signature}`);
-      this.#bookAction(state);
+      bookAction(state);
       this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
       return applied ? { kind: 'deny', reason: plan.feedback } : downstream;
     } catch {
@@ -2054,7 +1145,7 @@ export class InterventionEngine {
         this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: payload.agent });
         return downstream;
       }
-      if (!this.#actionWithinBudget(state)) {
+      if (!actionWithinBudget(state, this.#config)) {
         this.#skip('intervention-cap', { capability: 'stagnation', state, agent: payload.agent });
         return downstream;
       }
@@ -2070,7 +1161,7 @@ export class InterventionEngine {
       if (!suspicion.suspicious) return downstream;
 
       const verdict = await this.#judge(state, payload.signal, window);
-      const judgment = this.#judgmentCharge(verdict, started, this.#now());
+      const judgment = judgmentCharge(verdict, started, this.#now());
       if (!verdict.useful) {
         this.#charge('stagnation', judgment);
         this.#skip(verdict.skip ?? 'unconfirmed', {
@@ -2101,7 +1192,7 @@ export class InterventionEngine {
       // cap — or its accounting would describe a run nobody could reproduce;
       // installing the message is the only thing the mode gates.
       state.applied.add(`stagnation:${signature}`);
-      this.#bookAction(state);
+      bookAction(state);
       this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
       if (!applied) return downstream;
       return {
@@ -2145,7 +1236,7 @@ export class InterventionEngine {
         this.#skip('duplicate-intervention', { capability: 'closing', state, agent: payload.agent });
         return;
       }
-      if (!this.#actionWithinBudget(state)) {
+      if (!actionWithinBudget(state, this.#config)) {
         this.#skip('intervention-cap', { capability: 'closing', state, agent: payload.agent });
         return;
       }
@@ -2163,7 +1254,7 @@ export class InterventionEngine {
       // The closing classification is a judgment like any other: one request
       // with at most MAX_CLAIMS scored questions, bought from the same turn and
       // session budget as a stagnation check.
-      const classifySkip = this.#spendJudgment(state);
+      const classifySkip = spendJudgment(state, this.#config);
       if (classifySkip) {
         this.#skip(classifySkip, { capability: 'closing', state, agent: payload.agent });
         return;
@@ -2250,7 +1341,7 @@ export class InterventionEngine {
       // Latched in both modes, for the same reason as the stagnation path: the
       // episode is consumed once, and only the steering is gated on the mode.
       state.applied.add(`closing:turn:${payload.turn}`);
-      this.#bookAction(state);
+      bookAction(state);
       this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
       if (applied) this.#steer(payload.agent, this.#message(agentId, payload.turn, state.step, plan.feedback));
     } catch {
@@ -2355,7 +1446,7 @@ export class InterventionEngine {
       this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
       return downstream;
     }
-    if (!this.#actionWithinBudget(state)) {
+    if (!actionWithinBudget(state, this.#config)) {
       // A reduction is an intervention like a refusal or a correction, so it draws
       // on the same per-turn allowance — and it is asked here, before a judgment is
       // bought, so a full turn costs nothing to refuse. Both modes are checked:
@@ -2379,7 +1470,7 @@ export class InterventionEngine {
     // that needs the reduction's *text* has to ask for it again.
     const needsCandidate = capability === 'active' && (memo?.text === undefined);
     if (!memo || needsCandidate) {
-      const skip = this.#spendJudgment(state);
+      const skip = spendJudgment(state, this.#config);
       if (skip) {
         this.#skip(skip, { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
         return downstream;
@@ -2510,7 +1601,7 @@ export class InterventionEngine {
       // same candidate — so a later hit reports the reduction this mode really saw.
       // A plan this mode records is the action active would have taken, so it books
       // the slot active would have booked.
-      this.#bookAction(state);
+      bookAction(state);
       this.#conclude(plan, false, exec.agent, planCosts, judgment);
       if (!memo) {
         this.#memoSet(state, digest, {
@@ -2627,7 +1718,7 @@ export class InterventionEngine {
     // Booked only here: a candidate that was not smaller, a replacement that could
     // not be composed, and a retention that failed all returned above, so none of
     // them consumed the turn's allowance for an action that never happened.
-    this.#bookAction(state);
+    bookAction(state);
     this.#conclude(
       plan,
       true,
@@ -2692,13 +1783,13 @@ export class InterventionEngine {
       }
       return downstream;
     }
-    if (!this.#actionWithinBudget(state)) {
+    if (!actionWithinBudget(state, this.#config)) {
       this.#skip('intervention-cap', { capability: 'gate', state, agent: exec.agent });
       return downstream;
     }
     const agentId = agentKeyOf(exec.agent);
     const verdict = await this.#judge(state, exec.signal);
-    const judgment = this.#judgmentCharge(verdict, started, this.#now());
+    const judgment = judgmentCharge(verdict, started, this.#now());
     if (!verdict.useful) {
       this.#charge('gate', judgment);
       this.#skip(verdict.skip ?? 'unconfirmed', {
@@ -2725,7 +1816,7 @@ export class InterventionEngine {
     };
     const applied = capability === 'active';
     state.applied.add(`gate:${signature}`);
-    this.#bookAction(state);
+    bookAction(state);
     this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
     if (!applied) return downstream;
     return {
@@ -2740,186 +1831,33 @@ export class InterventionEngine {
   // ── judgment, budgets, and memo ─────────────────────────────────────────────
 
   /**
-   * Whether this turn still has room for one more planned action.
+   * Ask the decision core for this turn's stagnation judgment, reusing the
+   * turn's cached verdict when the window is the same one.
    *
-   * This is the *action* ceiling, and it is deliberately not the judgment budget:
-   * a judgment is the question System 1 was asked, this is the number of things
-   * the run is allowed to do about the answer. Every capability draws on the same
-   * allowance, and both modes draw on it the same way — the plan observe measures
-   * is the action active would install, so an observe run that planned more than
-   * the ceiling would be measuring a turn that cannot exist.
-   *
-   * Asked before a judgment is bought, so a turn that is already full is refused
-   * for free.
+   * The budget checks, the memo key, the history projection, the backend call,
+   * and the latency charge all live in `core/judge`; this method only supplies
+   * the composition's backend and clock.
    * @param state - the deciding agent's state.
-   * @returns whether one more planned action fits this turn.
-   */
-  #actionWithinBudget(state: AgentState): boolean {
-    return state.interventions < this.config.maxInterventionsPerTurn;
-  }
-
-  /**
-   * Book one planned action against the turn's shared allowance.
-   *
-   * Called at the one point where a plan becomes real: observe books the plan it
-   * records, active books the replacement its retention made installable. Never
-   * called earlier — a plan abandoned by a failed judgment, a failed retention, or
-   * a candidate that turned out not to be smaller must not consume the turn's
-   * allowance, or a turn would be spent on actions that never happened.
-   * @param state - the deciding agent's state.
-   */
-  #bookAction(state: AgentState): void {
-    state.interventions += 1;
-  }
-
-  /**
-   * Spend at most one System 1 stagnation judgment per agent and turn.
-   *
-   * Every hook of one turn shares the verdict — the pre-execute refusal, the
-   * pre-step correction, and the failure correction all ask the same question
-   * about the same window, so asking it three times would be three times the cost
-   * for one answer.
+   * @param signal - the call's abort signal.
+   * @param steps - the window to judge (defaults to the agent's history).
+   * @param goal - the wait/context question, when one is asked.
+   * @returns the judgment outcome.
    */
   async #judge(
     state: AgentState,
     signal?: AbortSignal,
     steps: readonly ObservedStep[] = state.steps,
     goal?: string
-  ): Promise<{
-    useful: boolean;
-    paid: boolean;
-    reused: boolean;
-    judgeTokens: number;
-    localLatencyMs: number;
-    remoteLatencyMs: number;
-    skip?: string;
-    response: StagnationCheckResponse;
-  }> {
-    // The question is the trailing window plus the context it is asked in, so
-    // the answer is cached against both: the same episode is never judged twice,
-    // while a *different* episode or a different wait context in the same turn is
-    // a new question — and therefore subject to the turn's budget.
-    const key = `${goal ?? ''}\u0000${steps
-      .slice(-Math.max(1, this.config.repeatThreshold))
-      .map((step) => step.signature)
-      .join('|')}`;
-    const cached = state.verdictTurn === state.turn && state.verdictKey === key ? state.verdict : undefined;
-    if (cached) {
-      return {
-        useful: this.#useful(cached),
-        paid: false,
-        reused: true,
-        judgeTokens: 0,
-        localLatencyMs: 0,
-        remoteLatencyMs: 0,
-        response: cached
-      };
-    }
-    if (state.judgmentsCount >= this.config.maxJudgmentsPerTurn) {
-      return this.#noJudgment('judgment-turn-cap');
-    }
-    if (state.judgmentsSession >= this.config.maxJudgmentsPerSession) {
-      return this.#noJudgment('judgment-session-cap');
-    }
-    if (signal?.aborted) return this.#noJudgment('aborted');
-    this.#spendJudgment(state);
-
-    const history: ActionStep[] = steps.map((step) => ({
-      tool: step.tool,
-      input: step.input,
-      ...(step.output ? { output: step.output } : {}),
-      ...(step.error ? { error: step.error } : {}),
-      timestamp: step.at
-    }));
-    const judgeTokens = history.reduce(
-      (sum, step) => sum + estimateTokens(`${step.tool}${step.input}${step.output ?? ''}${step.error ?? ''}`),
-      0
-    );
-    const started = this.#now();
-    const response = await this.#stagnation.check(goal, history);
-    const remoteLatencyMs = Number.isFinite(response.latencyMs) ? response.latencyMs : 0;
-    state.verdict = response;
-    state.verdictTurn = state.turn;
-    state.verdictKey = key;
-    return {
-      useful: this.#useful(response),
-      paid: true,
-      reused: false,
-      judgeTokens,
-      localLatencyMs: Math.max(0, this.#now() - started - remoteLatencyMs),
-      remoteLatencyMs,
-      response
-    };
-  }
-
-  /**
-   * Charge one judgment against the turn's and the session's budget.
-   *
-   * Both budgets are spent at the one place a judgment is actually made, so a
-   * capability cannot buy its way around them by calling a service directly. The
-   * caller decides whether a refusal means "plan nothing" or "do not act"; what
-   * matters here is that the count is never overrun and that a shadowed
-   * application is charged like a real one — an observe run has to cost what the
-   * active run would cost, or its column would flatter it.
-   * @param state - the deciding agent's state.
-   * @returns `undefined` when the judgment was spent, else the skip reason.
-   */
-  #spendJudgment(state: AgentState): string | undefined {
-    if (state.judgmentsCount >= this.config.maxJudgmentsPerTurn) return 'judgment-turn-cap';
-    if (state.judgmentsSession >= this.config.maxJudgmentsPerSession) return 'judgment-session-cap';
-    state.judgmentsCount += 1;
-    state.judgmentsSession += 1;
-    return undefined;
-  }
-
-  /** The zero-cost verdict of a judgment that could not be spent. */
-  #noJudgment(skip: string): {    useful: boolean;
-    paid: boolean;
-    reused: boolean;
-    judgeTokens: number;
-    localLatencyMs: number;
-    remoteLatencyMs: number;
-    skip?: string;
-    response: StagnationCheckResponse;
-  } {
-    // Not a memo hit: nothing was reused, the budget simply refused to spend.
-    return {
-      useful: false,
-      paid: false,
-      reused: false,
-      judgeTokens: 0,
-      localLatencyMs: 0,
-      remoteLatencyMs: 0,
-      skip,
-      response: EMPTY_VERDICT
-    };
-  }
-
-  /** The charge of one judgment, so every judgment is billed exactly once. */
-  #judgmentCharge(
-    verdict: { paid: boolean; reused: boolean; judgeTokens: number; localLatencyMs: number; remoteLatencyMs: number },
-    started: number,
-    finished: number
-  ): JudgmentCharge {
-    if (!verdict.paid) {
-      return { judgments: 0, memoHits: verdict.reused ? 1 : 0, localLatencyMs: 0, remoteLatencyMs: 0, judgeTokens: 0 };
-    }
-    return {
-      judgments: 1,
-      memoHits: 0,
-      localLatencyMs: Math.max(verdict.localLatencyMs, Math.max(0, finished - started - verdict.remoteLatencyMs)),
-      remoteLatencyMs: verdict.remoteLatencyMs,
-      judgeTokens: verdict.judgeTokens
-    };
-  }
-
-  /** Whether a verdict justifies acting: stuck, confident, and about a pattern. */
-  #useful(response: StagnationCheckResponse): boolean {
-    return (
-      response.isStuck === true &&
-      response.confidence >= this.config.minConfidence &&
-      (response.patternType ?? 'none') !== 'none'
-    );
+  ): Promise<JudgmentOutcome> {
+    return runJudgment({
+      state,
+      policy: this.#config,
+      backend: this.#stagnation,
+      clock: { now: () => this.#now() },
+      steps,
+      goal,
+      signal
+    });
   }
 
   // ── accounting and audit ───────────────────────────────────────────────────
@@ -2970,7 +1908,7 @@ export class InterventionEngine {
       applied && plan.action === 'prune-result'
         ? planCosts.actualSavedTokens ?? potentialSavedTokens
         : 0;
-    const charge: Charge = {
+    const charge: CostCharge = {
       ...(judgment ?? { judgments: 0, memoHits: 0, localLatencyMs: 0, remoteLatencyMs: 0, judgeTokens: 0 }),
       originalTokens,
       candidateTokens,
@@ -3037,21 +1975,10 @@ export class InterventionEngine {
    * Every counter has exactly one writer, so a reader can add the parts up
    * without meeting a number twice.
    */
-  #charge(capability: InterventionCapability, charge: Charge, plans = 0, applied = 0): void {
+  #charge(capability: InterventionCapability, charge: CostCharge, plans = 0, applied = 0): void {
     const mode = this.modeOf(capability) === 'active' ? 'active' : 'observe';
     for (const bucket of [this.#costs[mode], this.#byCapability[capability]]) {
-      bucket.plans += plans;
-      bucket.applied += applied;
-      bucket.judgments += charge.judgments ?? 0;
-      bucket.memoHits += charge.memoHits ?? 0;
-      bucket.localLatencyMs += charge.localLatencyMs ?? 0;
-      bucket.remoteLatencyMs += charge.remoteLatencyMs ?? 0;
-      bucket.judgeTokens += charge.judgeTokens ?? 0;
-      bucket.originalTokens += charge.originalTokens ?? 0;
-      bucket.candidateTokens += charge.candidateTokens ?? 0;
-      bucket.potentialSavedTokens += charge.potentialSavedTokens ?? 0;
-      bucket.actualSavedTokens += charge.actualSavedTokens ?? 0;
-      bucket.injectedTokens += charge.injectedTokens ?? 0;
+      applyCharge(bucket, plans, applied, charge);
     }
   }
 
@@ -3647,31 +2574,6 @@ function reductionPercentage(originalChars: number, prunedChars: number): number
   return originalChars === 0 ? 0 : Math.round(((originalChars - prunedChars) / originalChars) * 1000) / 10;
 }
 
-/**
- * The *candidate* sentences of one turn's assistant text.
- *
- * Deterministic and semantic-free on purpose: splitting, de-duplication, the
- * length floor, and the last-{@link MAX_CLAIMS} bound are all the local work
- * this module may do. Whether a candidate really claims completion is System
- * One's answer — an English word list would miss 中文「全部通过」 and read
- * `not complete` as the opposite, so there is none here any more.
- *
- * @param text - the turn's assistant text.
- * @returns bounded, deduplicated candidates in their original order.
- */
-export function claimCandidates(text: string): string[] {
-  const candidates: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of text.split(/(?<=[.!?。！？\n])/)) {
-    const sentence = raw.replace(/\s+/g, ' ').trim();
-    if (sentence.length < MIN_CLAIM_CHARS) continue;
-    const statement = clip(sentence, 200);
-    if (seen.has(statement)) continue;
-    seen.add(statement);
-    candidates.push(statement);
-  }
-  return candidates.length > MAX_CLAIMS ? candidates.slice(candidates.length - MAX_CLAIMS) : candidates;
-}
 
 // Re-exported so a Host attaching the session log does not have to import the
 // audit module directly.
