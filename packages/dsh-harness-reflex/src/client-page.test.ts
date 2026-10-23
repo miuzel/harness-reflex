@@ -56,6 +56,14 @@ function elements(tree: unknown): Element[] {
   return out;
 }
 
+/** Every input value, placeholder, select value, and text node, for field-level checks. */
+function valuesOf(tree: unknown): string {
+  return [
+    textOf(tree),
+    ...elements(tree).flatMap((element) => [String(element.props.value ?? ''), String(element.props.placeholder ?? '')])
+  ].join(' ');
+}
+
 /** All text in a tree, in document order. */
 function textOf(tree: unknown): string {
   const parts: string[] = [];
@@ -473,14 +481,24 @@ function makeTransport(panelFacts: PanelRuntimeFacts, observed: Observed): (inpu
 }
 
 /** The settings form the page edits. */
-function settingsForm(value: unknown, options: { writable?: boolean; revision?: number } = {}): {
+function settingsForm(
+  value: unknown,
+  options: { writable?: boolean; revision?: number; base?: unknown; user?: unknown } = {}
+): {
   form: Record<string, unknown>;
   mutations: { ops: unknown; revision: unknown }[];
   /** Replace the document and notify, the way the Host does after a write. */
   push(next: unknown): void;
 } {
   const mutations: { ops: unknown; revision: unknown }[] = [];
-  let snapshot = { status: 'ready', value, base: 0, user: 0, revision: options.revision ?? 3, writable: options.writable ?? true };
+  let snapshot = {
+    status: 'ready',
+    value,
+    base: options.base ?? 0,
+    user: options.user ?? 0,
+    revision: options.revision ?? 3,
+    writable: options.writable ?? true
+  };
   const listeners = new Set<() => void>();
   return {
     mutations,
@@ -1451,6 +1469,138 @@ test('the English status icon mirrors the label, title, and three states', async
 
 //#endregion
 
+//#region profile compose layer (cordis.patch.yml)
+
+/**
+ * A deployment configured entirely in the profile patch writes nothing into the
+ * user layer: the Host reports the running configuration as `base` and an empty
+ * `value`. Before the page read `base` it rendered a configuration whose model
+ * pool was demonstrably in use as an empty form.
+ */
+const PATCHED: Record<string, unknown> = {
+  backend: 'jev',
+  systemOne: { apiKeyEnv: 'SYSTEM_ONE_API_KEY' },
+  routing: {
+    enabled: true,
+    virtualProvider: 'reflex',
+    fallback: 'newapi-aseit:MiniMax-M3.1-Flash',
+    maxTaskChars: 400,
+    models: {
+      'reflex-1': [
+        { provider: 'deepseek-official', model: 'deepseek-flash', description: 'fast official model' },
+        { provider: 'newapi-aseit', model: 'qwen3.8-27b', description: 'local model, free' }
+      ]
+    }
+  },
+  effort: { reasoningEffort: 'reflex', fallback: 'medium', minConfidence: 0.3 },
+  interventions: {
+    mode: 'active',
+    capabilities: { stagnation: 'active', prune: 'active', gate: 'active', closing: 'active' }
+  }
+};
+
+test('a configuration that lives only in the profile patch still renders its model pool', async () => {
+  const { form } = settingsForm({}, { base: PATCHED, user: {} });
+  const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    openTab(mounted.tree, '虚拟 Provider');
+    const tree = await mounted.runtime.flush();
+    // A virtual model id is an editable input value, not text: read the values.
+    const text = valuesOf(tree);
+    assert.ok(text.includes('reflex-1'), 'the virtual model id in the compose base was not rendered');
+    assert.ok(text.includes('deepseek-flash'), 'the first candidate in the compose base was not rendered');
+    assert.ok(text.includes('qwen3.8-27b'), 'the second candidate in the compose base was not rendered');
+    // The pool is the observable half: it only appears when the page seeded from
+    // the compose base rather than from the (empty) user layer.
+
+    assert.equal(
+      elements(tree).filter((element) => element.type === 'input' && element.props.placeholder === '物理模型').length,
+      2,
+      'both candidates from the base layer must be editable rows'
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('editing a base-defined pool writes it to the user layer instead of showing an empty form', async () => {
+  const { form, mutations } = settingsForm({}, { base: PATCHED, user: {} });
+  const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    openTab(mounted.tree, '虚拟 Provider');
+    let tree = await mounted.runtime.flush();
+    fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+    tree = await mounted.runtime.flush();
+    fire(find(tree, 'button', '保存'), 'onClick');
+    await mounted.runtime.flush();
+
+    assert.equal(mutations.length, 1, 'saving a base-seeded draft did not reach the settings form');
+    const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: any }[];
+    const routing = ops.find((op) => op.path.length === 1 && op.path[0] === 'routing');
+    assert.ok(routing, 'the routing group was not written');
+    assert.equal(routing?.value.enabled, false);
+    // The pool came from the base layer, but the write now records it in the
+    // user layer: the panel edits what it shows, and what it shows was not empty.
+    assert.deepEqual(Object.keys(routing?.value.models ?? {}), ['reflex-1']);
+    assert.equal(routing?.value.models['reflex-1'].length, 2);
+    assert.equal(routing?.value.virtualProvider, 'reflex');
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('a group write keeps stored keys the page never rendered', async () => {
+  // A whole-section write replaces the section, so a key authored by hand (or by
+  // a future schema) would vanish on an unrelated save unless it is carried over.
+  const user = {
+    routing: {
+      enabled: true,
+      virtualProvider: 'reflex',
+      fallback: 'deepseek:deepseek-chat',
+      maxTaskChars: 400,
+      models: { 'reflex-pro': [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] },
+      stickyMargin: 0.25
+    }
+  };
+  const { form, mutations } = settingsForm(AUTHORED, { user });
+  const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    openTab(mounted.tree, '虚拟 Provider');
+    let tree = await mounted.runtime.flush();
+    fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+    tree = await mounted.runtime.flush();
+    fire(find(tree, 'button', '保存'), 'onClick');
+    await mounted.runtime.flush();
+
+    const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: any }[];
+    const routing = ops.find((op) => op.path.length === 1 && op.path[0] === 'routing');
+    assert.equal(routing?.value.enabled, false, 'the edit itself must be written');
+    assert.equal(routing?.value.stickyMargin, 0.25, 'a stored key the page does not render was dropped by the save');
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('the base layer report: a run whose value layer is empty is the case the page must handle', async () => {
+  // The reproduction the page was rewritten for: `cordis.patch.yml` writes a
+  // configuration, the Host reports it as `base`, and the effective `value` is
+  // empty. Two things must hold for that deployment: the page renders the pool
+  // (documented above) and the Host-side validator accepts the group the page
+  // then writes, including the pool it carried over from the base layer.
+  const resolved = resolveConfig({
+    backend: 'jev',
+    routing: {
+      enabled: false,
+      virtualProvider: 'reflex',
+      maxTaskChars: 400,
+      models: { 'reflex-1': [{ provider: 'deepseek-official', model: 'deepseek-flash', description: 'fast official model' }] }
+    }
+  } as ReflexConfig);
+  assert.equal(resolved.routing.enabled, false);
+  assert.deepEqual(Object.keys(resolved.routing.models), ['reflex-1']);
+  assert.equal(resolved.routing.models['reflex-1']?.[0]?.provider, 'deepseek-official');
+});
+
 //#region host write contract
 
 /** The part of a schemastery node the write contract walks. */
@@ -1529,17 +1679,19 @@ test('the System 1 backend page writes the scalar and its block, on the paths th
   assert.deepEqual(
     ops.map((op) => [op.op, op.path]),
     [
+      // Unsets are emitted first so the operation list is stable; the sets then
+      // follow in page order.
+      ['unset', ['ledgerPath']],
+      ['unset', ['calibrationPath']],
       ['set', ['backend']],
       ['set', ['systemOne']],
       ['set', ['toolPrefix']],
-      ['unset', ['ledgerPath']],
-      ['set', ['pruneThreshold']],
-      ['unset', ['calibrationPath']]
+      ['set', ['pruneThreshold']]
     ],
     'the backend page must address the fields the Host declares, never its own group name'
   );
-  assert.equal(ops[0]?.value, 'jev', '`backend` is a scalar union, never a block');
-  const systemOne = (ops[1]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(ops[2]?.value, 'jev', '`backend` is a scalar union, never a block');
+  const systemOne = (ops[3]?.value ?? {}) as Record<string, unknown>;
   assert.equal(systemOne.timeoutMs, 9000);
   assert.equal(systemOne.baseUrl, 'http://127.0.0.1:8000/v1', 'an untouched field must round-trip');
 

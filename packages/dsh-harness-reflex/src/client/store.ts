@@ -24,6 +24,7 @@ import {
   diffDraft,
   dirtyGroups,
   draftFromConfig,
+  draftFromLayers,
   draftFromSnapshot,
   movePoolEntry,
   removePool,
@@ -49,10 +50,21 @@ export const PANEL_TABS: readonly PanelTab[] = [
   'guide'
 ];
 
-/** One Host settings section, as the client form API reports it. */
+/**
+ * One Host settings section, as the client form API reports it.
+ *
+ * `value` is the *effective* section and does not include the profile's compose
+ * base, so a deployment configured entirely in `cordis.patch.yml` shows its
+ * values in `base` and an empty `value`. `user` is the raw layer this panel
+ * writes to; its presence is what marks a field as overridden.
+ */
 export interface FormSnapshotLike {
   status: 'loading' | 'ready' | 'unavailable';
   value: unknown;
+  /** Composition layer `value` was resolved over; absent on older bridges. */
+  base?: unknown;
+  /** Raw user layer as stored; absent on older bridges. */
+  user?: unknown;
   revision: number | undefined;
   writable: boolean;
 }
@@ -134,6 +146,24 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * Seed a draft from one settings section.
+ *
+ * The Host reports two layers: `value` (effective, with the profile's compose
+ * base already folded in) and `base` (that compose base on its own). A
+ * deployment configured in `cordis.patch.yml` — which is how a patch-layer user
+ * configures this plugin — puts nothing in `value` itself, so reading only
+ * `value` would show an empty page for a running configuration. `base` is the
+ * fallback for every group the panel owns; `routing` merges per virtual model so
+ * a pool added in one layer is not hidden by the other.
+ *
+ * @param form - the settings form snapshot.
+ * @returns the draft to edit.
+ */
+export function draftFromForm(form: FormSnapshotLike): PanelDraft {
+  return draftFromLayers(form.value, form.base);
+}
+
+/**
  * Observable state of the Reflex settings page.
  *
  * Immutable snapshots, one listener list: the React layer subscribes through
@@ -161,7 +191,7 @@ export class PanelStore {
     this.#setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     const form = options.form.getSnapshot();
-    const seeded = draftFromConfig(form.value);
+    const seeded = draftFromForm(form);
     this.#state = {
       tab: 'overview',
       phase: 'idle',
@@ -321,7 +351,7 @@ export class PanelStore {
 
   /** Discard unsaved edits and re-seed from the Host. */
   reset(): void {
-    const seeded = draftFromConfig(this.#options.form.getSnapshot().value);
+    const seeded = draftFromForm(this.#options.form.getSnapshot());
     this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
   }
 
@@ -344,7 +374,9 @@ export class PanelStore {
       this.#set({ errors: validation.errors, notice: null, noticeValues: null });
       return false;
     }
-    const ops = diffDraft(original, draft);
+    // The raw user layer is passed so a group write keeps the keys this page
+    // never rendered instead of replacing the whole section with them dropped.
+    const ops = diffDraft(original, draft, this.#options.form.getSnapshot().user);
     if (ops.length === 0) {
       this.#set({ errors: [], notice: 'clean', noticeValues: null });
       return true;
@@ -357,7 +389,7 @@ export class PanelStore {
         this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
         return false;
       }
-      const seeded = draftFromConfig(this.#options.form.getSnapshot().value);
+      const seeded = draftFromForm(this.#options.form.getSnapshot());
       this.#set({ saving: false, original: seeded, draft: seeded, notice: 'saved', noticeValues: null });
       void this.refresh();
       return true;
@@ -412,7 +444,7 @@ export class PanelStore {
       this.#set({ configStatus: form.status, writable: form.writable, revision: form.revision });
       return;
     }
-    const seeded = draftFromConfig(form.value);
+    const seeded = draftFromForm(form);
     this.#set({
       configStatus: form.status,
       writable: form.writable,

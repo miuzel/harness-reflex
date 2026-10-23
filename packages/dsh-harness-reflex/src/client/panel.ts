@@ -383,6 +383,52 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
 }
 
 /**
+ * Seed a draft from the two layers a Host settings section reports.
+ *
+ * `value` is the effective section and already includes `base` (the profile's
+ * compose layer) wherever the user layer is silent, so it wins field by field.
+ * `base` exists because a deployment configured in `cordis.patch.yml` writes
+ * nothing into the user layer: `value` alone would render an empty page for a
+ * configuration that is demonstrably running. Virtual-model pools are the one
+ * exception to "value wins": a pool added in either layer is kept, so editing a
+ * base-defined pool cannot hide a user-defined one.
+ *
+ * @param value - the effective section.
+ * @param base - the composition base the effective section resolves over.
+ * @returns the draft to edit.
+ */
+export function draftFromLayers(value: unknown, base: unknown): PanelDraft {
+  const draft = draftFromConfig(value);
+  const baseDraft = draftFromConfig(base);
+  const pools = mergePools(draft.routing.pools, baseDraft.routing.pools);
+  return {
+    ...draft,
+    routing: { ...draft.routing, pools },
+    interventions: {
+      ...draft.interventions,
+      capabilities: { ...baseDraft.interventions.capabilities, ...draft.interventions.capabilities }
+    }
+  };
+}
+
+/**
+ * Merge two virtual-model pool lists, keeping both sides.
+ *
+ * A model id present on one side only is kept as is; one present on both takes
+ * the effective-side list (it may legitimately be empty, meaning "clear this
+ * pool"), and an empty effective list with no counterpart is dropped rather
+ * than rendered as an orphan row.
+ *
+ * @param value - pools from the effective layer.
+ * @param base - pools from the composition base.
+ * @returns the merged list, effective order first.
+ */
+function mergePools(value: PoolDraft[], base: PoolDraft[]): PoolDraft[] {
+  const seen = new Set(value.map((pool) => pool.model));
+  return [...value, ...base.filter((pool) => !seen.has(pool.model) && pool.model.length > 0)];
+}
+
+/**
  * Seed an editable draft from a Host-resolved configuration section.
  *
  * Tolerant by construction: an absent, partial, or unexpected section yields the
@@ -793,8 +839,12 @@ function sameValue(left: unknown, right: unknown): boolean {
  * @param draft - the edited draft.
  * @returns the ops to send, empty when nothing changed.
  */
-export function diffDraft(original: PanelDraft, draft: PanelDraft): SettingsOp[] {
+export function diffDraft(original: PanelDraft, draft: PanelDraft, user?: unknown): SettingsOp[] {
   const ops: SettingsOp[] = [];
+  // The user layer this panel will replace. A group write is a whole-section
+  // value, so anything already stored there under a sibling key would be deleted
+  // by the save; those keys are merged back in below.
+  const authored = asRecord(user);
   for (const group of DRAFT_GROUPS) {
     const before = groupWrites(original, group);
     const after = groupWrites(draft, group);
@@ -803,8 +853,43 @@ export function diffDraft(original: PanelDraft, draft: PanelDraft): SettingsOp[]
       ops.push(write.value === undefined ? { op: 'unset', path: write.path } : { op: 'set', path: write.path, value: write.value });
     }
   }
-  return ops;
+  // Unsets first, then the merged sets: an unset and a set never share a path,
+  // and keeping that order makes the emitted operation list stable for tests.
+  const ordered: SettingsOp[] = [];
+  for (const write of ops) if (write.op === 'unset') ordered.push(write);
+  for (const write of ops) if (write.op === 'set') ordered.push(withPreservedSiblings(write, authored));
+  return ordered;
 }
+
+/**
+ * Fold the sibling keys a whole-section write does not own back into it.
+ *
+ * `path: ['routing']` with `{ enabled, models }` replaces the whole `routing`
+ * object, so a key this page never renders would silently disappear on the next
+ * unrelated save. Only the top level is merged: the page owns every declared
+ * field, and merging a nested key it does not know would need to know the shape.
+ *
+ * @param write - one `set` operation.
+ * @param authored - the raw user layer as the Host reported it.
+ * @returns the operation with foreign sibling keys preserved.
+ */
+export function withPreservedSiblings(
+  write: Extract<SettingsOp, { op: 'set' }>,
+  authored: Record<string, unknown>
+): SettingsOp {
+  if (write.path.length !== 1) return write;
+  const [group] = write.path;
+  const existing = group === undefined ? undefined : authored[group];
+  const written = write.value;
+  if (existing === undefined || written === undefined) return write;
+  if (written === null || typeof written !== 'object' || Array.isArray(written)) return write;
+  if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) return write;
+  const owned = new Set(Object.keys(written));
+  const preserved = Object.fromEntries(Object.entries(existing).filter(([key]) => !owned.has(key)));
+  if (Object.keys(preserved).length === 0) return write;
+  return { ...write, value: { ...preserved, ...(written as Record<string, unknown>) } };
+}
+
 
 /** Which groups of a draft differ from the seeded original. */
 export function dirtyGroups(original: PanelDraft, draft: PanelDraft): (keyof PanelDraft)[] {

@@ -1537,11 +1537,13 @@ window.__ModuleLoader__.load({
 			exports.asNumber = asNumber;
 			exports.textToTags = textToTags;
 			exports.draftFromSnapshot = draftFromSnapshot;
+			exports.draftFromLayers = draftFromLayers;
 			exports.draftFromConfig = draftFromConfig;
 			exports.splitTarget = splitTarget;
 			exports.validateDraft = validateDraft;
 			exports.groupWrites = groupWrites;
 			exports.diffDraft = diffDraft;
+			exports.withPreservedSiblings = withPreservedSiblings;
 			exports.dirtyGroups = dirtyGroups;
 			exports.addPool = addPool;
 			exports.removePool = removePool;
@@ -1789,6 +1791,50 @@ window.__ModuleLoader__.load({
 			        };
 			    }
 			    return draft;
+			}
+			/**
+			 * Seed a draft from the two layers a Host settings section reports.
+			 *
+			 * `value` is the effective section and already includes `base` (the profile's
+			 * compose layer) wherever the user layer is silent, so it wins field by field.
+			 * `base` exists because a deployment configured in `cordis.patch.yml` writes
+			 * nothing into the user layer: `value` alone would render an empty page for a
+			 * configuration that is demonstrably running. Virtual-model pools are the one
+			 * exception to "value wins": a pool added in either layer is kept, so editing a
+			 * base-defined pool cannot hide a user-defined one.
+			 *
+			 * @param value - the effective section.
+			 * @param base - the composition base the effective section resolves over.
+			 * @returns the draft to edit.
+			 */
+			function draftFromLayers(value, base) {
+			    const draft = draftFromConfig(value);
+			    const baseDraft = draftFromConfig(base);
+			    const pools = mergePools(draft.routing.pools, baseDraft.routing.pools);
+			    return {
+			        ...draft,
+			        routing: { ...draft.routing, pools },
+			        interventions: {
+			            ...draft.interventions,
+			            capabilities: { ...baseDraft.interventions.capabilities, ...draft.interventions.capabilities }
+			        }
+			    };
+			}
+			/**
+			 * Merge two virtual-model pool lists, keeping both sides.
+			 *
+			 * A model id present on one side only is kept as is; one present on both takes
+			 * the effective-side list (it may legitimately be empty, meaning "clear this
+			 * pool"), and an empty effective list with no counterpart is dropped rather
+			 * than rendered as an orphan row.
+			 *
+			 * @param value - pools from the effective layer.
+			 * @param base - pools from the composition base.
+			 * @returns the merged list, effective order first.
+			 */
+			function mergePools(value, base) {
+			    const seen = new Set(value.map((pool) => pool.model));
+			    return [...value, ...base.filter((pool) => !seen.has(pool.model) && pool.model.length > 0)];
 			}
 			/**
 			 * Seed an editable draft from a Host-resolved configuration section.
@@ -2191,8 +2237,12 @@ window.__ModuleLoader__.load({
 			 * @param draft - the edited draft.
 			 * @returns the ops to send, empty when nothing changed.
 			 */
-			function diffDraft(original, draft) {
+			function diffDraft(original, draft, user) {
 			    const ops = [];
+			    // The user layer this panel will replace. A group write is a whole-section
+			    // value, so anything already stored there under a sibling key would be deleted
+			    // by the save; those keys are merged back in below.
+			    const authored = asRecord(user);
 			    for (const group of exports.DRAFT_GROUPS) {
 			        const before = groupWrites(original, group);
 			        const after = groupWrites(draft, group);
@@ -2202,7 +2252,46 @@ window.__ModuleLoader__.load({
 			            ops.push(write.value === undefined ? { op: 'unset', path: write.path } : { op: 'set', path: write.path, value: write.value });
 			        }
 			    }
-			    return ops;
+			    // Unsets first, then the merged sets: an unset and a set never share a path,
+			    // and keeping that order makes the emitted operation list stable for tests.
+			    const ordered = [];
+			    for (const write of ops)
+			        if (write.op === 'unset')
+			            ordered.push(write);
+			    for (const write of ops)
+			        if (write.op === 'set')
+			            ordered.push(withPreservedSiblings(write, authored));
+			    return ordered;
+			}
+			/**
+			 * Fold the sibling keys a whole-section write does not own back into it.
+			 *
+			 * `path: ['routing']` with `{ enabled, models }` replaces the whole `routing`
+			 * object, so a key this page never renders would silently disappear on the next
+			 * unrelated save. Only the top level is merged: the page owns every declared
+			 * field, and merging a nested key it does not know would need to know the shape.
+			 *
+			 * @param write - one `set` operation.
+			 * @param authored - the raw user layer as the Host reported it.
+			 * @returns the operation with foreign sibling keys preserved.
+			 */
+			function withPreservedSiblings(write, authored) {
+			    if (write.path.length !== 1)
+			        return write;
+			    const [group] = write.path;
+			    const existing = group === undefined ? undefined : authored[group];
+			    const written = write.value;
+			    if (existing === undefined || written === undefined)
+			        return write;
+			    if (written === null || typeof written !== 'object' || Array.isArray(written))
+			        return write;
+			    if (existing === null || typeof existing !== 'object' || Array.isArray(existing))
+			        return write;
+			    const owned = new Set(Object.keys(written));
+			    const preserved = Object.fromEntries(Object.entries(existing).filter(([key]) => !owned.has(key)));
+			    if (Object.keys(preserved).length === 0)
+			        return write;
+			    return { ...write, value: { ...preserved, ...written } };
 			}
 			/** Which groups of a draft differ from the seeded original. */
 			function dirtyGroups(original, draft) {
@@ -2506,6 +2595,7 @@ window.__ModuleLoader__.load({
 			"use strict";
 			Object.defineProperty(exports, "__esModule", { value: true });
 			exports.PanelStore = exports.DEFAULT_POLL_MS = exports.CLEAR_PATH = exports.SNAPSHOT_PATH = exports.PANEL_TABS = void 0;
+			exports.draftFromForm = draftFromForm;
 			/**
 			 * Stateful core of the Reflex settings page.
 			 *
@@ -2551,6 +2641,23 @@ window.__ModuleLoader__.load({
 			    return typeof error === 'string' ? error : 'unknown error';
 			}
 			/**
+			 * Seed a draft from one settings section.
+			 *
+			 * The Host reports two layers: `value` (effective, with the profile's compose
+			 * base already folded in) and `base` (that compose base on its own). A
+			 * deployment configured in `cordis.patch.yml` — which is how a patch-layer user
+			 * configures this plugin — puts nothing in `value` itself, so reading only
+			 * `value` would show an empty page for a running configuration. `base` is the
+			 * fallback for every group the panel owns; `routing` merges per virtual model so
+			 * a pool added in one layer is not hidden by the other.
+			 *
+			 * @param form - the settings form snapshot.
+			 * @returns the draft to edit.
+			 */
+			function draftFromForm(form) {
+			    return (0, panel_1.draftFromLayers)(form.value, form.base);
+			}
+			/**
 			 * Observable state of the Reflex settings page.
 			 *
 			 * Immutable snapshots, one listener list: the React layer subscribes through
@@ -2577,7 +2684,7 @@ window.__ModuleLoader__.load({
 			        this.#setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
 			        this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
 			        const form = options.form.getSnapshot();
-			        const seeded = (0, panel_1.draftFromConfig)(form.value);
+			        const seeded = draftFromForm(form);
 			        this.#state = {
 			            tab: 'overview',
 			            phase: 'idle',
@@ -2732,7 +2839,7 @@ window.__ModuleLoader__.load({
 			    }
 			    /** Discard unsaved edits and re-seed from the Host. */
 			    reset() {
-			        const seeded = (0, panel_1.draftFromConfig)(this.#options.form.getSnapshot().value);
+			        const seeded = draftFromForm(this.#options.form.getSnapshot());
 			        this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
 			    }
 			    /**
@@ -2755,7 +2862,9 @@ window.__ModuleLoader__.load({
 			            this.#set({ errors: validation.errors, notice: null, noticeValues: null });
 			            return false;
 			        }
-			        const ops = (0, panel_1.diffDraft)(original, draft);
+			        // The raw user layer is passed so a group write keeps the keys this page
+			        // never rendered instead of replacing the whole section with them dropped.
+			        const ops = (0, panel_1.diffDraft)(original, draft, this.#options.form.getSnapshot().user);
 			        if (ops.length === 0) {
 			            this.#set({ errors: [], notice: 'clean', noticeValues: null });
 			            return true;
@@ -2769,7 +2878,7 @@ window.__ModuleLoader__.load({
 			                this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
 			                return false;
 			            }
-			            const seeded = (0, panel_1.draftFromConfig)(this.#options.form.getSnapshot().value);
+			            const seeded = draftFromForm(this.#options.form.getSnapshot());
 			            this.#set({ saving: false, original: seeded, draft: seeded, notice: 'saved', noticeValues: null });
 			            void this.refresh();
 			            return true;
@@ -2829,7 +2938,7 @@ window.__ModuleLoader__.load({
 			            this.#set({ configStatus: form.status, writable: form.writable, revision: form.revision });
 			            return;
 			        }
-			        const seeded = (0, panel_1.draftFromConfig)(form.value);
+			        const seeded = draftFromForm(form);
 			        this.#set({
 			            configStatus: form.status,
 			            writable: form.writable,
