@@ -146,6 +146,14 @@ npm run test:pi        # unit tests: event mapping, payloads, closing degradatio
 npm run e2e:pi         # real pi 1.4.0 run: tools registered + prune reaches context
 ```
 
+The pruning step asks a model to run a command, so it depends on the model
+actually calling the tool. deepseek-flash sometimes answers from reasoning
+instead, and then there is no bulky result to prune. The session is therefore
+retried up to **twice**, the adopted attempt is printed
+(`pruning session (attempt 2 of 2 adopted)`), and only two failed attempts count
+as a failure. The retry absorbs model flakiness — it does not paper over a broken
+extension: a session that ran but produced no marker still fails.
+
 `npm run e2e:pi` asserts, on a real model:
 
 1. `pi --version` is 1.4.0;

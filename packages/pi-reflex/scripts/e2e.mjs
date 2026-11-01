@@ -61,18 +61,24 @@ let checks = 0;
 
 /**
  * Assert one condition.
+ *
+ * The retry loop in step 3 only checks *after* it has chosen an attempt, so each
+ * logical property is tallied exactly once regardless of how many model calls
+ * were needed to produce it.
  * @param condition - truthy when the check held.
  * @param message - what was checked.
  * @param detail - shown on failure.
+ * @returns whether the condition held.
  */
 function check(condition, message, detail) {
   checks += 1;
   if (condition) {
     console.log(`  ok   ${message}`);
-    return;
+    return true;
   }
   failures.push(message);
   console.log(`  FAIL ${message}${detail === undefined ? '' : `\n       ${detail}`}`);
+  return false;
 }
 
 /** Run one command, returning its status and combined output. */
@@ -209,6 +215,15 @@ check(missing.length === 0, 'all eight reflex_* tools are in the model-visible t
 check(/bash/.test(listedText), 'pi built-in tools are still present alongside the reflex tools');
 
 // 3. Pruning: a bulky tool result is replaced, and the replacement reaches the model.
+//
+// This step asks a model to run a command, so it depends on the model actually
+// doing so. deepseek-flash sometimes answers from reasoning instead of calling
+// the tool, and then no bulky result exists to prune and every assertion below
+// would fail for a reason that has nothing to do with the extension. A check
+// that goes red half the time is not a regression check, so the session is
+// retried a bounded number of times and the attempt that finally produced a
+// prunable tool result is the one adopted. Both attempts failing is still a
+// failure: the retry absorbs model flakiness, not a broken extension.
 console.log('\n3. pruning replaces a bulky result');
 // The fixture is a file on disk, not an inline shell one-liner: quoting an inline
 // command through the model, the shell, and the JSON session is where the first
@@ -225,37 +240,87 @@ writeFileSync(
   ].join('\n')
 );
 const fixturePath = path.relative(repoRoot, path.join(workDir, fixtureName));
-const bulkyPrompt =
-  `Run exactly this one bash command and report only its exit code: bash ${fixturePath}`;
-const pruned = run(piBin, ['-e', extensionEntry, '-p', '--model', 'newapi/deepseek-flash', bulkyPrompt], {
-  env: piEnv(),
-  cwd: repoRoot
-});
-check(pruned.status === 0, 'the pruning session completes', pruned.output.slice(-800));
+console.log(`  fixture: ${fixturePath}`);
+const bulkyPrompt = `Run exactly this one bash command and report only its exit code: bash ${fixturePath}`;
 
-const entries = readSessionEntries();
-const sessionText = entries.map(textOf).join('\n');
-const markers = [...sessionText.matchAll(/originals\/([0-9a-f]{8,})\.txt/g)].map((match) => match[1]);
-check(markers.length > 0, 'a prune marker reached the model context', 'no marker in the session journal');
+/**
+ * Run one pruning session and read back what the model was actually given.
+ * @returns the journal, its text, the prune markers, and the pruned block.
+ */
+function pruningAttempt() {
+  const prunedRun = run(
+    piBin,
+    ['-e', extensionEntry, '-p', '--model', 'newapi/deepseek-flash', bulkyPrompt],
+    { env: piEnv(), cwd: repoRoot }
+  );
+  const entries = readSessionEntries();
+  const sessionText = entries.map(textOf).join('\n');
+  const markers = [...sessionText.matchAll(/originals\/([0-9a-f]{8,})\.txt/g)].map((match) => match[1]);
+  const toolTexts = entries
+    .flatMap((entry) => entry.message?.content ?? [])
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text);
+  return {
+    status: prunedRun.status,
+    output: prunedRun.output,
+    sessionText,
+    markers,
+    prunedText: toolTexts.find((text) => text.includes('[reflex prune'))
+  };
+}
 
+const MAX_PRUNING_ATTEMPTS = 2;
+let attempt = 0;
+let adopted;
+for (let i = 1; i <= MAX_PRUNING_ATTEMPTS; i += 1) {
+  // `attempt` tracks the attempt whose result is in hand. A plain `for` counter
+  // would read MAX+1 after the loop exits on exhaustion, which is not a real
+  // attempt and would misreport which one was adopted.
+  attempt = i;
+  adopted = pruningAttempt();
+  // "Triggered" means the bulky result reached the extension and it acted: a
+  // marker in the journal is the only evidence that survives the round trip. A
+  // session the model never ran leaves no marker, and retrying is the right
+  // response; a session that ran but produced no marker is a real defect, and it
+  // will fail all the same on the final attempt.
+  if (adopted.status === 0 && adopted.markers.length > 0) break;
+  if (i < MAX_PRUNING_ATTEMPTS) {
+    console.log(
+      `  retry pruning session (attempt ${attempt} produced no prune marker; ` +
+        `model may not have run the command) — rerunning`
+    );
+  }
+}
+const adoptedAttempt = attempt;
+console.log(`  pruning session (attempt ${adoptedAttempt} of ${MAX_PRUNING_ATTEMPTS} adopted)`);
+
+check(adopted.status === 0, 'the pruning session completes', adopted.output.slice(-800));
+check(
+  adopted.markers.length > 0,
+  `a prune marker reached the model context (attempt ${adoptedAttempt})`,
+  `no marker in the session journal after ${adoptedAttempt} attempt(s); ` +
+    'the model did not run the command, or the prune path did not fire'
+);
 // The replacement must be a real reduction, and must not have eaten the
 // diagnostic tail the model needs.
-const toolTexts = entries
-  .flatMap((entry) => (entry.message?.content ?? []))
-  .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-  .map((block) => block.text);
-const prunedText = toolTexts.find((text) => text.includes('[reflex prune'));
-if (prunedText) {
-  check(prunedText.includes('FINAL_LINE_REACHED'), 'the pruned result kept its diagnostic tail');
-  check(prunedText.includes('… [reflex prune: full original retrievable as'), 'the replacement publishes a locator');
-} else if (markers.length > 0) {
+if (adopted.prunedText) {
+  check(adopted.prunedText.includes('FINAL_LINE_REACHED'), 'the pruned result kept its diagnostic tail');
+  check(
+    adopted.prunedText.includes('… [reflex prune: full original retrievable as'),
+    'the replacement publishes a locator'
+  );
+} else if (adopted.markers.length > 0) {
   // The marker can also reach the model through a non-text block; the marker
   // check above already passed, so only the tail assertion is skipped.
   console.log('  note  pruned text not isolated as a text block; tail assertion skipped');
 }
 
 // The session must show the tool actually ran.
-check(/FINAL_LINE_REACHED/.test(sessionText), 'the bulky command really ran in the session');
+check(
+  /FINAL_LINE_REACHED/.test(adopted.sessionText),
+  'the bulky command really ran in the session',
+  'the fixture never executed; the model answered without calling bash'
+);
 
 // 4. Closing degradation, asserted against the compiled extension.
 //
