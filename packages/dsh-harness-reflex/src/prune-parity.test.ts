@@ -24,7 +24,7 @@ import test from 'node:test';
 
 import { InterventionEngine } from './interventions.js';
 import { InterventionEngine as BaselineEngine } from './baseline/interventions.js';
-import { PRUNE_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
+import { PRUNE_SCRIPTS, STAGNATION_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
 import {
   digestOfTrace,
   installedTextOf,
@@ -73,7 +73,8 @@ const ACTIVATIONS: readonly Activation[] = [
  * @returns the activation matrix filtered for it.
  */
 function activationsFor(script: PruneScript): readonly Activation[] {
-  return ACTIVATIONS.filter((activation) => {
+  const matrix = STAGNATION_SCRIPTS.includes(script) ? STAGNATION_ACTIVATIONS : ACTIVATIONS;
+  return matrix.filter((activation) => {
     const options = activation.options;
     if (script.scratch === true && options.scratch !== true) return false;
     if (script.segmented === true && options.segmented !== true) return false;
@@ -94,9 +95,33 @@ function skipReasonsOf(trace: ReplayTrace): string[] {
     .map((record) => String(record.skip ?? record.reason));
 }
 
+/** Both corpora: each batch's scripts, and the whole set the replay iterates. */
+const ALL_SCRIPTS: readonly PruneScript[] = [...PRUNE_SCRIPTS, ...STAGNATION_SCRIPTS];
+
+/**
+ * The activations a stagnation script is replayed under.
+ *
+ * A stagnation script is about the pre-execute and pre-step hooks, so the prune
+ * service's candidate shapes are irrelevant to it and would multiply the matrix
+ * without adding a branch; the mode axis is what matters, and it is kept whole.
+ */
+const STAGNATION_ACTIVATIONS: readonly Activation[] = [
+  { label: 'active', options: { mode: 'active' } },
+  { label: 'observe', options: { mode: 'observe' } },
+  { label: 'off', options: { mode: 'off' } },
+  { label: 'active+stagnation-only', options: { mode: 'off', capabilities: { stagnation: 'active' } } },
+  { label: 'observe+stagnation-only', options: { mode: 'off', capabilities: { stagnation: 'observe' } } },
+  { label: 'tight-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 1 } } },
+  { label: 'zero-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 0 } } },
+  { label: 'tight-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerTurn: 1 } } },
+  { label: 'tight-session-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerSession: 1 } } },
+  { label: 'high-confidence-floor', options: { mode: 'active', policy: { minConfidence: 0.95 } } },
+  { label: 'short-repeat-threshold', options: { mode: 'active', policy: { repeatThreshold: 2 } } }
+];
+
 /** The script with one id. */
 function scriptById(id: string): PruneScript {
-  const found = PRUNE_SCRIPTS.find((entry) => entry.id === id);
+  const found = ALL_SCRIPTS.find((entry) => entry.id === id);
   assert.ok(found !== undefined, `unknown script ${id}`);
   return found!;
 }
@@ -117,7 +142,7 @@ let matrixCache: Promise<Array<{ script: PruneScript; activation: Activation; tr
 function matrix(): Promise<Array<{ script: PruneScript; activation: Activation; trace: ReplayTrace }>> {
   matrixCache ??= (async () => {
     const out: Array<{ script: PruneScript; activation: Activation; trace: ReplayTrace }> = [];
-    for (const script of PRUNE_SCRIPTS) {
+    for (const script of ALL_SCRIPTS) {
       for (const activation of activationsFor(script)) {
         out.push({ script, activation, trace: await replaySnapshot(script, activation.options) });
       }
@@ -218,7 +243,7 @@ test('the frozen baseline is deterministic: two runs of the same script agree', 
 // ── 3. parity ───────────────────────────────────────────────────────────────
 
 test('prune: the live engine decides exactly like the frozen baseline', async () => {
-  for (const script of PRUNE_SCRIPTS) {
+  for (const script of ALL_SCRIPTS) {
     for (const activation of activationsFor(script)) {
       const { shared, legacy } = await replayBoth(script, activation.options);
       assert.deepEqual(
@@ -232,11 +257,81 @@ test('prune: the live engine decides exactly like the frozen baseline', async ()
   }
 });
 
+test('the stagnation corpus covers every pre-execute and pre-step branch', async () => {
+  const traces = await matrix();
+  const reasons = new Set<string>();
+  let denied = 0;
+  let corrections = 0;
+  let waitQueries = 0;
+  let pollQuestions = 0;
+
+  for (const { trace } of traces) {
+    for (const reason of skipReasonsOf(trace)) reasons.add(reason);
+    for (const entry of trace.preResults) {
+      const value = entry as { kind?: string; messages?: unknown };
+      if (value.kind === 'deny') denied += 1;
+      if (Array.isArray(value.messages) && value.messages.length > 0) corrections += 1;
+    }
+    for (const record of recordsOf(trace)) {
+      if (record.capability !== 'stagnation') continue;
+      if (record.pattern !== undefined && record.action === 'deny-call') denied += 0;
+      if (record.action === 'corrective-context') corrections += 1;
+    }
+  }
+
+  for (const { script, trace } of traces) {
+    if (script.id.startsWith('stagnation-wait') || script.id.startsWith('stagnation-job-kill') || script.id.startsWith('stagnation-external')) {
+      waitQueries += 1;
+    }
+    // A poll question is only distinguishable from an ordinary one by the goal
+    // text it carried, which the corpus is what puts there; the trace keeps the
+    // resulting wait skip, so the skip histogram is the evidence.
+  }
+  pollQuestions += reasons.has('wait-query') ? 1 : 0;
+
+  // Every refusal and every terminal branch of the two hooks the stagnation
+  // batch owns. A missing reason means the corpus stopped covering that branch
+  // and the parity assertion below would silently stop testing it.
+  for (const required of [
+    'duplicate-intervention',
+    'downstream-decided',
+    'intervention-cap',
+    'judgment-turn-cap',
+    'unconfirmed',
+    'wait-query',
+    'wait-query-unjudged',
+    'wait-query-unavailable',
+    'planning-error'
+  ]) {
+    assert.ok(reasons.has(required), `the corpus must exercise ${required}; saw: ${[...reasons].sort().join(', ')}`);
+  }
+  assert.ok(denied > 0, 'the corpus must produce at least one pre-execute refusal');
+  assert.ok(corrections > 0, 'the corpus must produce at least one pre-step correction');
+  assert.ok(waitQueries > 0, 'the corpus must include wait-shaped repetitions');
+  assert.ok(pollQuestions > 0, 'the corpus must reach the wait-question outcome');
+  assert.ok(reasons.has('wait-query-unjudged'), 'the corpus must reach the unjudged-poll outcome');
+});
+
+test('the stagnation corpus reaches both a refusal and a correction of the same episode', async () => {
+  // The two hooks own half of one decision each: pre-execute refuses the call,
+  // pre-step attaches the correction. A refactor that moved one and not the
+  // other would still agree with itself on any corpus that only exercised one.
+  const denied = await replaySnapshot(scriptById('stagnation-step-correction-after-a-loop'), { mode: 'active' });
+  const denials = denied.preResults.filter((entry) => (entry as { kind?: string }).kind === 'deny');
+  assert.ok(denials.length >= 1, 'the repeated call is refused by pre-execute');
+
+  const corrected = await replaySnapshot(scriptById('stagnation-pre-step-corrects-a-repeated-window'), { mode: 'active' });
+  const corrections = corrected.preResults.filter(
+    (entry) => Array.isArray((entry as { messages?: unknown }).messages) && ((entry as { messages: unknown[] }).messages ?? []).length > 0
+  );
+  assert.ok(corrections.length >= 1, 'a step boundary with a repeated window carries the correction');
+});
+
 test('prune: the pre-execute result is identical in both engines', async () => {
   // The prune batch must not change the stagnation path's control flow: for
   // every script, both engines hand back the same shape for every pre-execute
   // call, including the ones the rest of the waterfall decided itself.
-  for (const script of PRUNE_SCRIPTS) {
+  for (const script of ALL_SCRIPTS) {
     for (const activation of activationsFor(script)) {
       const { shared, legacy } = await replayBoth(script, activation.options);
       assert.deepEqual(shared.preResults, legacy.preResults, `${script.id} [${activation.label}]: pre-execute results diverged`);
@@ -270,6 +365,63 @@ test('negative control: a perturbed budget bucket is visible', async () => {
   const perturbed = structuredClone(shared.output.costs) as { active: Record<string, number> };
   perturbed.active.judgments = Number(perturbed.active.judgments ?? 0) + 1;
   assert.notDeepEqual(perturbed, legacy.output.costs, 'a one-judgment budget change must be visible');
+});
+
+// ── 5. negative controls for the stagnation dimensions ──────────────────────
+
+test('negative control: a changed refusal text is visible', async () => {
+  const { shared, legacy } = await replayBoth(scriptById('stagnation-denies-the-third-identical-call'), { mode: 'active' });
+  assert.deepEqual(shared.preResults, legacy.preResults, 'the control starts from an equal pair');
+  const perturbed = structuredClone(shared.preResults) as Array<{ kind?: string; reason?: string }>;
+  const denial = perturbed.find((entry) => entry.kind === 'deny');
+  assert.ok(denial?.reason !== undefined, 'the control needs a refusal to perturb');
+  denial!.reason = `${denial!.reason} (and something else)`;
+  assert.notDeepEqual(perturbed, legacy.preResults, 'a reworded refusal must be visible');
+});
+
+test('negative control: a dropped monotonicity decision is visible', async () => {
+  // The engine's only added decision is a deny on top of an allow. Replacing it
+  // with an allow is exactly the "permissions got looser" fault, and it must not
+  // be able to pass the pre-execute comparison.
+  const { shared, legacy } = await replayBoth(scriptById('stagnation-permission-is-monotone'), { mode: 'active' });
+  assert.deepEqual(shared.preResults, legacy.preResults);
+  const perturbed = structuredClone(shared.preResults) as Array<{ kind?: string }>;
+  const denial = perturbed.findIndex((entry) => entry.kind === 'deny');
+  assert.ok(denial >= 0, 'the control needs a refusal to weaken');
+  perturbed[denial] = { kind: 'allow' };
+  assert.notDeepEqual(perturbed, legacy.preResults, 'a weakened permission decision must be visible');
+});
+
+test('negative control: a dropped correction is visible', async () => {
+  const { shared, legacy } = await replayBoth(scriptById('stagnation-pre-step-corrects-a-repeated-window'), { mode: 'active' });
+  assert.deepEqual(shared.preResults, legacy.preResults);
+  const perturbed = structuredClone(shared.preResults) as Array<{ kind?: string; messages?: unknown[] }>;
+  const corrected = perturbed.find((entry) => Array.isArray(entry.messages) && entry.messages.length > 0);
+  assert.ok(corrected !== undefined, 'the control needs a correction to drop');
+  corrected!.messages = [];
+  assert.notDeepEqual(perturbed, legacy.preResults, 'a dropped corrective message must be visible');
+});
+
+test('negative control: a booked action the other side did not book is visible', async () => {
+  const { shared, legacy } = await replayBoth(scriptById('stagnation-denies-the-third-identical-call'), { mode: 'active' });
+  assert.deepEqual(shared.output.costs, legacy.output.costs);
+  const perturbed = structuredClone(shared.output.costs) as { byCapability: { stagnation: Record<string, number> } };
+  perturbed.byCapability.stagnation.interventions = Number(perturbed.byCapability.stagnation.interventions ?? 0) + 1;
+  assert.notDeepEqual(perturbed, legacy.output.costs, 'a one-action budget change must be visible');
+});
+
+test('negative control: a lost wait exemption is visible', async () => {
+  // The wait exemption is the one DSH capability with no counterpart on the
+  // command-hook side, so it is what a refactor is most likely to lose silently.
+  // Dropping it turns a sanctioned poll into a refusal, which shows up in the
+  // pre-execute result *and* in the stagnation accounting.
+  const { shared, legacy } = await replayBoth(scriptById('stagnation-wait-query-exempt'), { mode: 'active' });
+  assert.deepEqual(shared.preResults, legacy.preResults);
+  const perturbed = structuredClone(shared.preResults) as Array<{ kind?: string }>;
+  // A poll judged as a loop is refused; re-adding the refusal it would have made
+  // is exactly the difference an exemption loss produces.
+  perturbed[perturbed.length - 1] = { kind: 'deny' };
+  assert.notDeepEqual(perturbed, legacy.preResults, 'refusing a sanctioned poll must be visible');
 });
 
 test('negative control: a perturbed retention locator is visible', async () => {

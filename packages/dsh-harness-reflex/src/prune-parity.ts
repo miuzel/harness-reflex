@@ -60,7 +60,7 @@ import { InterventionEngine as BaselineEngine } from './baseline/interventions.j
 import type { InterventionAuditRecord } from './session-audit.js';
 import { resolveConfig, type ResolvedInterventionsConfig } from './config.js';
 import { pruneLocator } from './session-audit.js';
-import type { PruneScript, PruneStep } from './prune-parity-scripts.js';
+import type { PruneScript, PruneStep, StagnationShape } from './prune-parity-scripts.js';
 import type { PruneResponse } from './vendor/harness-reflex/index.js';
 
 /** Clock reading every replayed engine sees, so nothing depends on wall time. */
@@ -119,15 +119,29 @@ function fakeAgent(id: string): unknown {
   return { id, options: {}, session: { header: { origin: 'user', delegationDepth: 0 } } };
 }
 
-/** A tool execution, shaped the way the Host hands one to a hook. */
-function execOf(name: string, args: unknown, agent: unknown): ToolExecution {
+/** A signal that is already aborted, for the call the engine must leave alone. */
+const ABORTED = (() => {
+  const controller = new AbortController();
+  controller.abort();
+  return controller.signal;
+})();
+
+/**
+ * A tool execution, shaped the way the Host hands one to a hook.
+ * @param name - tool name.
+ * @param args - the call's arguments.
+ * @param agent - the calling agent.
+ * @param aborted - whether the call's signal is already aborted.
+ * @returns the execution.
+ */
+function execOf(name: string, args: unknown, agent: unknown, aborted = false): ToolExecution {
   return {
     callId: `call-${name}`,
     token: `token-${name}`,
     rootCallId: `root-${name}`,
     name,
     arguments: args,
-    signal: new AbortController().signal,
+    signal: aborted ? ABORTED : new AbortController().signal,
     agent
   } as unknown as ToolExecution;
 }
@@ -175,6 +189,82 @@ function preDecisionOf(step: Extract<PruneStep, { ev: 'tool' }>): unknown {
     default:
       return { kind: 'allow' };
   }
+}
+
+/**
+ * A pre-execute decision, as the comparison reads it.
+ *
+ * The engine's one added decision is a `deny`, so the reason text is *kept*: it
+ * is the model-facing refusal, and a refactor that changed its wording would be
+ * a product change this harness must see. Everything else is reduced to its kind,
+ * which is what "the downstream decision comes back untouched" means.
+ * @param decision - what the hook returned.
+ * @returns the comparable form.
+ */
+function describePre(decision: unknown): unknown {
+  const kind = (decision as { kind?: string } | undefined)?.kind;
+  if (kind !== 'deny') return { kind };
+  return { kind, reason: (decision as { reason?: unknown }).reason ?? null };
+}
+
+/**
+ * A pre-step decision, as the comparison reads it.
+ *
+ * The message list is compared by the text each entry carries plus its source
+ * kind, not by message id: the id is minted from a per-engine counter, and two
+ * engines that emit the same correction at the same point must agree on what the
+ * loop is told, not on which integer named it.
+ * @param decision - what the hook returned.
+ * @returns the comparable form.
+ */
+function describePreStep(decision: unknown): unknown {
+  const value = decision as { kind?: string; messages?: readonly unknown[] } | undefined;
+  if (value === undefined) return null;
+  return {
+    kind: value.kind ?? null,
+    messages: Array.isArray(value.messages)
+      ? value.messages.map((message) => {
+          const entry = message as { role?: string; content?: readonly { type?: string; text?: string }[]; source?: { kind?: string } };
+          return {
+            role: entry.role ?? null,
+            source: entry.source?.kind ?? null,
+            text: entry.content?.map((block) => block.text ?? '').join('') ?? ''
+          };
+        })
+      : null
+  };
+}
+
+/**
+ * Replay one `agent/turn-stopping` boundary.
+ *
+ * The closing check steers a corrective message into the recipient; the replay
+ * records what the engine returned and what it steered, so a stagnation change
+ * that disturbed the closing state is visible.
+ * @param engine - the engine under replay.
+ * @param agent - the agent whose turn is closing.
+ * @param step - the stop step.
+ * @returns the comparable form.
+ */
+async function replayStop(
+  engine: InterventionEngine,
+  agent: unknown,
+  step: Extract<PruneStep, { ev: 'turn-stop' }>
+): Promise<unknown> {
+  const steered: unknown[] = [];
+  const recipient = {
+    ...(agent as Record<string, unknown>),
+    steer: (message: unknown) => {
+      const entry = message as { content?: readonly { text?: string }[]; source?: { kind?: string } };
+      steered.push({ source: entry.source?.kind ?? null, text: entry.content?.map((block) => block.text ?? '').join('') ?? '' });
+    }
+  };
+  // The stream frame is the Host's shape, not a convenience: the closing check
+  // only accumulates `text-delta` chunks, so anything else would silently leave
+  // the turn with no claims and make the check unreachable in every script.
+  engine.observeAssistantStream({ agent: recipient, frame: { type: 'chunk', chunk: { type: 'text-delta', text: step.claims } } });
+  await engine.turnStopping({ agent: recipient, turn: step.turn });
+  return { steered };
 }
 
 // ── the fakes ───────────────────────────────────────────────────────────────
@@ -226,16 +316,36 @@ function pruneStub(
   } as InterventionEngineOptions['prune'];
 }
 
-/** A stagnation service that always confirms, so the corpus can occupy the shared action budget. */
-function stagnationStub(): InterventionEngineOptions['stagnation'] {
+/**
+ * A stagnation service, answering in one of the shapes the corpus needs.
+ *
+ * Every answer is zero-latency so no clock value can enter through it. The
+ * *shape* is the point: the refusal branch, the paid-but-unconfirmed branch, the
+ * confidence floor and the fail-open path are four different positions in the
+ * pre-execute order, and a corpus that only says "stuck" never reaches three of
+ * them.
+ * @param shape - how this activation's service answers.
+ * @returns the service.
+ */
+function stagnationStub(shape: StagnationShape): InterventionEngineOptions['stagnation'] {
+  let asked = 0;
   return {
-    check: async () => ({
-      isStuck: true,
-      patternType: 'repetition',
-      confidence: 0.9,
-      diagnosis: 'stub',
-      latencyMs: 0
-    })
+    check: async () => {
+      asked += 1;
+      if (shape === 'throw') throw new Error('System One unavailable');
+      const unconfirmed = shape === 'not-stuck' || shape === 'low-confidence' || (shape === 'stuck-then-not' && asked > 1);
+      return unconfirmed
+        ? {
+            isStuck: false,
+            patternType: 'none',
+            // Under the 0.6 floor the engine runs with: a verdict, but not one
+            // that justifies an action.
+            confidence: shape === 'low-confidence' ? 0.2 : 0.95,
+            diagnosis: 'stub: not stuck',
+            latencyMs: 0
+          }
+        : { isStuck: true, patternType: 'repetition', confidence: 0.9, diagnosis: 'stub', latencyMs: 0 };
+    }
   } as InterventionEngineOptions['stagnation'];
 }
 
@@ -303,8 +413,13 @@ export interface ReplayOptions {
 /** What one replay produced for one engine. */
 export interface ReplayTrace {
   readonly output: ReplayOutput;
-  /** Every `tools/pre-execute` return value, in order (for the monotonicity check). */
+  /**
+   * Every `tools/pre-execute` and `agent/pre-step` return value, in dispatch
+   * order (for the monotonicity and correction checks).
+   */
   readonly preResults: readonly unknown[];
+  /** Every `agent/turn-stopping` boundary, and what was steered into it. */
+  readonly stopResults: readonly unknown[];
 }
 
 /**
@@ -347,7 +462,7 @@ export async function replay(
   const engine = new factory({
     config: policy,
     pruneThreshold: 100,
-    stagnation: stagnationStub(),
+    stagnation: stagnationStub(script.stagnation ?? 'stuck'),
     prune: pruneStub(options.shape ?? 'half', options.scratch === true, options.segmented === true),
     gate: gateStub(),
     ...(retention === 'absent'
@@ -370,24 +485,55 @@ export async function replay(
   }) as unknown as InterventionEngine;
 
   const decisions: unknown[] = [];
+  /**
+   * Every pre-execute and pre-step return value, in dispatch order.
+   *
+   * The pre-step decisions are kept too: the stagnation batch owns half of that
+   * hook, and a correction that changed the message list without changing the
+   * model-visible text would be invisible to a comparison of decisions alone.
+   */
   const preResults: unknown[] = [];
+  /** The closing check's answer, per `turn-stop` step. */
+  const stopResults: unknown[] = [];
   let enteredTurn = 0;
   let enteredStep = 0;
 
   for (const step of script.steps) {
     if (step.ev === 'pre-step') {
-      await engine.preStep(
-        { agent, messages: [], turn: step.turn, step: step.step },
-        async () => ({ kind: 'enter' }) as never
+      const entered = await engine.preStep(
+        {
+          agent,
+          messages: [],
+          turn: step.turn,
+          step: step.step,
+          ...(step.aborted === true ? { signal: ABORTED } : {})
+        },
+        // `enter` carries the admitted message list; a correction is *appended*
+        // to it, so the fake has to have one for the branch to be reachable.
+        async () => (step.downstream === 'reject' ? { kind: 'reject' } : { kind: 'enter', messages: [] }) as never
       );
+      preResults.push(describePreStep(entered));
+      enteredTurn = step.turn;
+      enteredStep = step.step;
+      continue;
+    }
+    if (step.ev === 'result') {
+      // A result with no proposal in front of it: `tools/post-execute` only.
+      const exec = execOf(step.tool, step.args ?? {}, agent);
+      const result = resultOf({ ev: 'tool', tool: step.tool, out: step.out, ...(step.isError === true ? { isError: true } : {}) });
+      decisions.push(await engine.toolResult(exec, result, async () => downstreamOf({ ev: 'tool', tool: step.tool, out: step.out })));
+      continue;
+    }
+    if (step.ev === 'turn-stop') {
+      stopResults.push(await replayStop(engine, agent, step));
       enteredTurn = step.turn;
       enteredStep = step.step;
       continue;
     }
     const turn = step.turn ?? enteredTurn;
     const stepIndex = step.step ?? enteredStep;
-    const exec = execOf(step.tool, step.args ?? {}, agent);
-    preResults.push(await engine.toolCall(exec, async () => preDecisionOf(step) as never));
+    const exec = execOf(step.tool, step.args ?? {}, agent, script.abortedCall === true);
+    preResults.push(describePre(await engine.toolCall(exec, async () => preDecisionOf(step) as never)));
     // The pre-step carries the turn boundary, then the step the call is about.
     await engine.preStep({ agent, messages: [], turn, step: stepIndex }, async () => ({ kind: 'enter' }) as never);
     const result = resultOf(step);
@@ -433,6 +579,7 @@ export async function replay(
 
   return {
     preResults,
+    stopResults,
     output: {
       decisions,
       audit: clockFreeView(audit),

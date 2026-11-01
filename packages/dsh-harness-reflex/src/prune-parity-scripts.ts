@@ -39,7 +39,42 @@ export type PruneStep =
       readonly switchModeTo?: 'off' | 'observe' | 'active';
     }
   /** `agent/pre-step` on its own, when a turn boundary matters without a call. */
-  | { readonly ev: 'pre-step'; readonly turn: number; readonly step: number };
+  | {
+      readonly ev: 'pre-step';
+      readonly turn: number;
+      readonly step: number;
+      /** What the rest of the waterfall decided for `agent/pre-step`. */
+      readonly downstream?: 'enter' | 'reject';
+      /** Mark the pre-step payload's signal aborted, as a cancelling turn does. */
+      readonly aborted?: boolean;
+    }
+  /**
+   * `tools/post-execute` on its own, with no `tools/pre-execute` proposal.
+   *
+   * The Host always proposes before it executes, but a proposal is not what makes
+   * a result: a tool the run never asked this engine about still produces one, and
+   * only this event can model a window whose repetitions were recorded without any
+   * call being refused in front of them.
+   */
+  | {
+      readonly ev: 'result';
+      readonly tool: string;
+      readonly args?: unknown;
+      readonly out: string;
+      readonly isError?: boolean;
+    }
+  /**
+   * `agent/turn-stopping` on its own: the closing check. It is not the stagnation
+   * path, but it shares the engine's state, budgets and audit trail, so it is a
+   * cross-check that the stagnation batch moved nothing it should not have.
+   */
+  | {
+      readonly ev: 'turn-stop';
+      readonly turn: number;
+      readonly step: number;
+      /** The assistant's claim for the turn, as the stream carried it. */
+      readonly claims: string;
+    };
 
 /** One script: a name, a human note, and the steps. */
 export interface PruneScript {
@@ -56,7 +91,36 @@ export interface PruneScript {
    * middle observation is expected to be answerable from the memo.
    */
   readonly textCarrying?: boolean;
+  /** Override the stagnation service's answer for this script (default: confirms). */
+  readonly stagnation?: StagnationShape;
+  /**
+   * Mark the pre-execute call's signal aborted.
+   *
+   * Only `toolCall` consults the signal, so this applies to every `tool` step's
+   * execution rather than to the script as a whole.
+   */
+  readonly abortedCall?: boolean;
 }
+
+/**
+ * How a script's stagnation service answers.
+ *
+ * A parity corpus that only ever says "stuck" would agree trivially on the
+ * refusal branch and never reach the paid skip, the confidence floor, or the
+ * fail-open path — each of which is a different position in the pre-execute
+ * order. These shapes put the corpus on each of them.
+ */
+export type StagnationShape =
+  /** Confirms a repetition. */
+  | 'stuck'
+  /** Answers "not stuck": the `unconfirmed` branch, which still charges a judgment. */
+  | 'not-stuck'
+  /** Confirms, but below the configured confidence floor. */
+  | 'low-confidence'
+  /** Throws on every question: the fail-open branch. */
+  | 'throw'
+  /** Answers the first question stuck and every later one not-stuck. */
+  | 'stuck-then-not';
 
 // ── payload shapes ──────────────────────────────────────────────────────────
 
@@ -331,6 +395,308 @@ export const PRUNE_SCRIPTS: readonly PruneScript[] = [
       { ev: 'tool', tool: 'bash', args: { command: 'm4' }, out: lines(40), turn: 2, step: 1 },
       { ev: 'tool', tool: 'grep', args: { pattern: 'x' }, out: lines(30, 'grep'), turn: 2, step: 2 },
       { ev: 'tool', tool: 'bash', args: { command: 'm6' }, out: padded(3_000), turn: 2, step: 3 }
+    ]
+  }
+];
+
+/**
+ * One repeated call, `times` times in one turn, each with its own result record.
+ *
+ * A repetition is only a repetition once the *earlier* calls were recorded, so
+ * each step proposes, settles, and moves on; the third proposal is the one the
+ * cheap trigger sees as a loop.
+ */
+function repeats(times: number, tool: string, args: unknown, out: string, turn = 1): PruneStep[] {
+  return Array.from({ length: times }, (_, index) => ({
+    ev: 'tool' as const,
+    tool,
+    args,
+    out,
+    turn,
+    step: index + 1
+  }));
+}
+
+/**
+ * A repeated call whose every step is a legitimate background-job poll.
+ *
+ * The handle is *constant* across the series, which is exactly the sanctioned
+ * poll: the same job observed again. This is the shape the wait exemption has to
+ * keep out of both the pre-execute refusal and the pre-step correction.
+ */
+function pollSeries(times: number, tool: string, args: unknown): PruneStep[] {
+  return Array.from({ length: times }, (_, index) => ({
+    ev: 'tool' as const,
+    tool,
+    args,
+    out: `job still running (poll ${index + 1})`,
+    turn: 1,
+    step: index + 1
+  }));
+}
+
+/**
+ * The scripts that exercise the stagnation path: `tools/pre-execute` and
+ * `agent/pre-step`.
+ *
+ * They are kept apart from {@link PRUNE_SCRIPTS} so that a reader can see which
+ * corpus belongs to which batch, but both are replayed through the same harness:
+ * the two engines are their own oracle, and the corpus is the only input.
+ *
+ * The *whole* engine runs on every script here, pruning included; a stagnation
+ * batch that disturbed the prune branch, the closing check, or the accounting
+ * shared by all of them fails these scripts too.
+ */
+export const STAGNATION_SCRIPTS: readonly PruneScript[] = [
+  {
+    id: 'stagnation-denies-the-third-identical-call',
+    note: 'the ordinary path: three identical calls, the third is judged and refused',
+    steps: repeats(4, 'bash', { command: 'npm test' }, 'exit 1: 3 tests failed')
+  },
+  {
+    id: 'stagnation-two-identical-calls-are-not-a-loop',
+    note: 'the trigger fires at the threshold, not before it',
+    steps: repeats(3, 'bash', { command: 'ls' }, 'total 0')
+  },
+  {
+    id: 'stagnation-step-correction-after-a-loop',
+    note: 'the pre-step that follows a refused loop attaches the correction',
+    steps: [
+      ...repeats(4, 'bash', { command: 'same' }, 'nothing changed'),
+      { ev: 'pre-step', turn: 1, step: 5 },
+      { ev: 'pre-step', turn: 1, step: 6 }
+    ]
+  },
+  {
+    id: 'stagnation-pre-step-corrects-a-repeated-window',
+    note: 'the correction is its own decision, reached without any pre-execute proposal in front of it',
+    steps: [
+      // Three results are recorded and no call is ever proposed, so nothing has
+      // been latched by pre-execute and the step boundary is the only decision
+      // left to make. This is the shape a paused step sees: the loop already ran
+      // and the next step is about to be admitted.
+      // The turn is entered first (with no observation behind it), the three
+      // repetitions are then recorded without ever being proposed, and the step
+      // boundary that follows is the only decision left to make.
+      { ev: 'pre-step', turn: 1, step: 1 },
+      // The same call three times: a repetition is measured on the call's own
+      // identity, so three *different* calls would only be three recorded steps.
+      ...[1, 2, 3].map(() => ({ ev: 'result' as const, tool: 'bash', args: { command: 'repeat-me' }, out: 'failed' })),
+      { ev: 'pre-step', turn: 1, step: 4 }
+    ]
+  },
+  {
+    id: 'stagnation-pre-step-before-any-call',
+    note: 'a pre-step with no observation behind it has nothing to correct',
+    steps: [{ ev: 'pre-step', turn: 1, step: 1 }]
+  },
+  {
+    id: 'stagnation-pre-step-rejected-downstream',
+    note: 'a pre-step the rest of the waterfall rejected is not corrected',
+    steps: [
+      ...repeats(4, 'bash', { command: 'rejected' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5, downstream: 'reject' }
+    ]
+  },
+  {
+    id: 'stagnation-pre-step-aborted',
+    note: 'a pre-step whose turn is being cancelled is left alone',
+    steps: [
+      ...repeats(4, 'bash', { command: 'cancelled' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5, aborted: true }
+    ]
+  },
+  {
+    id: 'stagnation-pre-execute-aborted',
+    note: 'a call whose signal is already aborted is never vetoed',
+    abortedCall: true,
+    steps: repeats(4, 'bash', { command: 'abort-me' }, 'failed')
+  },
+  {
+    id: 'stagnation-downstream-denied-passes-through',
+    note: 'the engine adds nothing on top of a decision the waterfall already made',
+    steps: [
+      ...repeats(3, 'bash', { command: 'denied' }, 'failed'),
+      { ev: 'tool', tool: 'bash', args: { command: 'denied' }, out: 'failed', pre: 'deny', turn: 1, step: 4 },
+      { ev: 'tool', tool: 'bash', args: { command: 'denied' }, out: 'failed', pre: 'ask', turn: 1, step: 5 },
+      { ev: 'tool', tool: 'bash', args: { command: 'denied' }, out: 'failed', pre: 'block', turn: 1, step: 6 }
+    ]
+  },
+  {
+    id: 'stagnation-permission-is-monotone',
+    note: 'a confirmed loop refuses an allow, and cannot do anything else to a stricter decision',
+    steps: [
+      // The refusals of steps 3 and 4 latch the signature, so the allow at the
+      // end is refused again rather than re-judged — and the deny/ask/block
+      // calls in between hand back the downstream object untouched.
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', turn: 1, step: 1 },
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', turn: 1, step: 2 },
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', turn: 1, step: 3 },
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', pre: 'ask', turn: 1, step: 4 },
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', pre: 'block', turn: 1, step: 5 },
+      { ev: 'tool', tool: 'bash', args: { command: 'mono' }, out: 'failed', pre: 'allow', turn: 1, step: 6 }
+    ]
+  },
+  {
+    id: 'stagnation-refuses-only-an-allow',
+    note: 'a call the waterfall already decided is never re-decided by the engine',
+    steps: [
+      // Three recorded failures make every following proposal suspicious, so each
+      // of these four calls reaches the confirmation and is refused or handed back
+      // depending on nothing but what the waterfall said first.
+      { ev: 'tool', tool: 'bash', args: { command: 'strict' }, out: 'failed', turn: 1, step: 1 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict' }, out: 'failed', turn: 1, step: 2 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict' }, out: 'failed', pre: 'ask', turn: 1, step: 3 },
+      { ev: 'pre-step', turn: 1, step: 3 },
+      { ev: 'pre-step', turn: 1, step: 4 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-2' }, out: 'failed', turn: 2, step: 1 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-2' }, out: 'failed', turn: 2, step: 2 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-2' }, out: 'failed', pre: 'deny', turn: 2, step: 3 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-2' }, out: 'failed', pre: 'block', turn: 2, step: 4 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-3' }, out: 'failed', turn: 3, step: 1 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-3' }, out: 'failed', turn: 3, step: 2 },
+      { ev: 'tool', tool: 'bash', args: { command: 'strict-3' }, out: 'failed', pre: 'ask', turn: 3, step: 3 }
+    ]
+  },
+  {
+    id: 'stagnation-own-tools-exempt',
+    note: 'the plugin never vetoes its own tools',
+    steps: [...repeats(5, 'reflex_choice', { question: 'q' }, 'p=0.9'), { ev: 'pre-step', turn: 1, step: 6 }]
+  },
+  {
+    id: 'stagnation-wait-query-exempt',
+    note: 'a repeated poll of one job is a wait, not a loop',
+    steps: [...pollSeries(5, 'job_output', { job_id: 'job-7' }), { ev: 'pre-step', turn: 1, step: 6 }]
+  },
+  {
+    id: 'stagnation-wait-list-exempt',
+    note: 'listing ones own jobs is a status query too',
+    steps: pollSeries(4, 'job_list', {})
+  },
+  {
+    id: 'stagnation-wait-output-is-not-a-wait',
+    note: 'the exemption is the call identity, not words in the result',
+    steps: repeats(4, 'bash', { command: 'sleep 30; wait' }, 'waiting for job_output of job-7')
+  },
+  {
+    id: 'stagnation-job-kill-is-a-poll-suspect',
+    note: 'terminating a job is not a wait, but its job handle makes it worth asking about',
+    steps: pollSeries(4, 'job_kill', { job_id: 'job-7' })
+  },
+  {
+    id: 'stagnation-external-poller-is-asked',
+    note: 'a handle-shaped repetition outside the name list is put to System One',
+    steps: pollSeries(4, 'task_poll', { task_id: 'task-3' })
+  },
+  {
+    id: 'stagnation-wait-flag-without-handle',
+    note: 'a bare wait flag names no job, so it is an ordinary repetition',
+    steps: pollSeries(4, 'job_output', { wait: true })
+  },
+  {
+    id: 'stagnation-unconfirmed-still-charges',
+    note: 'a judgment that answers "not stuck" is paid for and recorded',
+    stagnation: 'not-stuck',
+    steps: [...repeats(4, 'bash', { command: 'maybe' }, 'no change'), { ev: 'pre-step', turn: 1, step: 5 }]
+  },
+  {
+    id: 'stagnation-low-confidence-is-unconfirmed',
+    note: 'a verdict under the confidence floor justifies nothing',
+    stagnation: 'low-confidence',
+    steps: repeats(4, 'bash', { command: 'unsure' }, 'no change')
+  },
+  {
+    id: 'stagnation-judge-throws-fails-open',
+    note: 'a service that cannot answer never vetoes an allowed call',
+    stagnation: 'throw',
+    steps: [
+      ...repeats(4, 'bash', { command: 'down' }, 'no change'),
+      // A poll series in its own turn, so its repetition is what fails and the
+      // fail-open reason is the wait-specific one rather than the generic one.
+      ...pollSeries(4, 'job_output', { job_id: 'job-9' }).map((step) => ({ ...step, turn: 2, step: (step as { step: number }).step }))
+    ]
+  },
+  {
+    id: 'stagnation-stuck-then-not',
+    note: 'the first episode is refused and a later, different one is not',
+    stagnation: 'stuck-then-not',
+    steps: [
+      ...repeats(4, 'bash', { command: 'first' }, 'no change'),
+      { ev: 'tool', tool: 'bash', args: { command: 'second' }, out: 'different', turn: 1, step: 5 },
+      { ev: 'tool', tool: 'bash', args: { command: 'second' }, out: 'different', turn: 1, step: 6 },
+      { ev: 'tool', tool: 'bash', args: { command: 'second' }, out: 'different', turn: 1, step: 7 },
+      { ev: 'tool', tool: 'bash', args: { command: 'second' }, out: 'different', turn: 1, step: 8 }
+    ]
+  },
+  {
+    id: 'stagnation-turn-boundary-resets-the-loop',
+    note: 'a new turn clears the window, the latches and the budget',
+    steps: [
+      ...repeats(4, 'bash', { command: 'turn-1' }, 'failed'),
+      { ev: 'tool', tool: 'bash', args: { command: 'turn-1' }, out: 'failed', turn: 2, step: 1 },
+      { ev: 'tool', tool: 'bash', args: { command: 'turn-1' }, out: 'failed', turn: 2, step: 2 },
+      { ev: 'tool', tool: 'bash', args: { command: 'turn-1' }, out: 'failed', turn: 2, step: 3 }
+    ]
+  },
+  {
+    id: 'stagnation-action-ceiling-exhausted',
+    note: 'the turn action ceiling refuses the second episode without judging it',
+    steps: [
+      ...repeats(4, 'bash', { command: 'cap-a' }, 'failed'),
+      { ev: 'tool', tool: 'bash', args: { command: 'cap-b' }, out: 'failed', turn: 1, step: 5 },
+      { ev: 'tool', tool: 'bash', args: { command: 'cap-b' }, out: 'failed', turn: 1, step: 6 },
+      { ev: 'tool', tool: 'bash', args: { command: 'cap-b' }, out: 'failed', turn: 1, step: 7 }
+    ]
+  },
+  {
+    id: 'stagnation-judgment-ceiling',
+    note: 'the judgment ceiling stops the second episode before a verdict exists',
+    steps: [
+      ...repeats(4, 'bash', { command: 'judge-a' }, 'failed'),
+      { ev: 'tool', tool: 'bash', args: { command: 'judge-b' }, out: 'failed', turn: 1, step: 5 },
+      { ev: 'tool', tool: 'bash', args: { command: 'judge-b' }, out: 'failed', turn: 1, step: 6 },
+      { ev: 'tool', tool: 'bash', args: { command: 'judge-b' }, out: 'failed', turn: 1, step: 7 },
+      { ev: 'pre-step', turn: 1, step: 8 }
+    ]
+  },
+  {
+    id: 'stagnation-observe-plans-without-refusing',
+    note: 'observe makes the same plan, refuses nothing, and books the same action',
+    steps: [
+      ...repeats(4, 'bash', { command: 'observed' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5 }
+    ]
+  },
+  {
+    id: 'stagnation-off-changes-nothing',
+    note: 'off is the absence of the decision, not a weaker one',
+    steps: [
+      ...repeats(4, 'bash', { command: 'off-path' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5 }
+    ]
+  },
+  {
+    id: 'stagnation-then-prune-shares-the-budget',
+    note: 'a refusal and a reduction draw on the same allowance, in that order',
+    steps: [
+      ...repeats(4, 'bash', { command: 'shared-budget' }, lines(40)),
+      { ev: 'tool', tool: 'bash', args: { command: 'after' }, out: lines(40, 'after'), turn: 1, step: 5 }
+    ]
+  },
+  {
+    id: 'stagnation-closing-still-consistent',
+    note: 'the closing check keeps its answer while the stagnation path moves',
+    steps: [
+      { ev: 'tool', tool: 'bash', args: { command: 'false' }, out: 'Exit code 1: cannot resolve module', isError: true, turn: 1, step: 1 },
+      { ev: 'turn-stop', turn: 1, step: 1, claims: 'All tests pass and the build is green.' }
+    ]
+  },
+  {
+    id: 'stagnation-many-agents-are-independent',
+    note: 'one agent looping does not touch another agent corpus',
+    steps: [
+      ...repeats(4, 'bash', { command: 'agent-a' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5 }
     ]
   }
 ];
