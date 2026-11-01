@@ -48,7 +48,19 @@ export interface HookStorePort {
   /** Append one auditable decision or skip. */
   appendLedger(sessionId: string, record: HookLedgerRecord): void;
 
-  /** Read the recorded observations, newest first. */
+  /**
+   * Read the newest observations of one session.
+   *
+   * **Oldest first.** The tail is read in file order, which is append order,
+   * and it stays that way: `core/judge` counts trailing runs from the *end* of
+   * the array, so handing it a newest-first array would make it count the
+   * newest replay rather than the run that just happened. The previous version
+   * of this comment said "newest first", which contradicted both
+   * implementations and every `oldest first` contract in `core/judge`.
+   * @param sessionId - the session.
+   * @param limit - maximum observations to return.
+   * @returns the last `limit` observations, oldest first.
+   */
   readEvents(sessionId: string, limit: number): SessionEvent[];
 
   /** Whether an observation with this dedupe key was already appended. */

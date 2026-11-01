@@ -140,7 +140,7 @@ export class MemoryStateStore implements HookStorePort {
     this.#session(sessionId).ledger.push(record);
   }
 
-  /** The newest `limit` observations. */
+  /** The newest `limit` observations, oldest first (see {@link HookStorePort}). */
   readEvents(sessionId: string, limit: number): SessionEvent[] {
     const events = this.#session(sessionId).events;
     return events.slice(Math.max(0, events.length - limit));

@@ -96,6 +96,50 @@ test('the memory store decides exactly like the file store', async () => {
   }
 });
 
+test('both stores hand back observations oldest first', () => {
+  // `core/judge` counts a trailing run from the end of the array, so the order
+  // this returns is load-bearing rather than cosmetic: newest-first would make
+  // the stagnation and failure counters read the wrong end of the run. An
+  // earlier version of the port's doc comment claimed newest-first, which no
+  // implementation ever did, so this fixture exists to keep that claim tied to
+  // the code instead of to a comment.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'reflex-order-'));
+  try {
+    for (const store of [
+      new FileStateStore({ root, harness: 'file', clock: clock() }),
+      new MemoryStateStore({ now: () => NOW })
+    ]) {
+      store.ensureSession('order', 'active');
+      ['first', 'second', 'third'].forEach((signature, index) => {
+        store.appendEvent('order', {
+          v: 1,
+          at: NOW + index,
+          atIso: new Date(NOW + index).toISOString(),
+          dedupeKey: `order-${index}`,
+          kind: 'post',
+          turnNo: 0,
+          tool: 'Bash',
+          signature,
+          failed: signature === 'third'
+        });
+      });
+      assert.deepEqual(
+        store.readEvents('order', 10).map((event) => event.signature),
+        ['first', 'second', 'third'],
+        'observations must come back in append order'
+      );
+      // The window keeps the newest entries, in the same order.
+      assert.deepEqual(
+        store.readEvents('order', 2).map((event) => event.signature),
+        ['second', 'third'],
+        'a limited read returns the tail, still oldest first'
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a retained original reads back through both stores', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'reflex-orig-'));
   try {
