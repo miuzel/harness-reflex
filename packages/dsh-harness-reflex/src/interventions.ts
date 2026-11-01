@@ -113,6 +113,15 @@ import {
 } from './vendor/harness-reflex/core/policy.js';
 import { applyPruneFloor } from './vendor/harness-reflex/core/prune-plan.js';
 import { orchestratePrune, type PruneFeedbackFacts } from './vendor/harness-reflex/core/orchestrate.js';
+import {
+  orchestrateStagnationPre,
+  orchestrateStagnationStep,
+  progressSteps as sharedProgressSteps,
+  type HostStagnationPort,
+  type JudgedCharge,
+  type StagnationFeedbackFacts,
+  type StagnationPlanRecord
+} from './vendor/harness-reflex/core/orchestrate-stagnation.js';
 import { clip, digestOf, estimateTokens, hasTextBlock, textOfContent } from './vendor/harness-reflex/core/text.js';
 
 // The decision primitives keep their historic import path: a caller that already
@@ -475,7 +484,7 @@ export function annotateWaitHistory(steps: readonly ObservedStep[], signature: s
  * @returns the steps that count as progress.
  */
 function progressSteps(steps: readonly ObservedStep[]): readonly ObservedStep[] {
-  return steps.some((step) => step.wait === true) ? steps.filter((step) => step.wait !== true) : steps;
+  return sharedProgressSteps(steps);
 }
 
 /** One agent's detection state, budgets, and counters. */
@@ -894,124 +903,129 @@ export class InterventionEngine {
    * @param next - the rest of the waterfall.
    * @returns the decision the Host dispatches on.
    */
+  /**
+   * How many recorded steps already carry one identity.
+   *
+   * The call about to run is counted separately by the shared layer, so this is
+   * the count of the ones that really ran — which is what "repeated N times"
+   * means to a reader.
+   * @param state - the agent's bookkeeping.
+   * @param signature - the identity to count.
+   * @returns the number of recorded occurrences.
+   */
+  #priorSame(state: AgentState, signature: string): number {
+    return state.steps.filter((step) => step.signature === signature).length;
+  }
+
   async toolCall(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     const downstream = await next();
-    const capability = this.modeOf('stagnation');
-    if (capability === 'off' || !this.config.enabled) return downstream;
+    if (!this.config.enabled) return downstream;
     if (this.#ownTools.has(exec.name)) return downstream;
+    // Checked here, outside the fail-open guard below, exactly as before: a call
+    // whose signal is already aborted is not a planning failure and must not be
+    // reported as one.
     if (exec.signal?.aborted) return downstream;
 
+    const agentId = agentKeyOf(exec.agent);
+    const state = this.#state(agentId, exec.agent);
+    const signature = callSignature(exec);
+    const waitShape = isWaitQuery(exec) ? 'wait-query' : pollShapeOf(exec);
     let waitSuspected = false;
-    const started = this.#now();
-    try {
-      const agentId = agentKeyOf(exec.agent);
-      const state = this.#state(agentId, exec.agent);
-      const signature = callSignature(exec);
-      // The call about to run is part of its own window: three identical calls
-      // are a repetition at the moment the third one is proposed, and the
-      // judgment has to see all three. The pending entry is local — it is not
-      // committed to the agent's history, which the result records for real.
-      const pending = this.#observed(state, exec, signature);
-      const allWindow = [...state.steps, pending];
-      // Wait queries already in the window are dropped from the *progress*
-      // trigger: they are not progress the run could be repeating, and keeping
-      // them would both hide a real loop that waits between its attempts and
-      // manufacture an oscillation out of two identical polls.
-      const window = progressSteps(allWindow);
-      const waitShape = isWaitQuery(exec) ? 'wait-query' : pollShapeOf(exec);
-      // A wait-suspect call that this turn already classified is answered by
-      // that verdict, not re-asked; anything else is only worth a question when
-      // it actually repeats (the same threshold as any other repetition).
-      if (waitShape !== undefined && state.waited.has(signature)) {
-        this.#skip('wait-query', { capability: 'stagnation', state, agent: exec.agent });
-        return downstream;
-      }
-      const priorSame = allWindow.filter((step) => step.signature === signature).length - 1;
-      let suspicion = suspicionOf(window, {
-        repeatThreshold: this.config.repeatThreshold,
-        failureThreshold: this.config.failureThreshold,
-        window: this.config.windowSize,
-        signature
-      });
-      if (waitShape !== undefined && priorSame + 1 >= this.config.repeatThreshold) {
-        // The tool list only decides that this repetition is worth asking
-        // about; it does not pass or refuse anything by itself.
-        suspicion = {
-          suspicious: true,
-          pattern: 'repetition',
-          note: `wait-suspect ${waitShape} repeated ${priorSame + 1}x`,
-          repeats: priorSame + 1
-        };
-        waitSuspected = true;
-      }
-      if (!suspicion.suspicious || state.denied.has(signature)) return downstream;
-      if (state.applied.has(`stagnation:${signature}`)) {
-        this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: exec.agent });
-        return downstream;
-      }
-      if (!actionWithinBudget(state, this.#config)) {
-        this.#skip('intervention-cap', { capability: 'stagnation', state, agent: exec.agent });
-        return downstream;
-      }
 
-      // A wait question is judged on the polls themselves (each labelled with
-      // its place in the series, so the backend can read a wait rather than an
-      // exact repeat); every other question keeps the progress-only window.
-      const judgeSteps = waitSuspected ? annotateWaitHistory(allWindow, signature) : window;
-      const verdict = await this.#judge(
-        state,
-        exec.signal,
-        judgeSteps,
-        waitSuspected ? waitGoalOf(exec, waitShape ?? 'poll-shape', priorSame + 1) : undefined
-      );
-      const judgment = judgmentCharge(verdict, started, this.#now());
-      // Denial is latched per signature whether or not it was applied: in observe
-      // mode the refusal is what would have happened, and `denied` is what keeps
-      // the *next* identical attempt from being judged again in the same turn.
-      state.denied.add(signature);
-      if (!verdict.useful) {
-        this.#charge('stagnation', judgment);
-        if (waitSuspected) state.waited.add(signature);
-        // A budget/abort skip keeps its own reason; only a real "not stuck"
-        // answer to a wait question is recorded as the wait outcome.
-        this.#skip(verdict.skip ?? (waitSuspected ? 'wait-query' : 'unconfirmed'), {
+    // The decision itself is the shared layer's (see
+    // `core/orchestrate-stagnation.ts`); this method only answers the questions
+    // this Host alone can answer. Everything that remains here is a DSH fact: the
+    // agent's state slot, the call-signature algorithm, the job-tool list that
+    // defines a wait, the message and decision types, and the wording the model
+    // reads.
+    const port: HostStagnationPort<PreToolDecision, PreStepDecision> = {
+      policy: () => this.#config,
+      budget: () => state,
+      backend: () => this.#stagnation,
+      clock: () => ({ now: () => this.#now() }),
+      serves: () => this.#config.enabled,
+      toolName: () => exec.name,
+      window: () => state.steps,
+      // The call about to run is a retry exactly when this identity failed before.
+      pendingStep: () =>
+        ({
+          signature,
+          tool: exec.name,
+          input: clip(this.#argumentsOf(exec), STEP_CHARS),
+          output: '',
+          error: '',
+          failed: state.steps.some((step) => step.signature === signature && step.failed),
+          turn: state.turn,
+          at: this.#now()
+        }) satisfies ObservedStep,
+      signature: () => signature,
+      progressWindow: () => progressSteps(state.steps),
+      suspicion: (steps) =>
+        suspicionOf(steps, {
+          repeatThreshold: this.config.repeatThreshold,
+          failureThreshold: this.config.failureThreshold,
+          window: this.config.windowSize,
+          signature
+        }),
+      alreadyIntervened: () => state.applied.has(`stagnation:${signature}`),
+      alreadyDenied: () => state.denied.has(signature),
+      wasClassifiedAsWait: (stepSignature) => state.waited.has(stepSignature),
+      latchDenied: () => state.denied.add(signature),
+      latchIntervened: () => state.applied.add(`stagnation:${signature}`),
+      passThrough: () => downstream,
+      deny: (feedback) => ({ kind: 'deny', reason: feedback }),
+      // Pre-execute never corrects a step: the correction belongs to the pre-step
+      // hook, whose port answers this. Reaching it here would mean the shared
+      // layer asked the wrong hook, so it is a programming error, not a branch.
+      correct: (feedback) => {
+        throw new Error(`toolCall cannot attach a correction (${feedback.length} chars)`);
+      },
+      denyFeedback: (facts) => this.#denyFeedback(exec.name, facts.suspicion, facts.verdict),
+      contextFeedback: (facts) => this.#contextFeedback(facts.suspicion, facts.verdict),
+      skip: (reason, charge) =>
+        this.#skip(reason, {
           capability: 'stagnation',
           state,
           agent: exec.agent,
-          judgment
-        });
-        return downstream;
-      }
+          ...(charge === undefined ? {} : { judgment: charge })
+        }),
+      chargeJudgment: (charge: JudgedCharge) => this.#charge('stagnation', charge),
+      conclude: (plan: StagnationPlanRecord, applied: boolean, charge: JudgedCharge) =>
+        this.#conclude(plan as InterventionPlan, applied, exec.agent, { potentialSavedTokens: 0 }, charge)
+    };
 
-      const plan: InterventionPlan = {
-        capability: 'stagnation',
-        action: 'deny-call',
-        reason: `System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern} stagnation before ${exec.name}`,
-        feedback: this.#denyFeedback(exec.name, suspicion, verdict.response),
-        detail: {
-          pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
-          confidence: verdict.response.confidence,
-          repeats: suspicion.repeats,
-          turn: state.turn,
-          step: state.step
-        }
-      };
-      const applied = capability === 'active' && downstream.kind === 'allow';
-      if (capability === 'active' && !applied) {
-        this.#skip('downstream-decided', { capability: 'stagnation', state, agent: exec.agent });
-      }
-      // The decision is latched in both modes. Observe has to plan exactly what
-      // active would do — one refusal per episode, subject to the same turn cap —
-      // otherwise its column would over-count the very thing it is measuring.
-      state.refused.add(callKeyOf(exec));
-      state.applied.add(`stagnation:${signature}`);
-      bookAction(state);
-      this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
-      return applied ? { kind: 'deny', reason: plan.feedback } : downstream;
+    // Whether this call reached the wait question, which only decides the
+    // fail-open reason: a wait whose judge could not answer is reported with its
+    // own reason instead of the generic one.
+    waitSuspected =
+      waitShape !== undefined &&
+      this.#priorSame(state, signature) + 1 >= this.config.repeatThreshold;
+    try {
+      const outcome = await orchestrateStagnationPre(
+        {
+          downstreamKind: downstream.kind,
+          ...(exec.signal === undefined ? {} : { signal: exec.signal }),
+          ...(waitShape === undefined
+            ? {}
+            : {
+                waitShape: () => ({ shape: waitShape, repeats: this.#priorSame(state, signature) + 1 }),
+                waitClassified: () => state.waited.has(signature),
+                latchWait: () => state.waited.add(signature),
+                // A wait question is judged on the polls themselves: the backend
+                // reasons about the run, and labelling each poll with its place in
+                // the series keeps a sanctioned wait from reading as an exact
+                // repeat. How a poll is labelled is this Host's business.
+                judgeSteps: () => annotateWaitHistory([...state.steps, port.pendingStep()], signature),
+                waitQuestion: () => waitGoalOf(exec, waitShape, this.#priorSame(state, signature) + 1)
+              }),
+          noteRefused: () => state.refused.add(callKeyOf(exec))
+        },
+        port
+      );
+      return outcome.result;
     } catch {
       // FAIL-OPEN: a planning failure must never veto a call the rest of the
-      // waterfall already allowed. A wait whose judge could not answer is
-      // reported with its own reason instead of the generic one.
+      // waterfall already allowed.
       this.#skip(waitSuspected ? 'wait-query-unavailable' : 'planning-error', {
         capability: 'stagnation',
         agent: exec.agent
@@ -1123,83 +1137,82 @@ export class InterventionEngine {
       }
       state.step = payload.step;
 
-      const capability = this.modeOf('stagnation');
-      if (capability === 'off' || !this.config.enabled) return downstream;
-      if (payload.signal?.aborted || downstream.kind !== 'enter') return downstream;
-
-      const last = state.steps[state.steps.length - 1];
-      if (last === undefined) return downstream;
-      // A poll that already passed the semantic wait judgment has nothing to
-      // correct here: the run asked about a background job again, it did not
-      // repeat its work. A poll this turn never judged was not a repetition, so
-      // it is not a stagnation episode either.
-      if (last.wait === true) {
-        this.#skip(state.waited.has(last.signature) ? 'wait-query' : 'wait-query-unjudged', {
-          capability: 'stagnation',
-          state,
-          agent: payload.agent
-        });
-        return downstream;
-      }
-      const signature = last.signature;
-      if (state.applied.has(`stagnation:${signature}`)) {
-        this.#skip('duplicate-intervention', { capability: 'stagnation', state, agent: payload.agent });
-        return downstream;
-      }
-      if (!actionWithinBudget(state, this.#config)) {
-        this.#skip('intervention-cap', { capability: 'stagnation', state, agent: payload.agent });
-        return downstream;
-      }
-      // The same window the pre-execute trigger measures: waits are not progress
-      // to count, so a real loop either side of them is still one loop.
-      const window = progressSteps(state.steps);
-      const suspicion = suspicionOf(window, {
-        repeatThreshold: this.config.repeatThreshold,
-        failureThreshold: this.config.failureThreshold,
-        window: this.config.windowSize,
-        signature
-      });
-      if (!suspicion.suspicious) return downstream;
-
-      const verdict = await this.#judge(state, payload.signal, window);
-      const judgment = judgmentCharge(verdict, started, this.#now());
-      if (!verdict.useful) {
-        this.#charge('stagnation', judgment);
-        this.#skip(verdict.skip ?? 'unconfirmed', {
-          capability: 'stagnation',
-          state,
-          agent: payload.agent,
-          judgment
-        });
-        return downstream;
-      }
-
-      const plan: InterventionPlan = {
-        capability: 'stagnation',
-        action: 'corrective-context',
-        reason: `System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern} stagnation before step ${payload.step}`,
-        feedback: this.#contextFeedback(suspicion, verdict.response),
-        detail: {
-          pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
-          confidence: verdict.response.confidence,
-          repeats: suspicion.repeats,
-          turn: state.turn,
-          step: payload.step
-        }
+      // Turn bookkeeping above is this Host's and stays here: it is what the
+      // closing check and the prune memo read, and it belongs to whoever owns
+      // the turn boundary. What is shared is the *decision* that follows.
+      const agentIdForCorrection = agentId;
+      const port: HostStagnationPort<PreStepDecision, PreStepDecision> = {
+        policy: () => this.#config,
+        budget: () => state,
+        backend: () => this.#stagnation,
+        clock: () => ({ now: () => this.#now() }),
+        serves: () => this.#config.enabled,
+        toolName: () => state.steps[state.steps.length - 1]?.tool ?? '',
+        window: () => state.steps,
+        pendingStep: () => state.steps[state.steps.length - 1] as ObservedStep,
+        signature: () => state.steps[state.steps.length - 1]?.signature ?? '',
+        progressWindow: () => progressSteps(state.steps),
+        suspicion: (steps) =>
+          suspicionOf(steps, {
+            repeatThreshold: this.config.repeatThreshold,
+            failureThreshold: this.config.failureThreshold,
+            window: this.config.windowSize,
+            signature: state.steps[state.steps.length - 1]?.signature ?? ''
+          }),
+        alreadyIntervened: () => state.applied.has(`stagnation:${state.steps[state.steps.length - 1]?.signature ?? ''}`),
+        alreadyDenied: () => false,
+        wasClassifiedAsWait: (stepSignature) => state.waited.has(stepSignature),
+        latchDenied: () => undefined,
+        latchIntervened: () => state.applied.add(`stagnation:${state.steps[state.steps.length - 1]?.signature ?? ''}`),
+        passThrough: () => downstream,
+        deny: () => downstream,
+        // The correction is appended to the messages the rest of the waterfall
+        // admitted; the array it was given is not mutated in place.
+        //
+        // `downstream.messages` is read without a fallback on purpose. An `enter`
+        // decision always carries the list, so an absent one means the rest of the
+        // waterfall handed back something this Host cannot correct — and the
+        // fail-open guard below is what should record that, not a silent
+        // `messages: [correction]` that drops the very messages the step admitted.
+        correct: (feedback) =>
+          ({
+            ...downstream,
+            messages: [
+              ...(downstream as unknown as { messages: UserMessage[] }).messages,
+              this.#message(agentIdForCorrection, state.turn, payload.step, feedback)
+            ]
+          }) as PreStepDecision,
+        denyFeedback: (facts) => this.#denyFeedback(facts.tool, facts.suspicion, facts.verdict),
+        contextFeedback: (facts) => this.#contextFeedback(facts.suspicion, facts.verdict),
+        skip: (reason, charge) =>
+          this.#skip(reason, {
+            capability: 'stagnation',
+            state,
+            agent: payload.agent,
+            ...(charge === undefined ? {} : { judgment: charge })
+          }),
+        chargeJudgment: (charge: JudgedCharge) => this.#charge('stagnation', charge),
+        conclude: (plan: StagnationPlanRecord, applied: boolean, charge: JudgedCharge) =>
+          this.#conclude(plan as InterventionPlan, applied, payload.agent, { potentialSavedTokens: 0 }, charge)
       };
-      const applied = capability === 'active';
-      // The latch is mode-independent on purpose. Observe has to consume the same
-      // episode — one intervention per detected loop, one charge against the turn's
-      // cap — or its accounting would describe a run nobody could reproduce;
-      // installing the message is the only thing the mode gates.
-      state.applied.add(`stagnation:${signature}`);
-      bookAction(state);
-      this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
-      if (!applied) return downstream;
-      return {
-        ...downstream,
-        messages: [...downstream.messages, this.#message(agentId, state.turn, payload.step, plan.feedback)]
-      };
+
+      // The abort is checked *before* the shared call and the catch below is
+      // left to do what it always did: a pre-step that throws is reported as a
+      // planning error, and that report is what a cancelled turn has always left
+      // in the log. Passing the signal through instead would make the shared
+      // layer answer `aborted` and leave no trace at all — a quieter outcome, but
+      // a different one.
+      if (payload.signal?.aborted === true) return downstream;
+      const outcome = await orchestrateStagnationStep(
+        {
+          downstreamKind: downstream.kind,
+          // `undefined` is not passed on: the shared layer only knows a signal it
+          // can act on, and an absent one has to stay absent.
+          signal: undefined
+        },
+        port
+      );
+      return outcome.result;
     } catch {
       // FAIL-OPEN: the step enters with exactly the messages it would have had.
       this.#skip('planning-error', { capability: 'stagnation', agent: payload.agent });

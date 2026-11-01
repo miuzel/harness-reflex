@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 419;
+const EXPECTED_TESTS = 439;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -405,11 +405,91 @@ const MUTATIONS = [
     to: 'true'
   },
   {
+    // The window rule moved into the shared core with the stagnation decision
+    // (P2), so the fault is injected where the rule now lives — the vendored
+    // copy is what decides at runtime, exactly as for the prune faults above.
     name: 'wait-steps-count-as-progress',
     area: 'a wait is not progress a run can be repeating',
-    file: 'src/interventions.ts',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
     from: "return steps.some((step) => step.wait === true) ? steps.filter((step) => step.wait !== true) : steps;",
     to: 'return steps;'
+  },
+  // The stagnation decision itself now lives in the shared core (P2). These
+  // faults target the rules that moved there, one per rule a reader would most
+  // expect a refactor to lose.
+  {
+    name: 'stagnation-refuses-a-stricter-decision',
+    area: 'a refusal is only ever added on top of an allow',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    from: "  return downstreamKind === 'allow';",
+    to: '  return true;'
+  },
+  {
+    // The line that only active mode may add a refusal. Without it a call the
+    // waterfall allowed is vetoed while the capability is only observing.
+    name: 'stagnation-observe-blocks',
+    area: 'observe plans a refusal without refusing anything',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    from: "  const applies = mode === 'active' && mayAddDecision(invocation.downstreamKind);",
+    to: '  const applies = mayAddDecision(invocation.downstreamKind);'
+  },
+  {
+    // Anchored on the refusal's own return, so it is the pre-execute site and not
+    // the pre-step one that loses its booking.
+    name: 'stagnation-refusal-unbooked',
+    area: 'a planned refusal draws on the turn\'s action ceiling',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    from: [
+      '  port.latchIntervened();',
+      '  bookAction(port.budget());',
+      '  port.conclude(plan, applies, charge);',
+      '  return applies',
+      "    ? { result: port.deny(plan.feedback), action: 'deny' }"
+    ].join('\n'),
+    to: [
+      '  port.latchIntervened();',
+      '  port.conclude(plan, applies, charge);',
+      '  return applies',
+      "    ? { result: port.deny(plan.feedback), action: 'deny' }"
+    ].join('\n')
+  },
+  {
+    // ... and this one on the correction's, which returns `port.correct`.
+    name: 'correction-unbooked',
+    area: 'a planned correction draws on the same ceiling',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    from: [
+      '  port.latchIntervened();',
+      '  bookAction(port.budget());',
+      '  port.conclude(plan, applies, charge);',
+      '  return applies',
+      '    ? { result: port.correct(plan.feedback), action: \'allow\' }'
+    ].join('\n'),
+    to: [
+      '  port.latchIntervened();',
+      '  port.conclude(plan, applies, charge);',
+      '  return applies',
+      '    ? { result: port.correct(plan.feedback), action: \'allow\' }'
+    ].join('\n')
+  },
+  {
+    // The pre-step guard that keeps a legitimate poll from being corrected as a
+    // loop. Its fault removes the branch entirely, so a judged wait falls through
+    // to the repetition trigger.
+    name: 'wait-step-not-exempt-in-pre-step',
+    area: 'a judged poll is not corrected as a loop',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    from: "    port.skip(port.wasClassifiedAsWait(last.signature) ? 'wait-query' : 'wait-query-unjudged');\n    return passThrough();",
+    to: '    void 0;'
+  },
+  {
+    name: 'stagnation-episode-not-latched',
+    area: 'one episode is acted on once, not once per attempt',
+    file: 'src/vendor/harness-reflex/core/orchestrate-stagnation.ts',
+    // Anchored on the refusal's own `noteRefused`, which the pre-step hook does
+    // not have, so this is the pre-execute site.
+    from: ['  invocation.noteRefused?.();'].join('\n'),
+    to: ['  void 0;'].join('\n')
   },
   // The two capability switches (g-009): the effort layer's on/off answer, and
   // the per-tool one. Each fault disables the switch itself, not a downstream

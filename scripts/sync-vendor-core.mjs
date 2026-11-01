@@ -27,7 +27,16 @@ const checkOnly = process.argv.includes('--check');
  * explicitly because the plugin's vendor `core/` also carries the older,
  * hand-ported decision modules that predate this split.
  */
-const CORE_MODULES = ['text.ts', 'policy.ts', 'judge.ts', 'closing.ts', 'evidence.ts', 'prune-plan.ts', 'orchestrate.ts'];
+const CORE_MODULES = [
+  'text.ts',
+  'policy.ts',
+  'judge.ts',
+  'closing.ts',
+  'evidence.ts',
+  'prune-plan.ts',
+  'orchestrate.ts',
+  'orchestrate-stagnation.ts'
+];
 const PORT_DIR = 'ports';
 
 /** Read one file as UTF-8, or undefined when it does not exist. */
