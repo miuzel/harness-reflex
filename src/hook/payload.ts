@@ -2,20 +2,33 @@
  * The payload normalizer: the one place a host's stdin vocabulary is mapped onto
  * the fields `HookDecision` reads.
  *
- * The two vocabularies overlap almost entirely — the hosts speak
- * `{session_id, tool_name, tool_input, tool_use_id, tool_response}`, which is
- * exactly what the decision layer wants — so this function's real job is the
- * handful of places they differ:
+ * Every host speaks `{session_id, tool_name, tool_input, tool_use_id,
+ * tool_response}`, which is already the decision's vocabulary, so this
+ * function's real job is the handful of places the hosts differ:
  *
- * 1. **Subagent identity.** Claude's `agent_id` is what the closing decision keys
- *    on; a host may spell it `agent_id` or `subagent_id`, so both fold into
+ * 1. **Subagent identity.** Claude's `agent_id` is what the closing decision
+ *    keys on; a host may spell it `agent_id` or `subagent_id`, so both fold into
  *    `agent_id` with the explicit one winning.
- * 2. **Extra host context** (`turn_id`, `cwd`, `model`, `permission_mode`,
- *    `transcript_path`) is passed through untouched. The decision ignores it, but
- *    dropping it would make the audit ledger less useful than the host.
- * 3. **Tool result shape.** A host may send `tool_response` as an object with
- *    `content`/`output`; the decision's `toolResponseText` already understands
- *    those, so the value is forwarded as-is rather than flattened here.
+ * 2. **The event name.** A host may repeat which event it fired inside the
+ *    payload (`hook_event_name`); keeping it means an audit line names the event
+ *    the host actually fired rather than only our subcommand spelling.
+ * 3. **The tool call id.** Kimi names a call `tool_call_id` where Claude says
+ *    `tool_use_id`. Both fold onto `tool_use_id`, because that field is the
+ *    PreToolUse dedupe key: without it two *different* calls of the same command
+ *    would look like a replay and the stagnation count would never advance.
+ * 4. **The tool output.** Kimi's PostToolUse carries the text as a `tool_output`
+ *    string (the host truncates it to 2000 characters); Claude carries
+ *    `tool_response`. When only the Kimi spelling is present it is forwarded
+ *    under `tool_response`, which {@link toolResponseText} reads as a plain
+ *    string. That is what lets the ledger record a prune candidate at all; Kimi
+ *    treats PostToolUse as observation-only, so the replacement still does not
+ *    reach the model (documented in the package README).
+ * 5. **Host-only context** (`turn_id`, `cwd`, `model`, `permission_mode`,
+ *    `transcript_path`, `prompt`, `client_type`, `session_title`) is passed
+ *    through untouched. The decision ignores it, but dropping it would make the
+ *    audit ledger less useful than the host it describes. `turn_id` deliberately
+ *    does *not* reach the decision: the decision counts turns from its own
+ *    ledger, so a host counter there would double-count.
  *
  * `argv` is never consulted. Codex does not forward handler `args` (measured: a
  * handler declared with `args: ["session-start"]` runs with `argv = []`), so
@@ -24,7 +37,8 @@
  * The function is deliberately **total and additive**: it never throws and never
  * invents a field, so applying it to a payload that is already in the decision's
  * vocabulary is a no-op. That is what lets {@link runHook} run it for every host
- * without changing any existing behavior.
+ * without changing any existing behavior — and why the Claude Code fixtures keep
+ * asserting byte-identical output after it was introduced.
  *
  * @module hook/payload
  */
@@ -53,7 +67,9 @@ const PASS_THROUGH_FIELDS = [
   'permission_mode',
   'transcript_path',
   'prompt',
-  'hook_event_name'
+  'hook_event_name',
+  'client_type',
+  'session_title'
 ] as const;
 
 /**
@@ -74,20 +90,33 @@ export function normalizeHookPayload(payload: Record<string, unknown>): Normaliz
   const toolInput = obj(payload.tool_input);
   if (toolInput) normalized.tool_input = toolInput;
 
-  const toolUseId = str(payload.tool_use_id);
+  // A host may name the call `tool_call_id`; fold it onto the dedupe key field.
+  const toolUseId = str(payload.tool_use_id) ?? str(payload.tool_call_id);
   if (toolUseId) normalized.tool_use_id = toolUseId;
 
-  if (payload.tool_response !== undefined) normalized.tool_response = payload.tool_response;
+  // The result arrives either as an object (Claude) or as plain text under
+  // another name (Kimi's `tool_output`); the decision reads both spellings.
+  if (payload.tool_response !== undefined) {
+    normalized.tool_response = payload.tool_response;
+  } else {
+    const toolOutput = str(payload.tool_output);
+    if (toolOutput) normalized.tool_response = toolOutput;
+  }
 
   // Subagent identity, under either spelling, folded to Claude's field name.
   const agentId = str(payload.agent_id) ?? str(payload.subagent_id);
   if (agentId) normalized.agent_id = agentId;
 
   // A Stop retry guard must survive: without it a blocking Stop hook is retried
+  // A Stop retry guard must survive: without it a blocking Stop hook is retried
   // until the host's own cap, which the Codex probe measured as unbounded.
   if (payload.stop_hook_active !== undefined) normalized.stop_hook_active = payload.stop_hook_active;
   const lastAssistant = str(payload.last_assistant_message);
   if (lastAssistant) normalized.last_assistant_message = lastAssistant;
+  // A failure payload may name the error; accept the spelling without
+  // overwriting a field the host already set.
+  const error = str(payload.error);
+  if (error) normalized.error = error;
 
   const source = str(payload.source);
   if (source) normalized.source = source;

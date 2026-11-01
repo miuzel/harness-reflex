@@ -1,0 +1,68 @@
+# harness-reflex hooks for Kimi Code CLI
+#
+# Paste this whole file into the user-level config, keeping the `[[hooks]]`
+# entries:  `~/.kimi-code/config.toml`  (or `$KIMI_CODE_HOME/config.toml`).
+# Kimi Code reads hook rules ONLY from that user-level file (plus local
+# plugins); there is no project-level hook file, so this fragment is
+# user-scoped by design.
+#
+# Contract source (see docs/contract-sources.md for the full citation):
+# https://moonshotai.github.io/kimi-code/en/customization/hooks
+#
+# Two host rules shape every entry below:
+#   1. A `[[hooks]]` table accepts EXACTLY four fields: event, matcher, command,
+#      timeout. Any extra field makes the whole config file fail to load.
+#   2. `timeout` is in SECONDS (1-600, default 30), while the harness-reflex
+#      event budgets are in milliseconds. Each timeout here is the design's
+#      host timeout rounded UP to whole seconds, so the hook is never cut off
+#      before its own internal deadline.
+#
+# Why these events are wired the way they are (all verified against the host,
+# see docs/contract-sources.md):
+#   - PreToolUse is a real veto: the host reads
+#     `hookSpecificOutput.permissionDecision == "deny"`, which is exactly what
+#     `harness-reflex hook pretooluse` emits. Wired directly.
+#   - Stop is a real block, but the host only accepts exit code 2 (stderr is the
+#     reason) or a permissionDecision deny document. The harness-reflex Stop
+#     contract is `{"decision":"block","reason":...}`, which the host's
+#     `HookJsonOutputSchema` does not read, so the bundled shim converts our own
+#     JSON into exit 2. No extra JS process: sh plus the one CLI call.
+#   - PostToolUse / PostToolUseFailure / SubagentStop / SessionStart /
+#     SessionEnd are observation-only events in Kimi Code: the host ignores
+#     their return values, so pruning and failure corrections are recorded in
+#     the ledger but cannot change what the model sees. See README.md.
+
+[[hooks]]
+event = "PreToolUse"
+command = "harness-reflex hook pretooluse"
+timeout = 1
+
+[[hooks]]
+event = "PostToolUse"
+command = "harness-reflex hook posttooluse"
+timeout = 2
+
+[[hooks]]
+event = "PostToolUseFailure"
+command = "harness-reflex hook postfailure"
+timeout = 1
+
+[[hooks]]
+event = "Stop"
+command = "sh ~/.kimi-code/hooks/reflex-stop-exit2.sh"
+timeout = 2
+
+[[hooks]]
+event = "SubagentStop"
+command = "harness-reflex hook substop"
+timeout = 2
+
+[[hooks]]
+event = "SessionStart"
+command = "harness-reflex hook sessionstart"
+timeout = 2
+
+[[hooks]]
+event = "SessionEnd"
+command = "harness-reflex hook sessionend"
+timeout = 2
