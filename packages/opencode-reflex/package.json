@@ -1,6 +1,6 @@
 {
   "name": "harness-reflex-opencode",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "OpenCode plugin wiring: in-process tool interception, pruning and session events on top of the harness-reflex decision runtime, plus the MCP config.",

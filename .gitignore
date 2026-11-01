@@ -20,3 +20,6 @@ release/release-report.json
 # the declaration files, so the shared tsconfig is ignored here explicitly.
 packages/claude-reflex/.claude-plugin/types/tsconfig.json
 packages/claude-reflex/tsconfig.json
+
+# release/RELEASE-*.artifacts.md: machine-generated manifest, rebuilt by release-pack
+release/*.artifacts.md

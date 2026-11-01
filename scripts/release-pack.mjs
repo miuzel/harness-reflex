@@ -116,8 +116,43 @@ for (const [label, sourceDir, products] of [
   check(`${label}: the build is newer than the sources`, oldest >= newest(sourceDir), `run npm run build:all before packing`);
 }
 
-fs.rmSync(releaseDir, { recursive: true, force: true });
+// Clearing `release/` must not be a wholesale `rmSync`: that directory is not
+// purely generated. The tarballs, SHA256SUMS and release-report.json are build
+// output (and gitignored), but a release note whose artifacts have been
+// published is the only durable record of what shipped, so it is committed.
+// Remove only this run's own build output and leave older notes in place, so a
+// 0.3.0 pack does not erase the record of 0.1.0.
+const generatedNote = path.join(releaseDir, `RELEASE-${root.version}.md`);
+if (!keepScratch) {
+  // Before the run: a note for *this* version that git already tracks is the
+  // record of a release that was published. The pack would overwrite it with a
+  // freshly generated one, and nothing downstream would notice.
+  const tracked = run('git', ['ls-files', '--error-unmatch', path.relative(repoRoot, generatedNote)], { allowFailure: true });
+  if (tracked.status === 0 && !process.argv.includes('--overwrite-note')) {
+    throw new Error(
+      `${path.relative(repoRoot, generatedNote)} is tracked by git: it records an already-published release.\n` +
+        'Bump package.json to a new version, or pass --overwrite-note if that release was retracted.'
+    );
+  }
+}
 fs.mkdirSync(releaseDir, { recursive: true });
+// The generated note always starts with this exact title; anything else at that
+// path is someone's prose (why it shipped, what is known to be broken) and must
+// not be replaced by a checksum table. Decide before the cleanup below, which
+// would otherwise delete the very file this is asking about.
+const existingNote = fs.existsSync(generatedNote) ? fs.readFileSync(generatedNote, 'utf8') : '';
+const handWrittenNote = existingNote.length > 0 && !existingNote.startsWith('# harness-reflex / dsh-harness-reflex');
+if (!keepScratch) {
+  const currentNote = path.basename(generatedNote);
+  for (const name of fs.readdirSync(releaseDir)) {
+    // Only this run's own build output is cleared. A note is regenerated per
+    // version, so `RELEASE-<current>.md` counts as output — but every other
+    // `RELEASE-<older>.md` is history and stays. Matching the note *pattern*
+    // instead of the current version is what deleted 0.1.0's note once.
+    const isBuildOutput = name.endsWith('.tgz') || name === 'SHA256SUMS' || name === 'release-report.json' || name === currentNote;
+    if (isBuildOutput && !(handWrittenNote && name === currentNote)) fs.rmSync(path.join(releaseDir, name), { force: true });
+  }
+}
 fs.mkdirSync(npmCache, { recursive: true });
 
 /** The filename `npm pack --json` reported (npm 12 keys the object by package name). */
@@ -351,6 +386,79 @@ check(
 
 //#endregion
 
+// The harness packages are configuration bundles, not libraries: each is a
+// handful of files a user copies into a host's config home. They are packed and
+// audited too, because their failure mode is the quietest one — a `files`
+// allow-list that omits `hooks/` or `plugin/` still packs "successfully" and
+// produces a tarball that silently does nothing when installed.
+//
+// The exact entry list is the contract here, not a presence check: each package
+// declares the files it must ship, and anything else is a failure, so a stray
+// `test/` or an unshipped `docs/` cannot drift in unnoticed.
+const HARNESS_PACKAGES = [
+  {
+    dir: 'codex-reflex',
+    required: ['hooks.json', 'config.toml', 'README.md'],
+    // Not `pi`: no build output, no executable — config only.
+    expected: ['README.md', 'config.toml', 'hooks.json', 'package.json']
+  },
+  {
+    dir: 'kimi-reflex',
+    required: ['hooks.toml', 'hooks/reflex-stop-exit2.sh', 'mcp.json', 'README.md', 'docs/contract-sources.md'],
+    expected: ['README.md', 'docs/contract-sources.md', 'hooks.toml', 'hooks/reflex-stop-exit2.sh', 'mcp.json', 'package.json']
+  },
+  {
+    dir: 'opencode-reflex',
+    required: ['opencode.json', 'plugin/reflex.js', 'README.md', 'docs/contract-sources.md'],
+    expected: ['README.md', 'docs/contract-sources.md', 'opencode.json', 'package.json', 'plugin/reflex.js']
+  },
+  {
+    dir: 'pi-reflex',
+    required: ['README.md', 'src/index.ts', 'src/pi-adapter.ts', 'src/tools.ts', 'scripts/closing-check.mjs', 'scripts/e2e.mjs', 'package.json'],
+    // `pi` loads `src/index.ts` itself, so the source IS the deliverable; the
+    // build output ships alongside it for the type declarations only.
+    expectations: 'pi ships its TypeScript sources plus the scripts its package.json invokes',
+    allowExtra: (file) => file.startsWith('dist/')
+  },
+  {
+    dir: 'claude-reflex',
+    required: ['.claude-plugin/plugin.json', '.claude-plugin/icon.png', '.mcp.json', 'hooks/hooks.json', 'hooks/register.js', 'README.md'],
+    expected: ['.claude-plugin/icon.png', '.claude-plugin/plugin.json', '.mcp.json', 'README.md', 'hooks/hooks.json', 'hooks/register.js', 'package.json']
+  }
+];
+
+const harnessTarballs = [];
+for (const harness of HARNESS_PACKAGES) {
+  const dir = path.join(repoRoot, 'packages', harness.dir);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  const packed = run('npm', ['pack', '--json', '--pack-destination', releaseDir], { cwd: dir });
+  const tarball = path.join(releaseDir, packedFilename(packed.stdout));
+  harnessTarballs.push(tarball);
+  const label = harness.dir;
+  check(`${label}: tarball exists`, fs.existsSync(tarball), path.basename(tarball));
+  check(`${label}: the packed version matches package.json`, path.basename(tarball).includes(manifest.version), path.basename(tarball));
+  const shipped = entries(tarball).map((entry) => entry.replace(/^package\//, '')).sort();
+  const missing = harness.required.filter((file) => !shipped.includes(file));
+  check(`${label}: every required file is present`, missing.length === 0, missing.join(', ') || `${String(harness.required.length)} files`);
+  const forbidden = shipped.filter((file) => FORBIDDEN.some((rule) => rule.test(file)));
+  check(`${label}: no node_modules, test build or temporary directory shipped`, forbidden.length === 0, forbidden.slice(0, 3).join(', '));
+  if (harness.expected !== undefined) {
+    const unexpected = shipped.filter((file) => !harness.expected.includes(file));
+    const absent = harness.expected.filter((file) => !shipped.includes(file));
+    check(
+      `${label}: the entry list is exactly the declared one`,
+      unexpected.length === 0 && absent.length === 0,
+      [...absent.map((file) => `missing ${file}`), ...unexpected.map((file) => `extra ${file}`)].slice(0, 4).join(', ') ||
+        `${String(shipped.length)} entries`
+    );
+  } else if (harness.allowExtra !== undefined) {
+    const unexpected = shipped.filter((file) => !harness.required.includes(file) && !harness.allowExtra(file));
+    const tests = shipped.filter((file) => /\.test\.[cm]?[jt]s$/.test(file));
+    check(`${label}: only declared sources, scripts and declarations ship`, unexpected.length === 0, unexpected.slice(0, 4).join(', ') || `${String(shipped.length)} entries`);
+    check(`${label}: no test source ships`, tests.length === 0, tests.slice(0, 3).join(', '));
+  }
+}
+
 //#region install smokes
 
 const smoke = { root: {}, plugin: {} };
@@ -455,7 +563,7 @@ if (!skipInstall) {
 //#region report
 
 const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const artifacts = [rootTarball, pluginTarball].map((file) => ({
+const artifacts = [rootTarball, pluginTarball, ...harnessTarballs].map((file) => ({
   file: path.basename(file),
   bytes: fs.statSync(file).size,
   entries: entries(file).length,
@@ -529,7 +637,17 @@ named import and the stdio MCP \`tools/list\` handshake are exercised.
 Full checklist: \`release/release-report.json\`. Manual: [\`USER_GUIDE.md\`](../USER_GUIDE.md)
 (English: [\`docs/USER_GUIDE.en.md\`](../docs/USER_GUIDE.en.md)).
 `;
-fs.writeFileSync(path.join(releaseDir, `RELEASE-${root.version}.md`), notes, 'utf8');
+// A hand-written note is the release's own prose (why it shipped, what is known
+// to be broken); the generated text below is a machine artifact list. When the
+// path already holds prose, the artifact list goes to a sidecar instead of
+// overwriting it — silently replacing a release note with a checksum table is
+// exactly the kind of quiet loss this script exists to prevent.
+const noteBody = notes;
+const noteTarget = handWrittenNote ? path.join(releaseDir, `RELEASE-${root.version}.artifacts.md`) : generatedNote;
+fs.writeFileSync(noteTarget, noteBody, 'utf8');
+if (handWrittenNote) {
+  console.log(`release-pack: kept the hand-written ${path.basename(generatedNote)}; artifacts written to ${path.basename(noteTarget)}`);
+}
 
 console.log(`\nrelease-pack: ${artifacts.map((artifact) => `${artifact.file} (${String(artifact.entries)} entries, ${String(Math.round(artifact.bytes / 1024))} KiB)`).join(' + ')}`);
 console.log(`release-pack: ${String(checks.length - failures.length)}/${String(checks.length)} checks passed`);

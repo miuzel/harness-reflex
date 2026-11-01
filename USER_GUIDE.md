@@ -1,4 +1,4 @@
-# Harness Reflex 使用说明（v0.1.0）
+# Harness Reflex 使用说明（v0.3.0）
 
 > 本文档是 **`dsh-harness-reflex` 插件** 与 **`harness-reflex` 核心包** 的完整使用手册。
 > 同一份内容会内嵌进 `packages/dsh-harness-reflex/client.js`，可在 DSH 设置面板的
@@ -84,7 +84,7 @@ node dist/cli/index.js setup all      # 或 claude | codex | agy
 
 # 3) 以 DSH 插件方式安装（进程内集成，推荐）
 #    发布 tarball：同版本重装必须 --force；开发期也可直接装目录
-dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.3.0.tgz
 ```
 
 `npm run build:all` 的每一步都是必需的：
@@ -490,6 +490,32 @@ DSH 插件侧只注册 **5 个可开关的能力（默认 4 个）**——另外
   或非布尔值会在安装时被校验器拒绝，而不是被静默忽略。把 5 项全部写 `false` 后本
   插件不注册任何工具（路由、推理强度与干预钩子不受影响）。
 
+### 9.1 五个 Harness 的能力差异
+
+同一套决策引擎接进了五个宿主，但**能力并不对等**：宿主没给出对应钩子时，该能力就是做不到。
+选宿主之前先看这张表（「是否在模型侧真实生效」才是关键，不是「有没有接线」）：
+
+| 能力 | Claude Code | DSH | Codex CLI | pi | Kimi Code | OpenCode |
+|---|---|---|---|---|---|---|
+| 剪枝（改写工具输出） | ✅ | ✅ 自动 | ⚠️ 仅 MCP 工具输出，**shell 输出改不了** | ✅ | ❌ 只记账不生效 | ✅ |
+| 停滞拦截 | ✅ | ✅ 自动 | ✅ | ✅ | ✅ | ✅ |
+| 收尾阻断 | ✅ 真阻断 | ✅ 真阻断 | ✅ | ⚠️ 只续跑一次，记 `closing-degraded-pass` | ⚠️ 需 exit-2 shim | ❌ 无法拦截 |
+| 接入形态 | hooks + MCP | 进程内插件 | hooks.json + config.toml | 进程内 TS 扩展 | hooks.toml + shim | JS 插件 |
+
+四条例外必须记住：
+
+1. **Codex**：`PostToolUse` 只接受 `updatedMCPToolOutput`，且只对 MCP 工具生效，**shell 工具输出无法改写**。
+   本机无可用模型端点，MCP 工具从未进入回合内工具清单，这一路径未真机验证。
+2. **Kimi**：`PostToolUse` / `PostToolUseFailure` / `SubagentStop` 是 observation-only，判定只进账本、
+   改变不了模型看到的内容；**剪枝只记账不生效**。`Stop` 要靠 `hooks/reflex-stop-exit2.sh` 转成 exit 2 才拦得住。
+3. **OpenCode**：宿主没有 shell 钩子机制，扩展点是 JS 插件；剪枝与停滞**生效**，但 **Stop 无法拦截**
+   （`session.idle` 不带助手文本，也无插件级否决权，只写 warn 日志）。
+4. **pi**：没有任何 API 能拒绝结束回合，`agent_before_settle` 只能请求一次续跑；矛盾未被纠正时放行并记
+   `closing-degraded-pass`，**pi 永不写 `closing-block`**。
+
+**Claude Code 与 DSH 是完整能力**。Kimi / OpenCode 的整机安装与钩子触发、Codex 的回合内 MCP 工具均未真机验证，
+复现方法见各包 README 的「Verification status」。
+
 ---
 
 ## 10. 决策账本与审计
@@ -529,9 +555,14 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | --- | --- |
 | `harness-reflex-<version>.tgz` | 根包：`dist/`、`README.md`、`docs/`、`USER_GUIDE.md`、`experiments/` |
 | `dsh-harness-reflex-<version>.tgz` | 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
-| `SHA256SUMS` | 上述两份 tarball 的 SHA-256 校验和 |
+| `harness-reflex-claude-code-<version>.tgz` | Claude Code 插件：`.claude-plugin/`、`hooks/`、`.mcp.json` |
+| `harness-reflex-codex-<version>.tgz` | Codex 配置包：`hooks.json`、`config.toml` |
+| `pi-reflex-<version>.tgz` | pi 扩展：`src/`（发布会直接跑源码）、`scripts/`、`dist/` 声明 |
+| `harness-reflex-kimi-code-<version>.tgz` | Kimi Code 配置包：`hooks.toml`、`hooks/reflex-stop-exit2.sh`、`mcp.json` |
+| `harness-reflex-opencode-<version>.tgz` | OpenCode 插件：`plugin/reflex.js`、`opencode.json` |
+| `SHA256SUMS` | 全部 tarball 的 SHA-256 校验和 |
 | `release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
-| `RELEASE-<version>.md` | 发布说明：安装命令、核验清单、内容构成 |
+| `RELEASE-<version>.md` | 由脚本生成的发布说明（机器产物；当前版本的会在每次打包时重写，**更早版本的会被保留**） |
 
 校验脚本 `scripts/release-pack.mjs` 会解压 tarball 逐个断言：必需文件齐全、
 无测试构建与临时目录、`exports`/`bin`/`dsh.bundle.patch` 目标真实存在、每个相
@@ -562,8 +593,8 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 
 ## 13. 版本与兼容性
 
-- 版本：`harness-reflex` 与 `dsh-harness-reflex` 同步发布，v0.1.0；
-- Node：`>= 18`（根包 `engines`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
+- 版本：`harness-reflex` 与 `dsh-harness-reflex` 同步发布，v0.3.0；五个宿主插件包同版本；
+- Node：`>= 18`（根包 `engines`；`pi-reflex` 为 `>= 22.19.0`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
 - 插件以 `peerDependencies` 声明 Host 契约，运行时不重复打包 Host 模块；
 - stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷；
 - DSH 插件侧的工具表面自 v0.1.0 起是 **5 个可开关能力、默认注册 4 个**

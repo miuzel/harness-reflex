@@ -1,6 +1,6 @@
 {
   "name": "pi-reflex",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "harness-reflex System One interventions and reflex_* tools for the pi coding agent: in-process TypeScript extension, zero runtime dependencies.",
   "type": "module",
   "main": "src/index.ts",
@@ -20,6 +20,8 @@
   "files": [
     "README.md",
     "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "scripts/**/*.mjs",
     "dist/**/*.js",
     "dist/**/*.js.map",
     "dist/**/*.d.ts",

@@ -1,6 +1,6 @@
 {
   "name": "dsh-harness-reflex",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "DSH Host plugin exposing the harness-reflex System One decision runtime (choice, score, route, screen, gate) as in-process reflex_* tools; pruning, stagnation detection and turn closing run as automatic interventions, and the ledger is the /reflex-ledger command.",
   "type": "module",
   "main": "dist/index.js",

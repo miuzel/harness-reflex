@@ -22,6 +22,43 @@
 
 ---
 
+## 五个 Harness 的能力差异（选型只看这张表）
+
+v0.3.0 起，同一套决策引擎接进了五个宿主。**它们的能力并不对等**——宿主没有给出对应钩子时，
+这个能力就是做不到，而不是「配置一下就好」。下表按「能力在模型侧是否真的生效」写：
+
+| 能力 | Claude Code | DSH（`dsh-harness-reflex`） | Codex CLI | pi | Kimi Code | OpenCode |
+|---|---|---|---|---|---|---|
+| 8 个 / 5 个 `reflex_*` 工具（MCP） | ✅ 8 个 MCP 工具 | ✅ 5 个可开关（默认 4） | ⚠️ 8 个 MCP 工具已声明，**本机未进回合内工具清单** | ✅ 工具集在本进程内 | ⚠️ 8 个 MCP 工具已声明，**未在真机验证** | ⚠️ 8 个 MCP 工具已声明，**未在真机验证** |
+| 停滞拦截（拒绝重复调用） | ✅ 拒绝 | ✅ 自动 | ✅ 拒绝 | ✅ 拒绝 | ✅ 拒绝 | ✅ 抛错拒绝 |
+| 结果剪枝（改写工具输出） | ✅ 生效 | ✅ 自动生效 | ⚠️ **只能改 MCP 工具输出，不能改 shell 工具输出** | ✅ 生效 | ❌ **`PostToolUse` 是 observation-only：只记账不生效** | ✅ 生效（`tool.execute.after` 替换输出） |
+| 失效纠偏 | ✅ 生效 | ✅ 自动生效 | — | ✅ 生效 | ❌ 只记账（`PostToolUseFailure` observation-only） | ❌ 宿主无工具失败钩子 |
+| 收尾核验（阻断「我完成了」） | ✅ **真阻断** | ✅ **真阻断** | ✅ 可 block | ⚠️ **只能续跑一次，从不阻断**：记为 `closing-degraded-pass`，永不记 `closing-block` | ⚠️ 需 `hooks/reflex-stop-exit2.sh` shim 转 exit 2 才能阻断 | ❌ **Stop 无法拦截**（`session.idle` 无插件级否决权，只记 warn 日志） |
+| 接入形态 | 配置 hooks + MCP | 进程内 Cordis 插件 | 配置 `hooks.json` + `config.toml` | 进程内 TS 扩展 | 配置 `hooks.toml` + shim + `mcp.json` | **JS 插件**（宿主无 shell 钩子机制） |
+
+读法：
+
+- **Claude Code / DSH 是完整能力**：六项能力全部在模型侧真实生效。
+- **Codex 的剪枝只作用于 MCP 工具输出。** 宿主的 `PostToolUse` 只接受 `updatedMCPToolOutput` 一个决定字段，
+  且只对 MCP 工具生效；**shell（`exec_command`）的结果改不了**。这不是接线缺陷，而是宿主的契约。
+  `reflex_prune` 仍可作为工具由模型自己调用。另：本机没有可用模型端点，**MCP 工具从未进入 Codex 回合内的
+  工具清单**，故「回合内剪枝」与「回合内 MCP 工具」均未真机验证。
+- **Kimi 的剪枝只记账不生效。** `PostToolUse` / `PostToolUseFailure` / `SubagentStop` 在 Kimi Code 里是
+  observation-only：宿主忽略返回值，判定仍写进账本，但改变不了模型看到的内容。只有 `PreToolUse`（拒绝）
+  和 `Stop`（**经 `hooks/reflex-stop-exit2.sh` 把我们的 `decision:"block"` JSON 转成 exit 2**）能真正干预。
+- **OpenCode 没有 shell 钩子机制**，唯一扩展点是 JS 插件（`Plugin = (input) => Promise<Hooks>`），所以它
+  拿到的是插件而不是配置片段。剪枝与停滞**在 OpenCode 上是生效的**（这是少见的非 Claude 宿主优势）；
+  但 **Stop 无法拦截**——`session.idle` 事件不带助手文本，宿主也没有插件级否决权，异议只能写进日志。
+- **pi 的收尾只会降级放行。** pi 没有任何 API 能拒绝结束一个回合；`agent_before_settle` 只能请求
+  **一次**续跑，它不能否决 settle。因此矛盾未被纠正时会放行并记 `closing-degraded-pass`——
+  **pi 永远不会写 `closing-block`**，扩展不会假装自己做到了。
+
+> ⚠️ **未验证项不要当已验证**：Kimi / OpenCode 的整机安装与钩子触发、Codex 的回合内 MCP 工具，
+> 本机都没有对应的可用宿主，均未真机验证；验证方法逐条写在各包 README 的
+> 「Verification status」小节。Claude Code 与 pi 有真机 e2e。
+
+---
+
 ## 核心特性与架构
 
 ```
@@ -127,14 +164,14 @@ node dist/cli/index.js setup agy
 
 ```bash
 # 从本仓库产物安装；同版本重装必须加 --force（pnpm 不会静默覆盖同版本）
-dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.3.0.tgz
 
 # 首次发布到 npm 后（包名 dsh-harness-reflex）：
-dsh plugin --profile web add dsh-harness-reflex@0.1.0
+dsh plugin --profile web add dsh-harness-reflex@0.3.0
 ```
 
 安装后重启 / 重载 `dsh`，设置页会出现「Reflex 决策运行时」面板；`/dsh-reflex/api/health`
-应返回 `{"ok":true,"name":"dsh-reflex","version":"0.1.0"}`。
+应返回 `{"ok":true,"name":"dsh-reflex","version":"0.3.0"}`。
 
 ### 5. 配置 System One 决策后端（可选）
 默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
