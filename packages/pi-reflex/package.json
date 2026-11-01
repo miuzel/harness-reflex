@@ -1,0 +1,57 @@
+{
+  "name": "pi-reflex",
+  "version": "0.1.0",
+  "description": "harness-reflex System One interventions and reflex_* tools for the pi coding agent: in-process TypeScript extension, zero runtime dependencies.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "dist/packages/pi-reflex/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/packages/pi-reflex/src/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "README.md",
+    "src/**/*.ts",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.js.map",
+    "!dist/**/*.test.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"dist/packages/pi-reflex/src/**/*.test.js\"",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package",
+    "harness-reflex",
+    "context-pruning",
+    "stagnation-detection"
+  ],
+  "author": "miuzel",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}

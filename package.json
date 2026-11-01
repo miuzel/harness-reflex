@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "build:all": "npm run build && node scripts/sync-vendor-core.mjs && node scripts/embed-user-guide.mjs && node scripts/link-dsh-deps.mjs && tsc -p packages/dsh-harness-reflex/tsconfig.json && npm run build:plugin-client",
+    "build:all": "npm run build && node scripts/sync-vendor-core.mjs && node scripts/embed-user-guide.mjs && node scripts/link-dsh-deps.mjs && tsc -p packages/dsh-harness-reflex/tsconfig.json && npm run build:plugin-client && npm run build:pi",
     "sync:core": "node scripts/sync-vendor-core.mjs",
     "build:plugin-client": "node scripts/embed-user-guide.mjs && tsc -p packages/dsh-harness-reflex/tsconfig.client.json && node packages/dsh-harness-reflex/dist/client-bundle.js packages/dsh-harness-reflex",
     "watch": "tsc --watch",
@@ -49,10 +49,13 @@
     "test:plugin": "node --test \"packages/dsh-harness-reflex/dist/**/*.test.js\"",
     "test:claude-plugin": "node --test \"packages/claude-reflex/test/**/*.test.mjs\"",
     "test:codex-plugin": "node --test \"packages/codex-reflex/test/**/*.test.mjs\"",
-    "test:all": "npm run build:all && npm run test && npm run test:plugin && npm run test:claude-plugin && npm run test:codex-plugin",
+    "test:all": "npm run build:all && npm run test && npm run test:plugin && npm run test:claude-plugin && npm run test:codex-plugin && npm run test:pi",
     "test:mutation": "node packages/dsh-harness-reflex/scripts/mutation-check.mjs",
     "release:pack": "node scripts/release-pack.mjs",
-    "release": "npm run test:all && npm run test:mutation && npm run release:pack"
+    "release": "npm run test:all && npm run test:mutation && npm run release:pack",
+    "build:pi": "tsc -p packages/pi-reflex/tsconfig.json",
+    "test:pi": "node --test \"packages/pi-reflex/dist/packages/pi-reflex/src/**/*.test.js\"",
+    "e2e:pi": "node packages/pi-reflex/scripts/e2e.mjs"
   },
   "keywords": [
     "jev",
