@@ -551,6 +551,26 @@ export class FileStateStore {
     return { retained: true, evicted };
   }
 
+  /**
+   * Read one retained payload back.
+   *
+   * The locator a pruned result carries names this record; reading it is what
+   * makes the reduction reversible, so a missing or unreadable file answers
+   * `undefined` instead of throwing into a decision path.
+   * @param sessionId - the session.
+   * @param digest - content digest (the file stem).
+   * @returns the verbatim payload, or `undefined`.
+   */
+  readOriginal(sessionId: string, digest: string): string | undefined {
+    try {
+      const paths = this.sessionPaths(sessionId);
+      if (!/^[0-9a-f]{8,64}$/.test(digest)) return undefined;
+      return fs.readFileSync(path.join(paths.originals, `${digest}.txt`), 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Enforce one session's original cap without retaining anything new. */
   gcOriginals(sessionId: string): string[] {
     const paths = this.sessionPaths(sessionId);
