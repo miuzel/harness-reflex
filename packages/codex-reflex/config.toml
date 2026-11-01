@@ -1,0 +1,25 @@
+# harness-reflex MCP server for Codex CLI.
+#
+# Codex reads MCP servers from this file ($CODEX_HOME/config.toml). The
+# `.codex/config.json` file written by `harness-reflex setup codex` is a legacy
+# artifact and is not read by Codex.
+#
+# Replace the `args` path with the absolute path to your installed
+# `dist/cli/index.js`, or use the `harness-reflex` bin name if it is on PATH:
+#
+#   [mcp_servers.harness-reflex]
+#   command = "harness-reflex"
+#   args = ["mcp"]
+
+[mcp_servers.harness-reflex]
+command = "node"
+args = ["/absolute/path/to/harness-reflex/dist/cli/index.js", "mcp"]
+startup_timeout_sec = 20
+
+# The mock backend needs no credentials. To use a real System One endpoint,
+# uncomment and fill these in — they are the same variables the CLI reads.
+#
+# [mcp_servers.harness-reflex.env]
+# SYSTEM_ONE_BACKEND = "jev"
+# SYSTEM_ONE_API_KEY = "…"
+# SYSTEM_ONE_BASE_URL = "…"

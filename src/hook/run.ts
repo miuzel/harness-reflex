@@ -23,10 +23,11 @@
  * @module hook/run
  */
 import { createDecisionBackend } from '../backend/factory.js';
+import { normalizeHookPayload } from './payload.js';
 import { clockFromEnv, type HookClock } from '../state/clock.js';
 import { FileStateStore } from '../state/file-store.js';
 import { assertSupportedPlatform, resolveStateRoot } from '../state/paths.js';
-import { emptyHookOutput, parseHookEvent, type HookEvent, type HookMode, type HookOutput } from './contract.js';
+import { emptyHookOutput, parseHookEventName, type HookEvent, type HookMode, type HookOutput } from './contract.js';
 import {
   DEFAULT_HOOK_CONFIG,
   HookDecision,
@@ -127,7 +128,19 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     stderr((error as Error).message);
     return { output: null, code: 2, error: 'unsupported-platform' };
   }
-  const event = parseHookEvent(eventArg);
+  const parsedEvent = parseHookEventName(eventArg);
+  if (parsedEvent.kind === 'codex-only') {
+    // Recognized, but this runtime has nothing to say about it. Read stdin so the
+    // host does not see a broken pipe, then answer the only safe thing: no
+    // instruction. No store is touched, so a stream of these costs nothing.
+    try {
+      await (options.readStdin ?? (() => readStdinCapped(process.stdin)))();
+    } catch {
+      // A broken stdin on a no-op event is still a no-op.
+    }
+    return { output: emptyHookOutput(), code: 0 };
+  }
+  const event = parsedEvent.kind === 'canonical' ? parsedEvent.event : undefined;
   if (!event) {
     stderr(`harness-reflex hook: unknown event "${eventArg ?? ''}" (expected one of pretooluse, posttooluse, postfailure, stop, substop, sessionstart, sessionend)`);
     return { output: emptyHookOutput(), code: 0, error: 'unknown-event' };
@@ -156,15 +169,24 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     stderr(`harness-reflex hook: malformed stdin JSON: ${(error as Error).message}`);
     return { output: emptyHookOutput(), code: 0, error: 'bad-json' };
   }
+  // Fold the host's field spellings into the decision's vocabulary. The
+  // normalizer is total and additive, so this is a no-op for a payload that is
+  // already in the expected shape (the Claude Code path is unchanged).
+  payload = normalizeHookPayload(payload) as Record<string, unknown>;
   const sessionId = stringField(payload.session_id);
   if (!sessionId) {
     stderr('harness-reflex hook: stdin JSON has no session_id; failing open');
     return { output: emptyHookOutput(), code: 0, error: 'missing-session-id' };
   }
   const config: HookConfig = { ...DEFAULT_HOOK_CONFIG, ...options.config };
+  // The audit ledger records which harness produced a decision. `cc` is the
+  // historical default; a second host tags itself through
+  // `HARNESS_REFLEX_HARNESS` so the ledger is not misleading about its origin.
+  // The default is unchanged, so existing sessions keep their directory names.
+  const harness = stringField(env.HARNESS_REFLEX_HARNESS);
   // Session boundaries are counted by GC; they carry no decision and no ledger.
   if (event === 'sessionstart' || event === 'sessionend') {
-    const store = options.store ?? new FileStateStore({ root: resolveStateRoot(env), clock });
+    const store = options.store ?? new FileStateStore({ root: resolveStateRoot(env), clock, harness });
     const backend = options.backend ?? createDecisionBackend();
     const runtime = new HookDecision({ store, backend, config, modes, sessionId, clock, stderr });
     const timeoutMs = config.eventBudgets[event].budgetMs;
@@ -175,7 +197,7 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     );
     return { output: output ?? emptyHookOutput(), code: 0 };
   }
-  const store = options.store ?? new FileStateStore({ root: resolveStateRoot(env), clock });
+  const store = options.store ?? new FileStateStore({ root: resolveStateRoot(env), clock, harness });
   const backend = options.backend ?? createDecisionBackend();
   store.ensureSession(sessionId, mode);
   const key = dedupeKeyFor(event, payload);
