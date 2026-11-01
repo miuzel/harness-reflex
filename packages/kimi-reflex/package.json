@@ -1,0 +1,14 @@
+{
+  "name": "harness-reflex-kimi-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kimi Code CLI wiring: config.toml lifecycle hooks, a Stop exit-2 shim and the MCP config for the harness-reflex decision runtime.",
+  "files": [
+    "hooks.toml",
+    "hooks/",
+    "mcp.json",
+    "README.md",
+    "docs/"
+  ]
+}

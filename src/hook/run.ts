@@ -27,6 +27,7 @@ import { clockFromEnv, type HookClock } from '../state/clock.js';
 import { FileStateStore } from '../state/file-store.js';
 import { assertSupportedPlatform, resolveStateRoot } from '../state/paths.js';
 import { emptyHookOutput, parseHookEvent, type HookEvent, type HookMode, type HookOutput } from './contract.js';
+import { normalizeHookPayload } from './payload.js';
 import {
   DEFAULT_HOOK_CONFIG,
   HookDecision,
@@ -156,6 +157,10 @@ export async function runHook(eventArg: string | undefined, options: HookRunOpti
     stderr(`harness-reflex hook: malformed stdin JSON: ${(error as Error).message}`);
     return { output: emptyHookOutput(), code: 0, error: 'bad-json' };
   }
+  // Fold the host's field spellings into the decision's vocabulary. The
+  // normalizer is total and additive, so this is a no-op for a payload that is
+  // already in the expected shape (the Claude Code path is unchanged).
+  payload = normalizeHookPayload(payload) as Record<string, unknown>;
   const sessionId = stringField(payload.session_id);
   if (!sessionId) {
     stderr('harness-reflex hook: stdin JSON has no session_id; failing open');
