@@ -48,7 +48,8 @@
     "test": "node --test \"dist/**/*.test.js\"",
     "test:plugin": "node --test \"packages/dsh-harness-reflex/dist/**/*.test.js\"",
     "test:claude-plugin": "node --test \"packages/claude-reflex/test/**/*.test.mjs\"",
-    "test:all": "npm run build:all && npm run test && npm run test:plugin && npm run test:claude-plugin",
+    "test:codex-plugin": "node --test \"packages/codex-reflex/test/**/*.test.mjs\"",
+    "test:all": "npm run build:all && npm run test && npm run test:plugin && npm run test:claude-plugin && npm run test:codex-plugin",
     "test:mutation": "node packages/dsh-harness-reflex/scripts/mutation-check.mjs",
     "release:pack": "node scripts/release-pack.mjs",
     "release": "npm run test:all && npm run test:mutation && npm run release:pack"

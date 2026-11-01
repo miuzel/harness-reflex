@@ -1,0 +1,12 @@
+{
+  "name": "harness-reflex-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex CLI plugin: hooks.json and MCP config for the harness-reflex decision runtime.",
+  "files": [
+    "hooks.json",
+    "config.toml",
+    "README.md"
+  ]
+}
