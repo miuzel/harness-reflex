@@ -112,6 +112,7 @@ import {
   spendJudgment
 } from './vendor/harness-reflex/core/policy.js';
 import { applyPruneFloor } from './vendor/harness-reflex/core/prune-plan.js';
+import { orchestratePrune, type PruneFeedbackFacts } from './vendor/harness-reflex/core/orchestrate.js';
 import { clip, digestOf, estimateTokens, hasTextBlock, textOfContent } from './vendor/harness-reflex/core/text.js';
 
 // The decision primitives keep their historic import path: a caller that already
@@ -1402,361 +1403,94 @@ export class InterventionEngine {
     text: string,
     started: number
   ): Promise<PostToolDecision> {
-    const capability = this.modeOf('prune');
-    if (capability === 'off') return downstream;
-    if (downstream.kind === 'block') return downstream;
-    // The payload identity is taken once, before any branch can refuse it: every
-    // skip below names the payload it was about, so the log answers "which result
-    // was not pruned" as well as "why".
-    const payloadDetail = prunePayloadDetail(text);
-    if ('value' in downstream && downstream.value !== undefined) {
-      // A value-shaped accept replaced the payload wholesale; nothing here knows
-      // what its text is, so nothing here may touch it.
-      this.#skip('value-shaped-accept', { capability: 'prune', state, agent: exec.agent });
-      return downstream;
-    }
-    if (!hasTextBlock(effective)) {
-      // Nothing to replace, and nothing that could be reported as replaced. Asked
-      // before the size checks: an image-only payload is not "small", it is out of
-      // scope, and the skip reason should say so.
-      this.#skip('no-text-block', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    if (text.length < this.#pruneThreshold) {
-      this.#skip('below-threshold', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    if ((text.match(/\n/g)?.length ?? 0) < PRUNE_MIN_LINES) {
-      // Not line-oriented output: the judge is asked to extract diagnostics, and a
-      // payload with no lines does not have any to extract. Rewriting it would
-      // destroy semantic data rather than compress a trace.
-      this.#skip('unsupported-payload', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    if (text.length > MAX_RETAINED_CHARS) {
-      // Retention is a precondition of replacing anything, so an oversized payload
-      // is refused *before* it is judged or reported as a saving.
-      this.#skip('retention-too-large', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    const retain = this.#retain;
-    if (!retain) {
-      // Without a retention sink nothing may be replaced: the module will not
-      // destroy the only copy of a result it cannot give back.
-      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    if (!actionWithinBudget(state, this.#config)) {
-      // A reduction is an intervention like a refusal or a correction, so it draws
-      // on the same per-turn allowance — and it is asked here, before a judgment is
-      // bought, so a full turn costs nothing to refuse. Both modes are checked:
-      // observe has to plan no more actions than active could take, including the
-      // ones the memo would have answered for free.
-      this.#skip('intervention-cap', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-      return downstream;
-    }
-    // Whether *this* agent can retain is the sink's answer, not this module's
-    // guess: the production sink refuses a session-less agent by returning nothing,
-    // which lands on the same fail-open path below.
-    const session = sessionOf(exec.agent);
-
-    const digest = digestOf(text);
-    // The locator is derived from the payload, and the production sink names the
-    // retained copy the same way — which is what makes the plan's size the size of
-    // the form active will install, in both modes.
-    const locator = pruneLocator(digest);
-    const memo = this.#memoGet(state, digest);
-    // A memo hit answers the question the judgment already answered; only a mode
-    // that needs the reduction's *text* has to ask for it again.
-    const needsCandidate = capability === 'active' && (memo?.text === undefined);
-    if (!memo || needsCandidate) {
-      const skip = spendJudgment(state, this.#config);
-      if (skip) {
-        this.#skip(skip, { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });
-        return downstream;
-      }
-    }
-
-    const response: PruneResponse =
-      memo && !needsCandidate
-        ? {
-            processedOutput: memo.text ?? text,
-            originalChars: memo.originalChars,
-            prunedChars: memo.prunedChars,
-            estimatedTokensSaved: memo.tokensSaved,
-            reductionPercentage: reductionPercentage(memo.originalChars, memo.prunedChars),
-            shadow: memo.text === undefined,
-            latencyMs: 0,
-            ...(memo.diagnostics ?? {})
-          }
-        // Both modes take the *real* candidate, and both ask for it measure-only.
-        // `shadow` only decides whether the backend hands its text back, while
-        // `prunedChars` is that candidate's size either way; the text is what the floor
-        // composes from, so a withheld measurement would not be the same input at all.
-        // Whether the payload is installed is decided here, by the floor, *after* the
-        // service has written its ledger entry — so this path never lets the service
-        // declare a saving: it measures (`tokensSaved` 0, the candidate's size in
-        // `details.potentialTokensSaved`) and the intervention record carries what was
-        // really installed. The explicit `reflex_prune` tool, which does hand the
-        // reduced text back to its caller, keeps booking the reduction it returns.
-        : await this.#prune.prune(text, {
+    // The decision itself is the shared layer's (see `core/orchestrate.ts`); this
+    // method only answers the questions this Host alone can answer. Everything
+    // that stays here is a DSH fact: the agent's state slot, the session log
+    // sink, the content-block shape, and the wording the panel shows.
+    const outcome = await orchestratePrune(
+      {
+        callId: exec.callId,
+        tool: exec.name,
+        text,
+        blockedByDownstream: downstream.kind === 'block',
+        valueShapedAccept: 'value' in downstream && downstream.value !== undefined,
+        started
+      },
+      {
+        policy: () => this.#config,
+        budget: () => state,
+        mode: () => this.modeOf('prune'),
+        threshold: () => this.#pruneThreshold,
+        floor: () => ({
+          floorRatio: this.config.pruneFloorRatio,
+          headChars: this.config.pruneHeadChars,
+          tailChars: this.config.pruneTailChars
+        }),
+        position: () => ({ turn: state.turn, step: state.step }),
+        now: () => this.#now(),
+        memoKey: () => state.sessionKey,
+        memoGet: (key) => this.#memoGetByKey(key),
+        memoSet: (key, entry) => this.#memoSetByKey(key, entry),
+        judge: async (raw) => {
+          // Both modes ask for the *real* candidate, measure-only. The service
+          // writes its own ledger entry first; whether the payload is installed is
+          // decided afterwards, by the floor.
+          const response = await this.#prune.prune(raw, {
             intent: this.config.intent,
             measureOnly: true,
-            // Per-segment System One judging starts at this size; below it the
-            // backend's deterministic candidates run and no judgment is spent.
             pruneJudgeMinChars: this.config.pruneJudgeMinChars
           });
-
-    const originalTokens = estimateTokens(text);
-    // One composition, both modes: the floored text the plan describes is the text
-    // active installs, byte for byte. Line alignment and duplicate removal move its
-    // real size away from the modelled one, so the number both modes account for is
-    // the length of the composed text — never a prediction about it.
-    const composed = applyPruneFloor(text, response.processedOutput, {
-      floorRatio: this.config.pruneFloorRatio,
-      headChars: this.config.pruneHeadChars,
-      tailChars: this.config.pruneTailChars,
-      locator
-    });
-    const candidateTokens = Math.ceil(composed.text.length / 4);
-    // What the judgment reported about its own path, plus the sizes both the plan
-    // and a skip record quote. Recorded even when the candidate is not smaller,
-    // because that is exactly the branch a real run cannot explain from its log.
-    const diagnostics = pruneDiagnosticsOf(response);
-    // A memo hit hands back a form that was composed for this payload already. It is
-    // its own fixed point — it carries the share, so the plan of the same lengths
-    // stays "not floored" and gives that text straight back — but its provenance is
-    // not readable from those lengths any more. The memo, which was written by the
-    // composition, answers for it: without this the audit would report a floored
-    // install as an unfloored one and flip the wording of the feedback with it.
-    const reusedFromMemo = !needsCandidate && memo?.text !== undefined ? memo : undefined;
-    const floorApplied = reusedFromMemo ? reusedFromMemo.floored : composed.floored;
-    const floorMissed = reusedFromMemo ? reusedFromMemo.floorMissed === true : composed.floorMissed;
-    const markerOmitted = reusedFromMemo ? reusedFromMemo.markerOmitted === true : composed.markerOmitted;
-    const measured: InterventionSkipDetail = {
-      ...payloadDetail,
-      ...diagnostics,
-      originalTokens,
-      candidateTokens,
-      floored: floorApplied,
-      floorMissed,
-      markerOmitted,
-      candidateChars: composed.text.length
-    };
-    const judged = !memo || needsCandidate;
-    const judgment: JudgmentCharge = {
-      judgments: judged ? 1 : 0,
-      memoHits: judged ? 0 : 1,
-      localLatencyMs: Math.max(0, this.#now() - started - (judged ? response.latencyMs : 0)),
-      remoteLatencyMs: judged ? response.latencyMs : 0,
-      // The pre-prune payload is what the pruner reasoned about; a backend call is
-      // a judgment even when it returns locally in under a millisecond.
-      judgeTokens: judged ? originalTokens : 0
-    };
-    if (candidateTokens >= originalTokens) {
-      this.#charge('prune', { ...judgment, originalTokens });
-      // The branch a real "prune: active but nothing happened" run lands in: the
-      // judgment ran, and the candidate it produced was not smaller. The record
-      // says so with the path that produced it and the sizes both sides had.
-      this.#skip('no-reduction', {
-        capability: 'prune',
-        state,
-        agent: exec.agent,
-        detail: measured,
-        judgment
-      });
-      return downstream;
-    }
-
-    const plan: InterventionPlan = {
-      capability: 'prune',
-      action: 'prune-result',
-      reason: `${exec.name} returned ${originalTokens} tokens; the judged reduction carries ${candidateTokens}`,
-      feedback: this.#pruneFeedback(exec.name, originalTokens, candidateTokens, {
-        floored: floorApplied,
-        floorMissed,
-        markerOmitted,
-        locator,
-        keptSegments: diagnostics.keptSegments,
-        judgedSegments: diagnostics.judgedSegments
-      }),
-      detail: {
-        digest,
-        floorApplied,
-        floorMissed,
-        markerOmitted,
-        confidence: response.reductionPercentage,
-        turn: state.turn,
-        step: state.step,
-        ...diagnostics,
-        originalChars: text.length,
-        candidateChars: composed.text.length
-      }
-    };
-    const planCosts = { originalTokens, candidateTokens, potentialSavedTokens: originalTokens - candidateTokens };
-
-    if (capability !== 'active') {
-      // Observe: the plan is real and charged, the surface is untouched, and the
-      // memo keeps the composed form — the same form active would install, from the
-      // same candidate — so a later hit reports the reduction this mode really saw.
-      // A plan this mode records is the action active would have taken, so it books
-      // the slot active would have booked.
-      bookAction(state);
-      this.#conclude(plan, false, exec.agent, planCosts, judgment);
-      if (!memo) {
-        this.#memoSet(state, digest, {
-          text: composed.text,
-          originalChars: text.length,
-          prunedChars: composed.text.length,
-          tokensSaved: originalTokens - candidateTokens,
-          floored: floorApplied,
-          floorMissed,
-          markerOmitted,
-          diagnostics
-        });
-      }
-      return downstream;
-    }
-
-    // Active. The original is retained *before* anything is replaced, and only a
-    // verified retention makes the replacement installable at all. A payload whose
-    // copy is already retained keeps that copy instead of writing a second one.
-    const alreadyRetained = memo?.locator;
-    const retention = alreadyRetained
-      ? { locator: alreadyRetained }
-      : retain(session, {
-          digest,
-          callId: exec.callId,
-          tool: exec.name,
-          turn: state.turn,
-          step: state.step,
-          text
-        });
-    if (!retention || typeof retention.locator !== 'string' || retention.locator.length === 0) {
-      // No controlled copy, no reduction. The result stays exactly as the rest of
-      // the waterfall produced it, and no saving is recorded — but the judgment
-      // that got this far was really made, so it is charged rather than hidden.
-      this.#charge('prune', judgment);
-      this.#skip('retention-failed', {
-        capability: 'prune',
-        state,
-        agent: exec.agent,
-        detail: measured,
-        judgment
-      });
-      return downstream;
-    }
-
-    // The form both modes accounted for is the form that gets installed: the locator
-    // is derived from the payload and the sink names its copy the same way, so the
-    // composition already published is reused byte for byte — with the provenance the
-    // plan gave it, rather than with what re-reading its own lengths would say. Only a
-    // sink that named the copy differently forces a rebuild, and then the real length
-    // and provenance of that rebuild are what gets accounted for.
-    const installed =
-      retention.locator === locator
-        ? { ...composed, floored: floorApplied, floorMissed, markerOmitted }
-        : applyPruneFloor(text, response.processedOutput, {
-            floorRatio: this.config.pruneFloorRatio,
-            headChars: this.config.pruneHeadChars,
-            tailChars: this.config.pruneTailChars,
-            locator: retention.locator
-          });
-    if (installed.text.length === 0 || installed.text.length >= text.length) {
-      // The plan said the form is smaller; the form that was really built must be
-      // too, or nothing is installed and nothing is saved.
-      this.#skip('no-reduction', {
-        capability: 'prune',
-        state,
-        agent: exec.agent,
-        detail: {
-          ...measured,
-          floored: installed.floored,
-          floorMissed: installed.floorMissed,
-          markerOmitted: installed.markerOmitted,
-          candidateChars: installed.text.length,
-          candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
+          return {
+            processedOutput: response.processedOutput,
+            reductionPercentage: response.reductionPercentage,
+            shadow: response.shadow,
+            latencyMs: response.latencyMs,
+            diagnostics: pruneDiagnosticsOf(response)
+          };
         },
-        judgment
-      });
-      return downstream;
-    }
-    const replacement = this.#replaceText(effective, installed.text);
-    if (!replacement) {
-      this.#skip('no-text-block', {
-        capability: 'prune',
-        state,
-        agent: exec.agent,
-        detail: {
-          ...measured,
-          floored: installed.floored,
-          floorMissed: installed.floorMissed,
-          markerOmitted: installed.markerOmitted,
-          candidateChars: installed.text.length,
-          candidateTokens: Math.max(0, Math.ceil(installed.text.length / 4))
+        // DSH's sink names a copy after the plugin record type, and the engine
+        // must predict that name or every install would be rebuilt.
+        locatorOf: (digest) => pruneLocator(digest),
+        hasRetention: () => this.#retain !== undefined,
+        retain: (request, session) => this.#retain?.(session, request),
+        session: () => sessionOf(exec.agent),
+        hasTextBlock: () => hasTextBlock(effective),
+        install: (installedText) => {
+          const replacement = this.#replaceText(effective, installedText);
+          if (!replacement) return undefined;
+          return {
+            kind: 'accept',
+            content: replacement,
+            ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
+              ? { additionalContexts: [...downstream.additionalContexts] }
+              : {})
+          } satisfies PostToolDecision;
         },
-        judgment
-      });
-      return downstream;
-    }
-
-    // Only now is there a decision that really took effect, so only now is the
-    // saving recorded — against the text that is really about to enter the context.
-    const installedTokens = Math.max(0, Math.ceil(installed.text.length / 4));
-    plan.detail.floorApplied = installed.floored;
-    plan.detail.floorMissed = installed.floorMissed;
-    plan.detail.markerOmitted = installed.markerOmitted;
-    plan.detail.candidateChars = installed.text.length;
-    plan.feedback = this.#pruneFeedback(exec.name, originalTokens, installedTokens, {
-      floored: installed.floored,
-      floorMissed: installed.floorMissed,
-      markerOmitted: installed.markerOmitted,
-      locator: retention.locator,
-      keptSegments: diagnostics.keptSegments,
-      judgedSegments: diagnostics.judgedSegments
-    });
-    // Booked only here: a candidate that was not smaller, a replacement that could
-    // not be composed, and a retention that failed all returned above, so none of
-    // them consumed the turn's allowance for an action that never happened.
-    bookAction(state);
-    this.#conclude(
-      plan,
-      true,
-      exec.agent,
-      {
-        originalTokens,
-        candidateTokens: installedTokens,
-        potentialSavedTokens: originalTokens - installedTokens,
-        actualSavedTokens: originalTokens - installedTokens
-      },
-      judgment,
-      retention.locator
+        describe: (facts) => this.#pruneFeedback(facts),
+        skip: (reason, detail, judgment) =>
+          this.#skip(reason, {
+            capability: 'prune',
+            state,
+            agent: exec.agent,
+            ...(Object.keys(detail).length === 0 ? {} : { detail: detail as InterventionSkipDetail }),
+            ...(judgment === undefined ? {} : { judgment })
+          }),
+        chargeJudgment: (judgment, originalTokens) =>
+          this.#charge('prune', {
+            ...judgment,
+            originalTokens: originalTokens ?? 0,
+            candidateTokens: 0,
+            potentialSavedTokens: 0,
+            actualSavedTokens: 0,
+            injectedTokens: 0
+          }),
+        conclude: (plan, applied, costs, judgment, locator) =>
+          this.#conclude(plan, applied, exec.agent, costs, judgment, locator),
+        noteRetained: (locator) => this.#noteRetained(locator),
+        passThrough: () => downstream
+      }
     );
-    // Retention is counted once per payload: a duplicate install reuses the copy
-    // that is already in the log, and the locator naming it never changes.
-    if (!this.#retained.includes(retention.locator)) {
-      this.#retained.push(retention.locator);
-      if (this.#retained.length > MAX_RECENT) this.#retained.shift();
-    }
-    this.#retainedCopies += 1;
-    this.#memoSet(state, digest, {
-      text: installed.text,
-      originalChars: text.length,
-      prunedChars: installed.text.length,
-      tokensSaved: originalTokens - installedTokens,
-      floored: installed.floored,
-      floorMissed: installed.floorMissed,
-      markerOmitted: installed.markerOmitted,
-      locator: retention.locator,
-      diagnostics
-    });
-    return {
-      kind: 'accept',
-      content: replacement,
-      ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
-        ? { additionalContexts: [...downstream.additionalContexts] }
-        : {})
-    };
+    return outcome.result as PostToolDecision;
   }
 
   /** Plan, and in active mode apply, the correction of one repeated failure. */
@@ -2203,19 +1937,8 @@ export class InterventionEngine {
    * @param outcome - the floor's decision and the judgment's segment counts.
    * @returns the note, clipped to the audit's text budget.
    */
-  #pruneFeedback(
-    tool: string,
-    originalTokens: number,
-    candidateTokens: number,
-    outcome: {
-      floored: boolean;
-      floorMissed: boolean;
-      markerOmitted: boolean;
-      locator: string;
-      keptSegments?: number;
-      judgedSegments?: number;
-    }
-  ): string {
+  #pruneFeedback(facts: PruneFeedbackFacts): string {
+    const { tool, originalTokens, candidateTokens, ...outcome } = facts;
     const kept = originalTokens === 0 ? 100 : Math.round((candidateTokens / originalTokens) * 100);
     const head = `Reflex reduced ${tool}: ${originalTokens} → ${candidateTokens} tokens (${kept}% kept). `;
     const keptSegments = outcome.keptSegments;
@@ -2249,9 +1972,23 @@ export class InterventionEngine {
     return clip(`${head}${body}`, FEEDBACK_CHARS);
   }
 
-  /** The memoized reduction of one payload, when it is still remembered. */
-  #memoGet(state: AgentState, digest: string): PruneMemo | undefined {
-    const key = `${state.sessionKey}:${digest}`;
+  /**
+   * Count one retained copy for the panel, once per payload.
+   *
+   * A duplicate install reuses the copy that is already in the log, so the
+   * locator naming it never changes and the recent list keeps one entry.
+   * @param locator - the locator the replacement published.
+   */
+  #noteRetained(locator: string): void {
+    if (!this.#retained.includes(locator)) {
+      this.#retained.push(locator);
+      if (this.#retained.length > MAX_RECENT) this.#retained.shift();
+    }
+    this.#retainedCopies += 1;
+  }
+
+  /** The memoized reduction under one already-namespaced key, when remembered. */
+  #memoGetByKey(key: string): PruneMemo | undefined {
     const hit = this.#memo.get(key);
     if (!hit) return undefined;
     this.#memo.delete(key);
@@ -2268,8 +2005,7 @@ export class InterventionEngine {
    * a later active decision re-plans that payload for real instead of installing a
    * cached fragment it never saw.
    */
-  #memoSet(state: AgentState, digest: string, memo: PruneMemo): void {
-    const key = `${state.sessionKey}:${digest}`;
+  #memoSetByKey(key: string, memo: PruneMemo): void {
     this.#memo.set(key, memo);
     if (this.#memo.size > MAX_MEMO) {
       const oldest = this.#memo.keys().next().value;

@@ -29,7 +29,14 @@
     "dist/**/*.d.ts",
     "!dist/**/*.test.js",
     "!dist/**/*.test.js.map",
-    "!dist/**/*.test.d.ts"
+    "!dist/**/*.test.d.ts",
+    "!dist/baseline/**",
+    "!dist/prune-parity.js",
+    "!dist/prune-parity.js.map",
+    "!dist/prune-parity.d.ts",
+    "!dist/prune-parity-scripts.js",
+    "!dist/prune-parity-scripts.js.map",
+    "!dist/prune-parity-scripts.d.ts"
   ],
   "dsh": {
     "bundle": {

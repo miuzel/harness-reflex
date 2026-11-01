@@ -369,38 +369,31 @@ const MUTATIONS = [
     from: '    ...(switched === undefined ? {} : { switched }),',
     to: ''
   },
+  // The pruning decision itself now lives in the shared core, which the plugin
+  // vendors verbatim; these faults are injected into the vendored copy so they
+  // exercise exactly the code that decides at runtime.
   {
     name: 'prune-ignores-action-ceiling',
     area: 'a reduction draws on the turn’s shared action ceiling',
-    file: 'src/interventions.ts',
+    file: 'src/vendor/harness-reflex/core/orchestrate.ts',
     // The size gates are left intact: only the ceiling check disappears, so a turn
     // with no allowance left still plans reductions.
-    from: [
-      "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
-      '      return downstream;',
-      '    }',
-      '    if (!actionWithinBudget(state, this.#config)) {'
-    ].join('\n'),
-    to: [
-      "      this.#skip('retention-unavailable', { capability: 'prune', state, agent: exec.agent, detail: payloadDetail });",
-      '      return downstream;',
-      '    }',
-      '    if (false) {'
-    ].join('\n')
+    from: '  if (!actionWithinBudget(port.budget(), port.policy())) {',
+    to: '  if (false) {'
   },
   {
     name: 'prune-observe-action-unbooked',
     area: 'a planned action is booked in both modes',
-    file: 'src/interventions.ts',
-    from: ['      bookAction(state);', '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'].join('\n'),
-    to: '      this.#conclude(plan, false, exec.agent, planCosts, judgment);'
+    file: 'src/vendor/harness-reflex/core/orchestrate.ts',
+    from: ['    bookAction(port.budget());', '    port.conclude(plan, false, planCosts, judgment);'].join('\n'),
+    to: '    port.conclude(plan, false, planCosts, judgment);'
   },
   {
     name: 'prune-applied-action-unbooked',
     area: 'an installed reduction is booked',
-    file: 'src/interventions.ts',
-    from: ['    bookAction(state);', '    this.#conclude(', '      plan,'].join('\n'),
-    to: ['    this.#conclude(', '      plan,'].join('\n')
+    file: 'src/vendor/harness-reflex/core/orchestrate.ts',
+    from: ['  bookAction(port.budget());', '  const installedCosts = {'].join('\n'),
+    to: '  const installedCosts = {'
   },
   // Stagnation exemptions for legitimate waits (g-012): the structured identity
   // a wait is recognised by, and the window it must not dilute.
