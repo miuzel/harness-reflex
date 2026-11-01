@@ -176,6 +176,61 @@ test('architecture: the decision core only depends downward and stays harness-fr
   }
 });
 
+/**
+ * The pi extension's own fence.
+ *
+ * The pi extension calls this package's decision core directly and runs inside
+ * pi's process. Two properties are structurally important and easy to lose:
+ *
+ * 1. **Zero runtime dependencies.** The manifest may not have `dependencies`, and
+ *    the sources may only import `node:` builtins, relative paths, and this
+ *    repository's own sources — otherwise installing the extension would drag a
+ *    second copy of a host package into pi's process.
+ * 2. **One adapter file.** pi 1.x is still in breaking change; every assumption
+ *    about its event shapes belongs in `pi-adapter.ts`, so an upstream rename is a
+ *    one-file change. The test enforces that no *other* file under
+ *    `packages/pi-reflex/src` names a pi event or a pi-specific field.
+ */
+test('the pi extension is dependency-free and keeps pi coupling in one file', () => {
+  const piDir = join(repoRoot, 'packages', 'pi-reflex');
+  const manifest = JSON.parse(readFileSync(join(piDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+    pi?: { extensions?: string[] };
+  };
+
+  assert.equal(manifest.dependencies, undefined, 'the pi extension must declare no runtime dependencies');
+  assert.ok(manifest.peerDependencies?.['@earendil-works/pi-coding-agent'] === '*', 'the host package is a peer');
+  assert.deepEqual(manifest.pi?.extensions, ['./src/index.ts'], 'pi loads the TypeScript entry point directly');
+
+  const allowedRelative = /^(node:|[./])/;
+  const adapter = join(piDir, 'src', 'pi-adapter.ts');
+  /**
+   * pi event and payload-field names that only the adapter may mention.
+   * `toolCallId` is deliberately absent: it is `execute`'s first parameter in the
+   * tool definition, which is a signature every host shares rather than a pi
+   * payload field.
+   */
+  const PI_NAMES = ['agent_before_settle', 'contextMessages', 'canContinue', 'parentToolCallId', 'tool_result'];
+
+  for (const file of walkTypeScript(join(piDir, 'src'))) {
+    const text = withoutComments(readFileSync(file, "utf8"));
+    for (const spec of importSpecifiers(text)) {
+      assert.ok(
+        allowedRelative.test(spec),
+        `${relative(repoRoot, file)} imports a bare package "${spec}"; the pi extension may not have runtime dependencies`
+      );
+    }
+    if (file === adapter) continue;
+    for (const name of PI_NAMES) {
+      assert.ok(
+        !text.includes(name),
+        `${relative(repoRoot, file)} names pi's "${name}"; pi coupling belongs in pi-adapter.ts`
+      );
+    }
+  }
+});
+
 /** Every TypeScript file under a directory tree, excluding tests. */
 function walkTypeScript(dir: string): string[] {
   const out: string[] = [];
