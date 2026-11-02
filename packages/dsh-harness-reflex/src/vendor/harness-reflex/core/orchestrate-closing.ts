@@ -45,10 +45,11 @@
  * classification accepted. They are one logical judgment — the classification
  * decides *whether* anything is worth verifying — so both are charged against the
  * single slot the turn budget allowed, and both are billed as one
- * {@link ClosingJudgment}. That is why this port does not expose a `backend()`:
- * a caller holding the backend would have to re-implement the purchase, the memo,
- * the latency split and the billing. It exposes {@link classify} and
- * {@link verify} instead, and the accounting stays here.
+ * {@link ClosingJudgment}. That fold is why this port states its two *purchases*
+ * ({@link HostClosingPort#classify} and {@link HostClosingPort#verify}) and never
+ * the transport behind them: a caller holding the service would have to
+ * re-implement the purchase, the memo, the latency split and the billing, and the
+ * one-charge rule is only stateable where the charge is built. It stays here.
  *
  * ## The skip that does not return
  *
@@ -72,8 +73,8 @@
 
 import { claimCandidates } from './closing.js';
 import { assembleEvidence, type EvidenceEntry } from './evidence.js';
-import type { HostBillingPort, HostDecisionPort, JudgmentCost } from './orchestrate-host.js';
-import { actionWithinBudget, bookAction, spendJudgment, type BudgetState } from './policy.js';
+import type { HostBillingPort, HostDecisionPort, JudgmentCost, JudgmentPosition } from './orchestrate-host.js';
+import { actionWithinBudget, bookAction, spendJudgment } from './policy.js';
 import { clip, estimateTokens } from './text.js';
 
 /** The capability every decision in this module belongs to. */
@@ -134,12 +135,6 @@ export interface ClosingOutcome {
   readonly message?: string;
 }
 
-/** The counters one closing check spends from and books against. */
-export interface ClosingState extends BudgetState {
-  /** The step this check is about, for the audit record. */
-  step: number;
-}
-
 /** What the classification half answered. */
 export interface ClaimClassificationLike {
   readonly results: readonly { readonly statement: string; readonly isClaim: boolean; readonly confidence: number }[];
@@ -162,11 +157,9 @@ export interface ClosingFeedbackFacts {
 }
 
 /** Everything the shared layer cannot know by itself. */
-export interface HostClosingPort extends HostDecisionPort<ClosingState>, HostBillingPort<ClosingJudgment, ClosingPlanRecord> {
+export interface HostClosingPort extends HostDecisionPort, HostBillingPort<ClosingJudgment, ClosingPlanRecord> {
   /** The effective mode of the `closing` capability. */
   mode(): 'off' | 'observe' | 'active';
-  /** The turn that is closing. */
-  turn(): number;
   /**
    * The turn's own words, as the stream carried them.
    *
@@ -223,10 +216,20 @@ const CLASSIFY_CONTEXT_CHARS = 600;
  * Decide whether the turn that is closing contradicts its own evidence, and tell
  * the host what to do about it.
  *
+ * The position is an *input of this decision*, not a port accessor and not a
+ * counter. The turn here is the boundary being closed, which can be a turn no
+ * step has recorded yet — a turn that said something and admitted no step — so it
+ * cannot be read off the running counters. `step` is the step the engine last
+ * recorded, which is the same number the audit detail has always quoted.
+ *
+ * @param invocation - where in the run this check is being made.
  * @param port - everything the shared layer cannot know by itself.
  * @returns what the check decided, and the message to steer when it applied.
  */
-export async function orchestrateClosing(port: HostClosingPort): Promise<ClosingOutcome> {
+export async function orchestrateClosing(
+  invocation: { readonly position: JudgmentPosition },
+  port: HostClosingPort
+): Promise<ClosingOutcome> {
   const mode = port.mode();
   const policy = port.policy();
   // The three "nothing at all" exits are deliberately silent: a turn with nothing
@@ -239,8 +242,10 @@ export async function orchestrateClosing(port: HostClosingPort): Promise<Closing
   const candidates = claimCandidates(claimsText);
   if (candidates.length === 0) return silent();
 
-  const turn = port.turn();
   const state = port.budget();
+  // One place in the run, quoted by the latch key, the memo namespace, the audit
+  // detail and the wording alike.
+  const { turn, step } = invocation.position;
   const skips: string[] = [];
   const refuse = (reason: string, charge?: ClosingJudgment): ClosingOutcome => {
     if (charge !== undefined) port.chargeJudgment(charge);
@@ -323,7 +328,7 @@ export async function orchestrateClosing(port: HostClosingPort): Promise<Closing
     action: CLOSING_ACTION,
     reason: `closing evidence contradicts ${contradicted.length} completion claim(s)`,
     feedback: port.describe({ contradicted, turn }),
-    detail: { confidence: verdict.results[0]?.confidence, turn, step: state.step }
+    detail: { confidence: verdict.results[0]?.confidence, turn, step }
   };
   const applies = mode === 'active';
   // Latched in both modes, for the same reason as the other capabilities: the

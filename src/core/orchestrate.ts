@@ -46,8 +46,8 @@
  *
  * @module core/orchestrate
  */
-import type { HostDecisionPort } from './orchestrate-host.js';
-import { actionWithinBudget, bookAction, spendJudgment, type BudgetState, type PolicySnapshot } from './policy.js';
+import type { HostDecisionPort, JudgmentState } from './orchestrate-host.js';
+import { actionWithinBudget, bookAction, spendJudgment, type PolicySnapshot } from './policy.js';
 import { applyPruneFloor, type PruneFloorPlan } from './prune-plan.js';
 import { digestOf, estimateTokens, type TextBlockLike } from './text.js';
 
@@ -186,6 +186,9 @@ export interface PruneRetention {
   readonly seq?: number;
 }
 
+/** The counters one reduction spends from, and where it is deciding. */
+export type PruneState = JudgmentState;
+
 /** A judged candidate, as the shared layer needs it. */
 export interface PruneCandidate {
   /** The candidate text the floor composes from. */
@@ -231,7 +234,7 @@ export interface PruneJudgmentCharge {
  * contract: `serves()` is answered from the effective mode, which this port
  * already exposes as `mode()`.
  */
-export interface HostPrunePort extends HostDecisionPort<BudgetState> {
+export interface HostPrunePort<Result> extends HostDecisionPort<PruneState> {
   /** The effective mode of the `prune` capability. */
   mode(): 'off' | 'observe' | 'active';
   /** Whether the decision applies at all: the mode is not `off`. */
@@ -242,8 +245,6 @@ export interface HostPrunePort extends HostDecisionPort<BudgetState> {
   threshold(): number;
   /** Floor settings in force. */
   floor(): PruneFloorSettings;
-  /** Turn and step this decision belongs to, for the audit record. */
-  position(): { turn: number; step: number };
   /** The memo namespace of this agent's session. */
   memoKey(): string;
   /** One memoized reduction, refreshed on hit; `undefined` when not remembered. */
@@ -279,10 +280,10 @@ export interface HostPrunePort extends HostDecisionPort<BudgetState> {
   /**
    * Install `text` into the host's effective content.
    *
-   * @returns the replacement content, or `undefined` when there is no text block
-   *   to replace.
+   * @returns the replacement the host commits, or `undefined` when there is no
+   *   text block to replace.
    */
-  install(text: string): unknown | undefined;
+  install(text: string): Result | undefined;
   /** Whether the effective content carries a text block at all. */
   hasTextBlock(): boolean;
   /** Word the operator-facing note of one reduction. */
@@ -325,7 +326,7 @@ export interface HostPrunePort extends HostDecisionPort<BudgetState> {
   /** Count one retained copy, once per payload per activation. */
   noteRetained(locator: string): void;
   /** The decision this reduction passes through when it does nothing. */
-  passThrough(): unknown;
+  passThrough(): Result;
 }
 
 /** What one reduction installed, for the note. */
@@ -351,9 +352,9 @@ export interface PrunePlanRecord {
 }
 
 /** The outcome of one orchestrated decision. */
-export interface PruneOutcome {
+export interface PruneOutcome<Result> {
   /** What the host should return to its caller. */
-  readonly result: unknown;
+  readonly result: Result;
   /** Whether a reduction was really installed. */
   readonly applied: boolean;
   /** The skip reason, when the decision refused to reduce. */
@@ -368,7 +369,7 @@ export interface PruneOutcome {
  * @param port - everything that is the host's to answer.
  * @returns the decision the host commits.
  */
-export async function orchestratePrune(
+export async function orchestratePrune<Result>(
   invocation: {
     readonly callId: string;
     readonly tool: string;
@@ -381,8 +382,8 @@ export async function orchestratePrune(
     /** Clock reading at hook entry. */
     readonly started: number;
   },
-  port: HostPrunePort
-): Promise<PruneOutcome> {
+  port: HostPrunePort<Result>
+): Promise<PruneOutcome<Result>> {
   const mode = port.mode();
   if (mode === 'off') return { result: port.passThrough(), applied: false };
   // A blocked result is already not shown to the model; rewriting it is moot and
@@ -439,7 +440,10 @@ export async function orchestratePrune(
   }
 
   const floor = port.floor();
-  const position = port.position();
+  // Where this decision is being made travels with the counters, not with a port
+  // accessor: the retention request, the audit detail and the plan all quote the
+  // same two numbers this state already carries.
+  const state = port.budget();
   const digest = digestOf(text);
   // The locator is derived from the payload, and a sink that names its copy the
   // same way makes the plan's size the size of the form active will install, in
@@ -555,8 +559,8 @@ export async function orchestratePrune(
       floorMissed,
       markerOmitted,
       confidence: candidate.reductionPercentage,
-      turn: position.turn,
-      step: position.step,
+      turn: state.turn,
+      step: state.step,
       ...diagnostics,
       originalChars: text.length,
       candidateChars: composed.text.length
@@ -602,8 +606,8 @@ export async function orchestratePrune(
           digest,
           callId: invocation.callId,
           tool: invocation.tool,
-          turn: position.turn,
-          step: position.step,
+          turn: state.turn,
+          step: state.step,
           text
         },
         port.session()

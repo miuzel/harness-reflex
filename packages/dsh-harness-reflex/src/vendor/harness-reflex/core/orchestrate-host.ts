@@ -50,21 +50,34 @@
  *
  * ## The judgment is bought, not fetched
  *
- * `HostStagnationPort` and `HostCorrectionPort` each expose `backend()`. The
- * closing check cannot use that shape: it buys **two different judgments** from
- * one capability — a classification of the turn's own sentences, then a
- * verification of the claims that classification accepted — and each is a separate
- * request with its own charge. A port that hands over "the backend" forces the
- * caller to re-implement the purchase (budget checks, memo key, latency split,
- * billing), which is the duplication this layer exists to remove. The closing port
- * therefore asks for its two judgments through its own members and reuses
- * {@link HostBillingPort} for the accounting. Moving the older two to the same
- * shape is a later batch's decision; doing it here would have rewritten three
- * green modules in the batch whose job was to lift a fourth.
+ * A port never hands over a backend. It answers **one purchase at a time** —
+ * {@link HostJudgmentPort#buy} for the stagnation verdict (bought by both the
+ * stagnation and the correction capability, which ask the same question of the
+ * same service), `classify`/`verify` for closing's two-request judgment, and
+ * `judge(payload)` for pruning's reduction.
+ *
+ * The distinction matters because a port that exposes `backend()` forces every
+ * caller to re-implement the purchase: the memo key, the budget check, the
+ * local/remote latency split, and the billing. Those four are the shared layer's
+ * — {@link ../judge.runJudgment} and each capability's own accounting — and they
+ * are stated once. A host answers only "what did the service say, and how long
+ * did it wait".
+ *
+ * ### One buy is one request; one charge may be several buys
+ *
+ * The unit of `buy` is the *request*, not the bill. The closing check buys twice
+ * from one capability — a classification of the turn's sentences, then a
+ * verification of the claims that classification accepted — but bills them as a
+ * single {@link JudgmentCost} against the single slot the turn budget granted.
+ * That fold is the shared layer's (`orchestrateClosing`), which is exactly why
+ * the closing port must not be collapsing the two requests into one method: the
+ * latency split and the token sum belong where the charge is built. For the
+ * stagnation verdict one buy is one request and one charge.
  *
  * @module core/orchestrate-host
  */
 
+import type { ActionStep, StagnationCheckResponse } from '../backend/types.js';
 import type { ClockPort } from '../ports/clock.js';
 import type { BudgetState, PolicySnapshot } from './policy.js';
 
@@ -81,6 +94,74 @@ export interface JudgmentCost {
   readonly localLatencyMs: number;
   readonly remoteLatencyMs: number;
   readonly judgeTokens: number;
+}
+
+/**
+ * One judgment request: the window, plus the question it is put to.
+ *
+ * This is the whole of what a host is asked for when a judgment is bought. It is
+ * a value rather than a port because the host's only job is "ask the service and
+ * report what it said, latency included" — the memo key, the budget check, the
+ * latency split and the charge stay with the caller that owns the counters.
+ */
+export interface JudgmentStep {
+  /** Why the run is judged, when the caller knows (a wait question). */
+  readonly goal: string | undefined;
+  /** The observed steps to judge, oldest first. */
+  readonly history: readonly ActionStep[];
+}
+
+/**
+ * Where in the run one judgment is being made.
+ *
+ * This is the value the four capabilities used to each spell their own accessor
+ * for (`position()`, `location()`, `turn()`, and two bare state reads). They
+ * disagreed because a port should not answer it: every host has these two
+ * numbers, every host means the same thing by them, and a judgment is *about*
+ * one place. So the place travels with the judgment — never through the port.
+ */
+export interface JudgmentPosition {
+  /** The turn this judgment belongs to. */
+  turn: number;
+  /** The step this judgment belongs to. */
+  step: number;
+}
+
+/**
+ * The counters every judgment capability keeps, positioned at where it decides.
+ *
+ * The place is part of the state for the three capabilities whose state *is* the
+ * host's running record (the same object the trigger windows are kept in): the
+ * audit detail, the retention request and the verdict memo all quote it, so one
+ * source keeps them in step. The closing check is the exception, and the
+ * exception is the finding: its turn is the boundary it was asked at, which can
+ * be a turn no step has recorded yet, so it arrives as an input of that decision
+ * instead (see `orchestrateClosing`).
+ */
+export interface JudgmentState extends BudgetState, JudgmentPosition {}
+
+/**
+ * What a capability that buys exactly one judgment asks its host for.
+ *
+ * The shape is one method over one value: the window and the question put to it
+ * ({@link JudgmentStep}). The host answers what the service said, latency
+ * included; the purchase around it — budget, memo, latency split, charge — is
+ * the shared layer's.
+ *
+ * A capability that buys *differently* still states its buys in this form, one
+ * member per request: closing answers `classify` and `verify`, pruning answers
+ * `judge`. The rule is that a port states the purchases it makes and never the
+ * transport behind them.
+ *
+ * @typeParam Answer - what this capability's service returns for one request.
+ */
+export interface HostJudgmentPort<Answer> {
+  /**
+   * Buy one judgment about one step.
+   * @param step - the window to judge and the question it is asked in.
+   * @returns the service's answer, carrying the latency the split is measured on.
+   */
+  buy(step: JudgmentStep): Promise<Answer>;
 }
 
 /**

@@ -4,16 +4,17 @@
  * The expensive path of every capability is one System 1 judgment. This module
  * owns the cheap path that decides whether a judgment is worth buying, the
  * once-per-turn call itself (memoized by the window it is about), and the
- * bookkeeping that bills exactly one judgment per call. The transport is a
- * {@link StagnationBackendPort}; the clock is a {@link ClockPort}; neither is
- * imported from a host.
+ * bookkeeping that bills exactly one judgment per call. The transport arrives as
+ * one `buy(step)` callback and never as the service itself; the clock is a
+ * {@link ClockPort}; neither is imported from a host.
  *
  * @module core/judge
  */
 import type { ActionStep, StagnationCheckResponse } from '../backend/types.js';
 import type { ClockPort } from '../ports/clock.js';
 import type { StagnationBackendPort } from '../ports/decision.js';
-import type { BudgetState, PolicySnapshot } from './policy.js';
+import type { JudgmentState, JudgmentStep } from './orchestrate-host.js';
+import type { PolicySnapshot } from './policy.js';
 import { spendJudgment, usefulVerdict } from './policy.js';
 import { estimateTokens } from './text.js';
 
@@ -226,8 +227,7 @@ export function applyCharge(
 }
 
 /** The state one judgment memo and the two budgets live in. */
-export interface JudgmentState extends BudgetState {
-  turn: number;
+export interface VerdictMemoState extends JudgmentState {
   verdictTurn: number;
   /** Identity of the window the cached verdict was about. */
   verdictKey: string;
@@ -261,6 +261,24 @@ export function judgmentKey(goal: string | undefined, steps: readonly ObservedSt
     .join('|')}`;
 }
 
+/**
+ * The one purchase a judgment makes, from whichever channel the caller used.
+ * @param buy - the current channel: one call, one step.
+ * @param backend - the deprecated channel: the service itself.
+ * @returns the purchase to run.
+ * @throws Error when a caller supplied neither, which is a programming error.
+ */
+function purchaseOf(
+  buy: ((step: JudgmentStep) => Promise<StagnationCheckResponse>) | undefined,
+  backend: StagnationBackendPort | undefined
+): (step: JudgmentStep) => Promise<StagnationCheckResponse> {
+  if (buy !== undefined) return buy;
+  if (backend === undefined) {
+    throw new Error('runJudgment needs a purchase: pass buy(step)');
+  }
+  return (step) => backend.check(step.goal, step.history);
+}
+
 /** The zero-cost verdict of a judgment that could not be spent. */
 function noJudgment(skip: string): JudgmentOutcome {
   return {
@@ -284,19 +302,40 @@ function noJudgment(skip: string): JudgmentOutcome {
  * a *different* episode or a different wait context in the same turn is a new
  * question — and therefore subject to the turn's budget.
  *
- * @param args - state, policy, backend, clock, window, question, and abort signal.
+ * The purchase is this function's, not the host's: `buy` is called only after
+ * the memo missed, after both budgets admitted the question, and after
+ * {@link spendJudgment} booked the slot. A host that was handed the transport
+ * instead would have to reproduce that order, and the one place a wrong answer is
+ * a model-visible regression is the place the type would stop helping.
+ *
+ * @param args - state, policy, the host's `buy`, clock, window, question, and
+ *   abort signal.
  * @returns the outcome, including why a judgment was refused.
  */
 export async function runJudgment(args: {
-  state: JudgmentState;
+  state: VerdictMemoState;
   policy: PolicySnapshot;
-  backend: StagnationBackendPort;
+  /** One purchase: ask the service about one step, and report what it cost. */
+  buy?: (step: JudgmentStep) => Promise<StagnationCheckResponse>;
+  /**
+   * The pre-g-046 channel: a service handed over whole, instead of a purchase.
+   *
+   * Kept **only** for the frozen parity snapshot
+   * (`packages/dsh-harness-reflex/src/baseline/interventions.ts`), which is the
+   * oracle of the refactor and may not be touched. Every live caller passes
+   * {@link buy}; the snapshot's `#judge` still passes its composition's service,
+   * and the parity run therefore keeps this channel exercised.
+   *
+   * @deprecated Pass `buy`. Nothing added from now on should use this.
+   */
+  backend?: StagnationBackendPort;
   clock: ClockPort;
   steps: readonly ObservedStep[];
   goal?: string;
   signal?: AbortSignal;
 }): Promise<JudgmentOutcome> {
-  const { state, policy, backend, clock, steps, goal, signal } = args;
+  const { state, policy, clock, steps, goal, signal } = args;
+  const buy = purchaseOf(args.buy, args.backend);
   const key = judgmentKey(goal, steps, policy.repeatThreshold);
   const cached = state.verdictTurn === state.turn && state.verdictKey === key ? state.verdict : undefined;
   if (cached) {
@@ -327,7 +366,7 @@ export async function runJudgment(args: {
     0
   );
   const started = clock.now();
-  const response = await backend.check(goal, history);
+  const response = await buy({ goal, history });
   const remoteLatencyMs = Number.isFinite(response.latencyMs) ? response.latencyMs : 0;
   state.verdict = response;
   state.verdictTurn = state.turn;

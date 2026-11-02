@@ -17,7 +17,7 @@ import {
   judgmentKey,
   runJudgment,
   suspicionOf,
-  type JudgmentState,
+  type VerdictMemoState,
   type ObservedStep
 } from './judge.js';
 import type { PolicySnapshot } from './policy.js';
@@ -53,9 +53,10 @@ function policy(overrides: Partial<PolicySnapshot> = {}): PolicySnapshot {
 }
 
 /** A judgment state helper. */
-function state(overrides: Partial<JudgmentState> = {}): JudgmentState {
+function state(overrides: Partial<VerdictMemoState> = {}): VerdictMemoState {
   return {
     turn: 1,
+    step: 1,
     interventions: 0,
     judgmentsCount: 0,
     judgmentsSession: 0,
@@ -70,11 +71,9 @@ function backend(response: Partial<StagnationCheckResponse> = {}) {
   const stateful = { calls: 0 };
   return {
     calls: () => stateful.calls,
-    port: {
-      async check(): Promise<StagnationCheckResponse> {
-        stateful.calls += 1;
-        return { isStuck: true, confidence: 0.9, patternType: 'repetition', latencyMs: 5, ...response };
-      }
+    buy: async (): Promise<StagnationCheckResponse> => {
+      stateful.calls += 1;
+      return { isStuck: true, confidence: 0.9, patternType: 'repetition', latencyMs: 5, ...response };
     }
   };
 }
@@ -147,8 +146,8 @@ test('runJudgment buys one call and reuses it for the same window and turn', asy
   const fake = backend();
   const s = state();
   const steps = [step({ signature: 'a' })];
-  const first = await runJudgment({ state: s, policy: policy(), backend: fake.port, clock: { now: () => 100 }, steps });
-  const second = await runJudgment({ state: s, policy: policy(), backend: fake.port, clock: { now: () => 200 }, steps });
+  const first = await runJudgment({ state: s, policy: policy(), buy: fake.buy, clock: { now: () => 100 }, steps });
+  const second = await runJudgment({ state: s, policy: policy(), buy: fake.buy, clock: { now: () => 200 }, steps });
   assert.equal(first.paid, true);
   assert.equal(first.useful, true);
   assert.equal(second.paid, false);
@@ -164,7 +163,7 @@ test('runJudgment refuses at the turn cap without calling the backend', async ()
   const outcome = await runJudgment({
     state: s,
     policy: policy({ maxJudgmentsPerTurn: 1 }),
-    backend: fake.port,
+    buy: fake.buy,
     clock: { now: () => 100 },
     steps: [step()]
   });
@@ -181,7 +180,7 @@ test('runJudgment reports an aborted call instead of judging it', async () => {
   const outcome = await runJudgment({
     state: state(),
     policy: policy(),
-    backend: fake.port,
+    buy: fake.buy,
     clock: { now: () => 100 },
     steps: [step()],
     signal: controller.signal

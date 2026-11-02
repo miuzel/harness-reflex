@@ -69,18 +69,16 @@
  * @module core/orchestrate-correction
  */
 import type { StagnationCheckResponse } from '../backend/types.js';
-import type { ClockPort } from '../ports/clock.js';
-import type { StagnationBackendPort } from '../ports/decision.js';
 import {
   judgmentCharge,
   runJudgment,
   type JudgmentOutcome,
-  type JudgmentState,
   type ObservedStep,
-  type StagnationSuspicion
+  type StagnationSuspicion,
+  type VerdictMemoState
 } from './judge.js';
-import type { HostBillingPort, HostDecisionPort } from './orchestrate-host.js';
-import { actionWithinBudget, bookAction, modeOf, type BudgetState, type PolicySnapshot } from './policy.js';
+import type { HostBillingPort, HostDecisionPort, HostJudgmentPort } from './orchestrate-host.js';
+import { actionWithinBudget, bookAction, modeOf, type PolicySnapshot } from './policy.js';
 import { clip } from './text.js';
 
 /** The capability every decision in this module belongs to. */
@@ -128,11 +126,10 @@ export interface CorrectionFeedbackFacts {
  * The verdict cache is part of the budget state because a cached answer is what
  * makes a second question in the same turn free: this path shares that cache with
  * the stagnation capability, so it reads it through here rather than keeping a
- * second copy. `turn` and `step` are what the audit record quotes.
+ * second copy. The place in the run (`turn`, `step`) and the counters both come
+ * from the judge's state, so a correction adds no field of its own to either.
  */
-export interface CorrectionState extends JudgmentState {
-  step: number;
-}
+export type CorrectionState = VerdictMemoState;
 
 /**
  * Everything the shared layer cannot know by itself.
@@ -143,9 +140,8 @@ export interface CorrectionState extends JudgmentState {
  */
 export interface HostCorrectionPort<Result>
   extends HostDecisionPort<CorrectionState>,
-    HostBillingPort<JudgedCharge, CorrectionPlanRecord> {
-  /** The service that answers the judgment. */
-  backend(): StagnationBackendPort;
+    HostBillingPort<JudgedCharge, CorrectionPlanRecord>,
+    HostJudgmentPort<StagnationCheckResponse> {
   /** Name of the call whose result is being decided. */
   toolName(): string;
   /** The failure text, as the model would read it. */
@@ -291,7 +287,7 @@ export async function orchestrateCorrection<Result>(
   const outcome = await runJudgment({
     state: port.budget(),
     policy,
-    backend: port.backend(),
+    buy: (step) => port.buy(step),
     clock: port.clock(),
     steps: port.window(),
     ...(invocation.signal === undefined ? {} : { signal: invocation.signal })

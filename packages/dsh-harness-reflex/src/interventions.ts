@@ -95,12 +95,10 @@ import {
   applyCharge,
   emptyBucket,
   judgmentCharge,
-  runJudgment,
   suspicionOf,
   type CostCharge,
   type InterventionCostBucket,
   type JudgmentCharge,
-  type JudgmentOutcome,
   type StagnationSuspicion,
   type ObservedStep
 } from './vendor/harness-reflex/core/judge.js';
@@ -953,7 +951,9 @@ export class InterventionEngine {
     const port: HostStagnationPort<PreToolDecision, PreStepDecision> = {
       policy: () => this.#config,
       budget: () => state,
-      backend: () => this.#stagnation,
+      // One purchase: the service's answer, latency included. The purchase around
+      // it (memo, budgets, latency split, charge) is the shared layer's.
+      buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
       clock: () => ({ now: () => this.#now() }),
       serves: () => this.#config.enabled,
       toolName: () => exec.name,
@@ -1156,7 +1156,7 @@ export class InterventionEngine {
       const port: HostStagnationPort<PreStepDecision, PreStepDecision> = {
         policy: () => this.#config,
         budget: () => state,
-        backend: () => this.#stagnation,
+        buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
         clock: () => ({ now: () => this.#now() }),
         serves: () => this.#config.enabled,
         toolName: () => state.steps[state.steps.length - 1]?.tool ?? '',
@@ -1265,7 +1265,6 @@ export class InterventionEngine {
         clock: () => ({ now: () => this.#now() }),
         serves: () => this.#config.enabled,
         mode: () => this.modeOf('closing'),
-        turn: () => turn,
         claims: () => state.claims,
         evidenceSuspect: () => state.evidenceSuspect,
         evidence: () => state.evidence,
@@ -1312,7 +1311,10 @@ export class InterventionEngine {
           this.#conclude(plan as InterventionPlan, applied, payload.agent, { potentialSavedTokens: 0 }, charge)
       };
       void started;
-      await orchestrateClosing(port);
+      // The position is an input of the closing decision, never a port accessor:
+      // the turn is the boundary being closed (which can be a turn no step has
+      // recorded yet), and the step is the one this engine last recorded.
+      await orchestrateClosing({ position: { turn, step: state.step } }, port);
     } catch {
       // FAIL-OPEN: a failed closing check leaves the turn boundary alone.
       this.#skip('planning-error', { capability: 'closing', agent: payload.agent });
@@ -1400,7 +1402,6 @@ export class InterventionEngine {
           headChars: this.config.pruneHeadChars,
           tailChars: this.config.pruneTailChars
         }),
-        position: () => ({ turn: state.turn, step: state.step }),
         now: () => this.#now(),
         memoKey: () => state.sessionKey,
         memoGet: (key) => this.#memoGetByKey(key),
@@ -1464,7 +1465,9 @@ export class InterventionEngine {
         passThrough: () => downstream
       }
     );
-    return outcome.result as PostToolDecision;
+    // No cast: the port's `Result` is this host's decision type, so the generic
+    // carries it from `passThrough`/`install` all the way out.
+    return outcome.result;
   }
 
   /**
@@ -1508,7 +1511,7 @@ export class InterventionEngine {
     const port: HostCorrectionPort<PostToolDecision> = {
       policy: () => this.#config,
       budget: () => state,
-      backend: () => this.#stagnation,
+      buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
       clock: () => ({ now: () => this.#now() }),
       serves: () => this.#config.enabled,
       toolName: () => exec.name,
@@ -1558,38 +1561,6 @@ export class InterventionEngine {
     void agentId;
     const outcome = await orchestrateCorrection({ failed: true, blockedByDownstream: downstream.kind === 'block' }, port);
     return outcome.result;
-  }
-
-  // ── judgment, budgets, and memo ─────────────────────────────────────────────
-
-  /**
-   * Ask the decision core for this turn's stagnation judgment, reusing the
-   * turn's cached verdict when the window is the same one.
-   *
-   * The budget checks, the memo key, the history projection, the backend call,
-   * and the latency charge all live in `core/judge`; this method only supplies
-   * the composition's backend and clock.
-   * @param state - the deciding agent's state.
-   * @param signal - the call's abort signal.
-   * @param steps - the window to judge (defaults to the agent's history).
-   * @param goal - the wait/context question, when one is asked.
-   * @returns the judgment outcome.
-   */
-  async #judge(
-    state: AgentState,
-    signal?: AbortSignal,
-    steps: readonly ObservedStep[] = state.steps,
-    goal?: string
-  ): Promise<JudgmentOutcome> {
-    return runJudgment({
-      state,
-      policy: this.#config,
-      backend: this.#stagnation,
-      clock: { now: () => this.#now() },
-      steps,
-      goal,
-      signal
-    });
   }
 
   // ── accounting and audit ───────────────────────────────────────────────────

@@ -66,23 +66,16 @@
  * @module core/orchestrate-stagnation
  */
 import type { StagnationCheckResponse } from '../backend/types.js';
-import type { ClockPort } from '../ports/clock.js';
-import type { StagnationBackendPort } from '../ports/decision.js';
-import type { HostBillingPort, HostDecisionPort } from './orchestrate-host.js';
+import type { HostBillingPort, HostDecisionPort, HostJudgmentPort, JudgmentState } from './orchestrate-host.js';
 import {
   judgmentCharge,
   runJudgment,
   type JudgmentOutcome,
   type ObservedStep,
-  type StagnationSuspicion
+  type StagnationSuspicion,
+  type VerdictMemoState
 } from './judge.js';
-import {
-  actionWithinBudget,
-  bookAction,
-  modeOf,
-  type BudgetState,
-  type PolicySnapshot
-} from './policy.js';
+import { actionWithinBudget, bookAction, modeOf, type PolicySnapshot } from './policy.js';
 
 /** The capability every decision in this module belongs to. */
 export const STAGNATION_CAPABILITY = 'stagnation' as const;
@@ -171,9 +164,7 @@ export interface StagnationFeedbackFacts {
  * makes a second question in the same turn free: the shared layer reads it
  * through here rather than keeping a second copy.
  */
-export interface StagnationState extends BudgetState {
-  turn: number;
-  step: number;
+export interface StagnationState extends VerdictMemoState {
   verdictTurn: number;
   verdictKey: string;
   verdict?: StagnationCheckResponse;
@@ -188,9 +179,8 @@ export interface StagnationState extends BudgetState {
  */
 export interface HostStagnationPort<Decision, Corrected>
   extends HostDecisionPort<StagnationState>,
-    HostBillingPort<JudgedCharge, StagnationPlanRecord> {
-  /** The service that answers the judgment. */
-  backend(): StagnationBackendPort;
+    HostBillingPort<JudgedCharge, StagnationPlanRecord>,
+    HostJudgmentPort<StagnationCheckResponse> {
   /** Name of the call being decided, for the record and the wording. */
   toolName(): string;
   /** The recorded window, oldest first, *without* the call about to run. */
@@ -365,7 +355,7 @@ export async function orchestrateStagnationPre<Decision, Corrected>(
   const outcome = await runJudgment({
     state: port.budget(),
     policy,
-    backend: port.backend(),
+    buy: (step) => port.buy(step),
     clock: port.clock(),
     steps,
     ...(waitSuspected ? { goal: invocation.waitQuestion?.() } : {}),
@@ -472,7 +462,7 @@ export async function orchestrateStagnationStep<Decision, Corrected>(
   const outcome = await runJudgment({
     state: port.budget(),
     policy,
-    backend: port.backend(),
+    buy: (step) => port.buy(step),
     clock: port.clock(),
     steps: window,
     ...(invocation.signal === undefined ? {} : { signal: invocation.signal })
