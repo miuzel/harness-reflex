@@ -435,6 +435,107 @@ function pollSeries(times: number, tool: string, args: unknown): PruneStep[] {
   }));
 }
 
+// ── the failure-correction corpus ───────────────────────────────────────────
+
+/**
+ * A failing call, `times` times in one turn.
+ *
+ * The correction branch lives on `tools/post-execute` behind the layer's own
+ * reading of a failure, so the *only* way to reach it is a result it reads as a
+ * failure. The error text is what the feedback quotes, which is why each series
+ * carries its own.
+ */
+function failures(times: number, tool: string, args: unknown, error: string, turn = 1): PruneStep[] {
+  return Array.from({ length: times }, (_, index) => ({
+    ev: 'tool' as const,
+    tool,
+    args,
+    out: error,
+    isError: true,
+    turn,
+    step: index + 1
+  }));
+}
+
+/**
+ * The same failure series with the rest of the waterfall's decision overridden.
+ *
+ * Kept as its own helper because the override belongs to the `tool` variant of
+ * {@link PruneStep} only: spreading a literal inside a callback loses the
+ * variant's identity and TypeScript then widens it to the other variants.
+ * @param times - how many attempts.
+ * @param tool - tool name.
+ * @param args - the call's arguments.
+ * @param error - the failure text.
+ * @param downstream - what the rest of the waterfall decided for this result.
+ * @returns the steps.
+ */
+function failuresWithDownstream(
+  times: number,
+  tool: string,
+  args: unknown,
+  error: string,
+  downstream: 'block' | 'value'
+): PruneStep[] {
+  const out: PruneStep[] = [];
+  for (const [index, step] of failures(times, tool, args, error).entries()) {
+    out.push({ ...(step as Extract<PruneStep, { ev: 'tool' }>), step: index + 1, downstream } as PruneStep);
+  }
+  return out;
+}
+
+/** One failing call, for the scripts that interleave outcomes. */
+function oneFailure(tool: string, args: unknown, error: string, turn: number, step: number): PruneStep {
+  return { ev: 'tool', tool, args, out: error, isError: true, turn, step };
+}
+
+/** One succeeding call, for the scripts that interleave outcomes. */
+function oneSuccess(tool: string, args: unknown, out: string, turn: number, step: number): PruneStep {
+  return { ev: 'tool', tool, args, out, turn, step };
+}
+
+/**
+ * A failing *poll*: the call shapes a wait, and its result is a failure.
+ *
+ * Which of the two facts wins is the question. The wait exemption is read off the
+ * call and the failure off the result, so a correction that mistook one for the
+ * other would change the model-visible surface on exactly the calls a run makes
+ * while it waits for a job.
+ */
+function failingPolls(times: number, tool: string, args: unknown): PruneStep[] {
+  return Array.from({ length: times }, (_, index) => ({
+    ev: 'tool' as const,
+    tool,
+    args,
+    out: `job_output failed (attempt ${index + 1})`,
+    isError: true,
+    turn: 1,
+    step: index + 1
+  }));
+}
+
+/**
+ * Failures separated by successes, so the trailing-failure count is what decides.
+ *
+ * The correction's own order is: the failure latch, then the action ceiling, then
+ * the trigger. A corpus made only of straight repeated failures can never reach
+ * the branch where the budget checks *passed* and the trigger then said no, so a
+ * reordering of those three would be invisible without this shape.
+ */
+function alternating(failCount: number, succeedEvery: number): PruneStep[] {
+  const out: PruneStep[] = [];
+  let step = 0;
+  for (let index = 0; index < failCount; index += 1) {
+    step += 1;
+    out.push(oneFailure('bash', { command: `alt-${index % 2}` }, `alt failure ${index}`, 1, step));
+    if ((index + 1) % succeedEvery === 0) {
+      step += 1;
+      out.push(oneSuccess('bash', { command: `ok-${index}` }, `ok ${index}`, 1, step));
+    }
+  }
+  return out;
+}
+
 /**
  * The scripts that exercise the stagnation path: `tools/pre-execute` and
  * `agent/pre-step`.
@@ -697,6 +798,185 @@ export const STAGNATION_SCRIPTS: readonly PruneScript[] = [
     steps: [
       ...repeats(4, 'bash', { command: 'agent-a' }, 'failed'),
       { ev: 'pre-step', turn: 1, step: 5 }
+    ]
+  }
+];
+
+/**
+ * The scripts that exercise the failure-correction path: `tools/post-execute`
+ * on a result the layer reads as a failure.
+ *
+ * Same contract as {@link STAGNATION_SCRIPTS}: inputs only, no expected output,
+ * replayed through the engine's public hooks so the two engines are their own
+ * oracle. The corpus is ordered from the ordinary path outwards — threshold, the
+ * two latches, each budget, the two anchors the layer refuses to act on, the
+ * service's three answers, and then the accounting that is shared with the other
+ * two capabilities.
+ */
+export const CORRECTION_SCRIPTS: readonly PruneScript[] = [
+  {
+    id: 'correction-the-third-failure-is-corrected',
+    note: 'the ordinary path: a failure that keeps failing is judged and rewritten',
+    steps: failures(4, 'bash', { command: 'npm test' }, 'Error: 3 tests failed in src/core/policy.ts')
+  },
+  {
+    id: 'correction-below-the-threshold',
+    note: 'the trigger fires at the failure threshold, not before it',
+    steps: failures(3, 'bash', { command: 'npm test' }, 'Error: 3 tests failed')
+  },
+  {
+    id: 'correction-threshold-of-two',
+    note: 'a policy that lowers the failure threshold corrects one failure earlier',
+    steps: failures(3, 'bash', { command: 'npm run typecheck' }, 'TS2345: argument of type string is not assignable')
+  },
+  {
+    id: 'correction-single-episode-latch',
+    note: 'one episode is corrected once; the later failures are latched, not re-judged',
+    steps: failures(6, 'bash', { command: 'same-failure' }, 'E: identical failure text')
+  },
+  {
+    id: 'correction-two-episodes-one-turn',
+    note: 'a second independent episode is its own decision, subject to the same ceiling',
+    steps: [
+      ...failures(4, 'bash', { command: 'first-episode' }, 'E: first failure'),
+      ...failures(4, 'bash', { command: 'second-episode' }, 'E: second failure').map((step) => ({
+        ...step,
+        step: (step as { step: number }).step + 4
+      }))
+    ]
+  },
+  {
+    id: 'correction-action-ceiling',
+    note: 'the turn action ceiling stops the second episode without judging it',
+    steps: [
+      ...failures(4, 'bash', { command: 'ceiling-a' }, 'E: ceiling a'),
+      ...failures(4, 'bash', { command: 'ceiling-b' }, 'E: ceiling b').map((step) => ({
+        ...step,
+        step: (step as { step: number }).step + 4
+      }))
+    ]
+  },
+  {
+    id: 'correction-budget-shared-with-a-refusal',
+    note: 'a stagnation refusal and a correction draw on the same allowance, in that order',
+    steps: [
+      ...repeats(4, 'bash', { command: 'shared' }, 'failed'),
+      ...failures(4, 'bash', { command: 'after-the-refusal' }, 'E: after the refusal').map((step) => ({
+        ...step,
+        step: (step as { step: number }).step + 4
+      }))
+    ]
+  },
+  {
+    id: 'correction-budget-shared-with-a-reduction',
+    note: 'a reduction and a correction draw on the same allowance, in that order',
+    steps: [
+      { ev: 'tool', tool: 'bash', args: { command: 'cat big.log' }, out: lines(40), turn: 1, step: 1 },
+      ...failures(4, 'bash', { command: 'after-the-reduction' }, 'E: after the reduction').map((step) => ({
+        ...step,
+        step: (step as { step: number }).step + 1
+      }))
+    ]
+  },
+  {
+    id: 'correction-judgment-ceiling',
+    note: 'the judgment ceiling stops the second episode before a verdict exists',
+    steps: [
+      ...failures(4, 'bash', { command: 'judge-a' }, 'E: judge a'),
+      ...failures(4, 'bash', { command: 'judge-b' }, 'E: judge b').map((step) => ({
+        ...step,
+        step: (step as { step: number }).step + 4
+      }))
+    ]
+  },
+  {
+    id: 'correction-downstream-blocked',
+    note: 'a result the rest of the waterfall blocked is already unreadable, so it is left alone',
+    steps: failuresWithDownstream(4, 'bash', { command: 'blocked-result' }, 'E: blocked result', 'block')
+  },
+  {
+    id: 'correction-value-shaped-accept',
+    note: 'a value-shaped accept replaced the payload before this point',
+    steps: failuresWithDownstream(4, 'bash', { command: 'value-shaped' }, 'E: value shaped', 'value')
+  },
+  {
+    id: 'correction-own-tool-failure',
+    note: 'the plugin never corrects its own tools',
+    steps: failures(5, 'reflex_choice', { question: 'q' }, 'E: the plugin tool failed')
+  },
+  {
+    id: 'correction-after-a-refused-call',
+    note: 'the result of a call this layer refused is the refusal, so it is neither pruned nor corrected',
+    steps: [
+      ...repeats(4, 'bash', { command: 'refused-then-failed' }, 'failed'),
+      oneFailure('bash', { command: 'refused-then-failed' }, 'E: the refused call also failed', 1, 5)
+    ]
+  },
+  {
+    id: 'correction-unconfirmed-still-charges',
+    note: 'a judgment that answers "not stuck" is paid for and recorded',
+    stagnation: 'not-stuck',
+    steps: failures(4, 'bash', { command: 'maybe' }, 'E: maybe not stuck')
+  },
+  {
+    id: 'correction-low-confidence',
+    note: 'a verdict under the confidence floor justifies nothing',
+    stagnation: 'low-confidence',
+    steps: failures(4, 'bash', { command: 'unsure' }, 'E: unsure')
+  },
+  {
+    id: 'correction-judge-throws-fails-open',
+    note: 'a service that cannot answer never rewrites a result',
+    stagnation: 'throw',
+    steps: failures(4, 'bash', { command: 'down' }, 'E: service down')
+  },
+  {
+    id: 'correction-turn-boundary-resets-the-episode',
+    note: 'a new turn clears the latch, the window and the budget',
+    steps: [
+      ...failures(4, 'bash', { command: 'turn-1' }, 'E: turn one'),
+      ...failures(4, 'bash', { command: 'turn-1' }, 'E: turn one again', 2).map((step) => ({
+        ...step,
+        step: (step as { step: number }).step
+      }))
+    ]
+  },
+  {
+    id: 'correction-alternating-outcomes',
+    note: 'a failure interrupted by a success is not a run of failures',
+    steps: alternating(8, 1)
+  },
+  {
+    id: 'correction-failing-polls',
+    note: 'a poll whose result failed is read by the call it was, not only by its result',
+    steps: failingPolls(5, 'job_output', { job_id: 'job-11' })
+  },
+  {
+    id: 'correction-failing-kill',
+    note: 'terminating a job is not a wait, and its failure is a failure',
+    steps: failingPolls(5, 'job_kill', { job_id: 'job-12' })
+  },
+  {
+    id: 'correction-non-ascii-failure',
+    note: 'the feedback quotes the error, so its bytes are part of the surface',
+    steps: failures(4, 'bash', { command: 'locale' }, '错误：找不到模块 “core/policy” 的声明文件')
+  },
+  {
+    id: 'correction-long-and-multiline-error',
+    note: 'a long multi-line error is quoted through the same clipping and whitespace rules',
+    steps: failures(
+      4,
+      'bash',
+      { command: 'build' },
+      `Error: build failed\n${Array.from({ length: 30 }, (_, index) => `  at frame ${index} of the transitive dependency chain`).join('\n')}\n${'z'.repeat(400)}`
+    )
+  },
+  {
+    id: 'correction-then-closing',
+    note: 'the closing check keeps its answer while the correction path moves',
+    steps: [
+      ...failures(4, 'bash', { command: 'npm test' }, 'E: tests failed'),
+      { ev: 'turn-stop', turn: 1, step: 4, claims: 'All tests pass and the build is green.' }
     ]
   }
 ];

@@ -24,7 +24,7 @@ import test from 'node:test';
 
 import { InterventionEngine } from './interventions.js';
 import { InterventionEngine as BaselineEngine } from './baseline/interventions.js';
-import { PRUNE_SCRIPTS, STAGNATION_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
+import { CORRECTION_SCRIPTS, PRUNE_SCRIPTS, STAGNATION_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
 import {
   digestOfTrace,
   installedTextOf,
@@ -73,7 +73,11 @@ const ACTIVATIONS: readonly Activation[] = [
  * @returns the activation matrix filtered for it.
  */
 function activationsFor(script: PruneScript): readonly Activation[] {
-  const matrix = STAGNATION_SCRIPTS.includes(script) ? STAGNATION_ACTIVATIONS : ACTIVATIONS;
+  const matrix = STAGNATION_SCRIPTS.includes(script)
+    ? STAGNATION_ACTIVATIONS
+    : CORRECTION_SCRIPTS.includes(script)
+      ? CORRECTION_ACTIVATIONS
+      : ACTIVATIONS;
   return matrix.filter((activation) => {
     const options = activation.options;
     if (script.scratch === true && options.scratch !== true) return false;
@@ -96,7 +100,7 @@ function skipReasonsOf(trace: ReplayTrace): string[] {
 }
 
 /** Both corpora: each batch's scripts, and the whole set the replay iterates. */
-const ALL_SCRIPTS: readonly PruneScript[] = [...PRUNE_SCRIPTS, ...STAGNATION_SCRIPTS];
+const ALL_SCRIPTS: readonly PruneScript[] = [...PRUNE_SCRIPTS, ...STAGNATION_SCRIPTS, ...CORRECTION_SCRIPTS];
 
 /**
  * The activations a stagnation script is replayed under.
@@ -117,6 +121,56 @@ const STAGNATION_ACTIVATIONS: readonly Activation[] = [
   { label: 'tight-session-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerSession: 1 } } },
   { label: 'high-confidence-floor', options: { mode: 'active', policy: { minConfidence: 0.95 } } },
   { label: 'short-repeat-threshold', options: { mode: 'active', policy: { repeatThreshold: 2 } } }
+];
+
+/**
+ * The activations a correction script is replayed under.
+ *
+ * A correction is decided on `tools/post-execute`, so the payload-shape axis of
+ * the prune matrix is irrelevant to it — but the mode axis is not, and neither
+ * are the counters that make one correction the last one a turn can afford.
+ * `prune-off` is kept because the two capabilities share that hook; the
+ * capability switches are kept because a correction that ran while its own
+ * capability was off would be a permission change.
+ */
+const CORRECTION_ACTIVATIONS: readonly Activation[] = [
+  { label: 'active', options: { mode: 'active' } },
+  { label: 'observe', options: { mode: 'observe' } },
+  { label: 'off', options: { mode: 'off' } },
+  { label: 'active+gate-only', options: { mode: 'off', capabilities: { gate: 'active' } } },
+  { label: 'observe+gate-only', options: { mode: 'off', capabilities: { gate: 'observe' } } },
+  { label: 'active+gate-off', options: { mode: 'active', capabilities: { gate: 'off' } } },
+  { label: 'active+prune-off', options: { mode: 'active', capabilities: { prune: 'off' } } },
+  { label: 'tight-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 1 } } },
+  { label: 'zero-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 0 } } },
+  { label: 'tight-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerTurn: 1 } } },
+  { label: 'tight-session-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerSession: 1 } } },
+  { label: 'high-confidence-floor', options: { mode: 'active', policy: { minConfidence: 0.95 } } },
+  { label: 'low-failure-threshold', options: { mode: 'active', policy: { failureThreshold: 2 } } },
+  { label: 'wide-window', options: { mode: 'active', policy: { windowSize: 40 } } },
+  { label: 'narrow-window', options: { mode: 'active', policy: { windowSize: 4 } } },
+  // The correction decides on a *failure* window, and the stagnation capability
+  // observes exactly the same window first. With stagnation left on, a repeated
+  // failure is refused by `tools/pre-execute` before this hook ever sees it, and
+  // the correction is only reachable through a refused result — which is one real
+  // path, but not the branch this corpus is about. These activations take the
+  // pre-execute refusal out of the way so the post-execute decision itself is the
+  // thing being compared (it is also how a Host with stagnation off runs).
+  { label: 'active+stagnation-off', options: { mode: 'active', capabilities: { stagnation: 'off' } } },
+  { label: 'observe+stagnation-off', options: { mode: 'observe', capabilities: { stagnation: 'off', gate: 'observe' } } },
+  { label: 'observe-master+stagnation-off', options: { mode: 'observe', capabilities: { stagnation: 'off' } } },
+  {
+    label: 'active+gate-only+stagnation-off',
+    options: { mode: 'off', capabilities: { gate: 'active', stagnation: 'off' } }
+  },
+  {
+    label: 'tight-action-budget+stagnation-off',
+    options: { mode: 'active', capabilities: { stagnation: 'off' }, policy: { maxInterventionsPerTurn: 1 } }
+  },
+  {
+    label: 'tight-judgment-budget+stagnation-off',
+    options: { mode: 'active', capabilities: { stagnation: 'off' }, policy: { maxJudgmentsPerTurn: 1 } }
+  }
 ];
 
 /** The script with one id. */
@@ -429,4 +483,156 @@ test('negative control: a perturbed retention locator is visible', async () => {
   assert.deepEqual(shared.output.locators, legacy.output.locators);
   const perturbed = [...shared.output.locators, 'extra#locator'];
   assert.notDeepEqual(perturbed, legacy.output.locators, 'an extra retained copy must be visible');
+});
+
+// ── 6. the failure-correction corpus ────────────────────────────────────────
+
+/** The capability the correction path decides under. */
+const CORRECTION_CAPABILITY = 'gate';
+
+/** The corrective text of a decision, when it carries one. */
+function correctiveTextOf(decision: unknown): string | undefined {
+  const value = decision as { kind?: string; feedback?: readonly { text?: string }[] };
+  if (value.kind !== 'block' || !Array.isArray(value.feedback)) return undefined;
+  const text = value.feedback.map((block) => block.text ?? '').join('');
+  return text.length === 0 ? undefined : text;
+}
+
+test('the correction corpus covers every post-execute failure branch', async () => {
+  const traces = await matrix();
+  const reasons = new Set<string>();
+  let corrected = 0;
+  let planned = 0;
+  let observeOnly = 0;
+
+  for (const { activation, trace } of traces) {
+    for (const reason of skipReasonsOf(trace)) reasons.add(reason);
+    for (const record of recordsOf(trace)) {
+      if (record.capability !== CORRECTION_CAPABILITY) continue;
+      if (record.action === 'corrective-feedback') planned += 1;
+    }
+    for (const decision of trace.output.decisions) {
+      if (correctiveTextOf(decision) !== undefined) corrected += 1;
+    }
+    if (activation.label.startsWith('observe')) {
+      for (const decision of trace.output.decisions) {
+        const value = decision as { kind?: string; passedThrough?: boolean };
+        if (value.passedThrough === true) observeOnly += 1;
+      }
+    }
+  }
+
+  // Every refusal the correction path can emit. A missing one means the corpus
+  // stopped covering that branch, and the parity assertion would then compare the
+  // two engines on a path neither of them reaches.
+  for (const required of ['duplicate-intervention', 'intervention-cap', 'unconfirmed', 'refused-result']) {
+    assert.ok(reasons.has(required), `the correction corpus must exercise ${required}; saw: ${[...reasons].sort().join(', ')}`);
+  }
+  assert.ok(planned > 0, 'the corpus must plan at least one correction');
+  assert.ok(corrected > 0, 'the corpus must install at least one correction');
+  // Observe plans the same correction and installs nothing; without this the
+  // "observe changes nothing" half of the path would be untested by the corpus.
+  assert.ok(observeOnly > 0, 'the corpus must reach the observe-plans-only path');
+});
+
+test('the correction corpus reaches the corrected result itself, not only the audit', async () => {
+  // The model-facing surface of this path is a `block` carrying corrective text.
+  // A refactor that kept the audit identical but handed back the raw failure is
+  // exactly the regression this assertion is written for, so the text is compared
+  // through the live engine against the frozen snapshot, byte for byte.
+  const script = scriptById('correction-the-third-failure-is-corrected');
+  const options: ReplayOptions = { mode: 'active', capabilities: { stagnation: 'off' } };
+  const { shared, legacy } = await replayBoth(script, options);
+  const sharedText = shared.output.decisions.map(correctiveTextOf).filter((text): text is string => text !== undefined);
+  const legacyText = legacy.output.decisions.map(correctiveTextOf).filter((text): text is string => text !== undefined);
+  assert.equal(sharedText.length, 1, 'exactly one result is corrected in this run');
+  assert.deepEqual(sharedText, legacyText, 'the corrective text is byte-identical to the snapshot');
+  assert.ok(sharedText[0]!.includes('failed 3 consecutive times'), 'the corrective text names the failure count');
+  assert.ok(sharedText[0]!.includes('Error: 3 tests failed'), 'the corrective text quotes the error verbatim');
+});
+
+test('the correction corpus keeps the restored downstream contexts', async () => {
+  // A correction answers with `kind: 'block'`, and the `additionalContexts` the
+  // rest of the waterfall attached must survive it: dropping them would lose
+  // somebody else's feedback to ours.
+  const script = scriptById('correction-the-third-failure-is-corrected');
+  const trace = await replaySnapshot(script, { mode: 'active', capabilities: { stagnation: 'off' } });
+  const corrected = trace.output.decisions.filter((decision) => correctiveTextOf(decision) !== undefined);
+  assert.equal(corrected.length, 1);
+  const value = corrected[0] as { additionalContexts?: unknown };
+  // The fake waterfall attaches none, so the decision must carry the field's
+  // absence rather than a fabricated empty list.
+  assert.equal(value.additionalContexts ?? null, null, 'no context was attached, so none is invented');
+});
+
+test('negative control: a reworded correction is visible', async () => {
+  // One character in the corrective text: the comparison must notice, because the
+  // text is what the model reads. The feedback list is part of the trace's
+  // decision record for this reason alone.
+  const { shared, legacy } = await replayBoth(scriptById('correction-the-third-failure-is-corrected'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  assert.deepEqual(shared.output, legacy.output, 'the control starts from an equal pair');
+  const perturbed = structuredClone(shared.output) as unknown as {
+    decisions: Array<{ kind?: string; feedback?: Array<{ text?: string }> }>;
+  };
+  const target = perturbed.decisions.find((decision) => Array.isArray(decision.feedback) && decision.feedback.length > 0);
+  assert.ok(target !== undefined, 'the control needs a correction to perturb');
+  target!.feedback![0]!.text = `${target!.feedback![0]!.text}!`;
+  assert.notDeepEqual(perturbed, legacy.output, 'a one-character change in the correction must be visible');
+});
+
+test('negative control: a correction installed while observing is visible', async () => {
+  // Observe must plan the correction and install nothing. Installing it anyway is
+  // the fault a "the mode gates the latch instead of the message" refactor
+  // produces, and it has to fail the comparison.
+  const { shared, legacy } = await replayBoth(scriptById('correction-the-third-failure-is-corrected'), {
+    mode: 'observe',
+    capabilities: { stagnation: 'off' }
+  });
+  assert.deepEqual(shared.output, legacy.output);
+  const perturbed = structuredClone(shared.output) as unknown as {
+    decisions: Array<{ kind?: string; feedback?: unknown }>;
+  };
+  const index = perturbed.decisions.findIndex((decision) => decision.feedback === null);
+  assert.ok(index >= 0, 'the observe run must have a result that was not corrected');
+  perturbed.decisions[index] = { kind: 'block', feedback: [{ type: 'text', text: 'installed anyway' }] };
+  assert.notDeepEqual(perturbed, legacy.output, 'a correction installed while observing must be visible');
+});
+
+test('negative control: a lost correction latch is visible', async () => {
+  // The latch is what keeps the second identical failure in one turn from being
+  // corrected again. Dropping it turns one correction into many, which shows up in
+  // the decisions and in the turn's account.
+  const { shared, legacy } = await replayBoth(scriptById('correction-single-episode-latch'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  assert.deepEqual(shared.output, legacy.output);
+  const perturbed = structuredClone(shared.output) as unknown as {
+    decisions: Array<{ kind?: string; feedback?: Array<{ type?: string; text?: string }> }>;
+  };
+  const index = perturbed.decisions.findIndex((decision) => correctiveTextOf(decision) !== undefined);
+  assert.ok(index >= 0, 'the control needs a correction to duplicate');
+  const duplicate = structuredClone(perturbed.decisions[index]!);
+  duplicate.feedback = [{ type: 'text', text: 'a second correction of the same failure' }];
+  perturbed.decisions.splice(index + 1, 0, duplicate);
+  assert.notDeepEqual(perturbed, legacy.output, 'a second correction of one episode must be visible');
+});
+
+test('negative control: a freed action slot is visible', async () => {
+  // A correction books the turn's action allowance in both modes. A fault that
+  // forgets to book lets the next episode through, which is a permission change —
+  // it must be visible in the account.
+  const { shared, legacy } = await replayBoth(scriptById('correction-two-episodes-one-turn'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  assert.deepEqual(shared.output, legacy.output);
+  const perturbed = structuredClone(shared.output) as unknown as {
+    costs: { byCapability: { gate: Record<string, number> } };
+  };
+  perturbed.costs.byCapability.gate.interventions = Number(perturbed.costs.byCapability.gate.interventions ?? 0) - 1;
+  assert.notDeepEqual(perturbed, legacy.output, 'an unbooked correction must be visible in the account');
 });

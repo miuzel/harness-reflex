@@ -236,6 +236,27 @@ function describePreStep(decision: unknown): unknown {
 }
 
 /**
+ * The corrective text a post-execute decision carries, when it carries one.
+ *
+ * The correction path's model-facing surface is `kind: 'block'` plus a feedback
+ * list — there is no `content` to compare and no refusal `reason` either. A
+ * trace that recorded only the kind would therefore compare two engines on
+ * *whether* a result was corrected and never on *what the model was told*, which
+ * is exactly the half of this branch a wording refactor moves. Each entry is
+ * reduced to its type and its text, byte for byte.
+ * @param decision - what the hook returned.
+ * @returns the feedback entries, or `null` when there are none.
+ */
+function describeFeedback(decision: unknown): readonly unknown[] | null {
+  const feedback = (decision as { feedback?: unknown }).feedback;
+  if (!Array.isArray(feedback)) return null;
+  return feedback.map((entry) => {
+    const block = entry as { type?: string; text?: string };
+    return { type: block.type ?? null, text: block.text ?? null };
+  });
+}
+
+/**
  * Replay one `agent/turn-stopping` boundary.
  *
  * The closing check steers a corrective message into the recipient; the replay
@@ -542,6 +563,10 @@ export async function replay(
     decisions.push({
       kind: (decision as { kind?: string }).kind,
       content: contentOf(decision) ?? null,
+      // The failure-correction branch answers with a `block` whose payload is the
+      // feedback list, not `content`; leaving it out would compare the two
+      // engines on whether a correction happened and not on what it said.
+      feedback: describeFeedback(decision),
       additionalContexts: (decision as { additionalContexts?: unknown }).additionalContexts ?? null,
       // The identity of the downstream object matters: a pass-through must hand
       // the very object it was given back, not an equal copy.
