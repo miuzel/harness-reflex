@@ -60,7 +60,7 @@ import { InterventionEngine as BaselineEngine } from './baseline/interventions.j
 import type { InterventionAuditRecord } from './session-audit.js';
 import { resolveConfig, type ResolvedInterventionsConfig } from './config.js';
 import { pruneLocator } from './session-audit.js';
-import type { PruneScript, PruneStep, StagnationShape } from './prune-parity-scripts.js';
+import type { ClosingShape, PruneScript, PruneStep, StagnationShape } from './prune-parity-scripts.js';
 import type { PruneResponse } from './vendor/harness-reflex/index.js';
 
 /** Clock reading every replayed engine sees, so nothing depends on wall time. */
@@ -296,8 +296,18 @@ async function replayStop(
   // only accumulates `text-delta` chunks, so anything else would silently leave
   // the turn with no claims and make the check unreachable in every script.
   engine.observeAssistantStream({ agent: recipient, frame: { type: 'chunk', chunk: { type: 'text-delta', text: step.claims } } });
-  await engine.turnStopping({ agent: recipient, turn: step.turn });
-  return { steered };
+  let outcome: unknown = 'returned';
+  try {
+    await engine.turnStopping({ agent: recipient, turn: step.turn });
+  } catch (error) {
+    // A closing check that throws would be a fail-open regression the comparison
+    // has to see rather than a crash that stops the replay.
+    outcome = { threw: (error as Error).message };
+  }
+  // The latch and the steering are the two model-facing consequences of this
+  // hook, so both are recorded: an objection reported without the message it
+  // steered would let a lift that decided but published nothing pass.
+  return { steered, outcome, latched: engine.hasApplied(String((agent as { id?: string }).id ?? ''), `closing:turn:${step.turn}`) };
 }
 
 // ── the fakes ───────────────────────────────────────────────────────────────
@@ -382,15 +392,47 @@ function stagnationStub(shape: StagnationShape): InterventionEngineOptions['stag
   } as InterventionEngineOptions['stagnation'];
 }
 
-/** A gate service that contradicts, so a repeated failure is corrected. */
-function gateStub(): InterventionEngineOptions['gate'] {
-  return {
-    verify: async () => ({ passed: false, results: [], needsEscalation: false, latencyMs: 0 }),
-    classifyClaims: async (request: { statements: string[] }) => ({
-      results: request.statements.map((statement) => ({ statement, isClaim: true, confidence: 0.95 })),
-      latencyMs: 0
-    })
-  } as unknown as InterventionEngineOptions['gate'];
+/**
+ * A gate service whose two answers are chosen by the script.
+ *
+ * The closing decision buys a classification and then a verification, and each
+ * of the two can fail in its own way — the classifier's throw is handled inside
+ * the decision while the verifier's throw lands in the outer fail-open. One
+ * fixed stub could only ever exercise the contradiction, so the shape is a
+ * script property rather than a harness constant.
+ * @param shape - how this script's closing service answers.
+ * @returns the service.
+ */
+function gateStub(shape: ClosingShape = 'contradicted'): InterventionEngineOptions['gate'] {
+  const classifyClaims = async (request: { statements: string[] }) => {
+    if (shape === 'classify-throws') throw new Error('stub: classifier unavailable');
+    const results =
+      shape === 'no-claim'
+        ? request.statements.map((statement) => ({ statement, isClaim: false, confidence: 0.9 }))
+        : shape === 'low-confidence-claim'
+          ? request.statements.map((statement) => ({ statement, isClaim: true, confidence: 0.2 }))
+          : request.statements.map((statement) => ({ statement, isClaim: true, confidence: 0.95 }));
+    return { results, latencyMs: 0 };
+  };
+  const verify = async (claims: { statement: string }[]) => {
+    if (shape === 'verify-throws') throw new Error('stub: verifier unavailable');
+    const results = claims.map((claim, index) => ({
+      statement: claim.statement,
+      outcome:
+        shape === 'consistent'
+          ? 'verified'
+          : shape === 'escalate'
+            ? 'escalate'
+            : shape === 'unconfirmed'
+              ? 'unconfirmed'
+              : shape === 'last-contradicted' && index !== claims.length - 1
+                ? 'verified'
+                : 'contradicted',
+      confidence: 0.9
+    }));
+    return { passed: shape === 'consistent', results, needsEscalation: shape === 'escalate', latencyMs: 0 };
+  };
+  return { verify, classifyClaims } as unknown as InterventionEngineOptions['gate'];
 }
 
 // ── the replay ──────────────────────────────────────────────────────────────
@@ -411,6 +453,15 @@ export interface ReplayOutput {
   readonly originals: Readonly<Record<string, string>>;
   /** The per-agent counters after the run. */
   readonly agents: unknown;
+  /**
+   * The engine-level evidence counters.
+   *
+   * These are *not* per-agent: the closing check adds the retained and the
+   * truncated character counts to one counter for the whole activation, and a
+   * lift that moved the assembly without moving this accounting would leave the
+   * panel reporting a number no run produced.
+   */
+  readonly evidence: { readonly retainedChars: number; readonly truncatedChars: number };
 }
 
 /** An engine constructor of either vintage, over the same option surface. */
@@ -497,7 +548,7 @@ export async function replay(
     pruneThreshold: 100,
     stagnation: stagnationStub(script.stagnation ?? 'stuck'),
     prune: pruneStub(options.shape ?? 'half', options.scratch === true, options.segmented === true),
-    gate: gateStub(),
+    gate: gateStub(script.closing ?? 'contradicted'),
     ...(retention === 'absent'
       ? {}
       : {
@@ -640,7 +691,8 @@ export async function replay(
       },
       locators: report.retained.locators,
       originals,
-      agents: engine.stateOf(`agent-${script.id}`) ?? null
+      agents: engine.stateOf(`agent-${script.id}`) ?? null,
+      evidence: { retainedChars: report.evidence.retainedChars, truncatedChars: report.evidence.truncatedChars }
     }
   };
 }

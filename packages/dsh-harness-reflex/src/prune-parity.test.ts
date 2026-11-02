@@ -24,7 +24,7 @@ import test from 'node:test';
 
 import { InterventionEngine } from './interventions.js';
 import { InterventionEngine as BaselineEngine } from './baseline/interventions.js';
-import { CORRECTION_SCRIPTS, PRUNE_SCRIPTS, STAGNATION_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
+import { CLOSING_SCRIPTS, CORRECTION_SCRIPTS, PRUNE_SCRIPTS, STAGNATION_SCRIPTS, type PruneScript } from './prune-parity-scripts.js';
 import {
   digestOfTrace,
   installedTextOf,
@@ -77,7 +77,9 @@ function activationsFor(script: PruneScript): readonly Activation[] {
     ? STAGNATION_ACTIVATIONS
     : CORRECTION_SCRIPTS.includes(script)
       ? CORRECTION_ACTIVATIONS
-      : ACTIVATIONS;
+      : CLOSING_SCRIPTS.includes(script)
+        ? CLOSING_ACTIVATIONS
+        : ACTIVATIONS;
   return matrix.filter((activation) => {
     const options = activation.options;
     if (script.scratch === true && options.scratch !== true) return false;
@@ -100,7 +102,7 @@ function skipReasonsOf(trace: ReplayTrace): string[] {
 }
 
 /** Both corpora: each batch's scripts, and the whole set the replay iterates. */
-const ALL_SCRIPTS: readonly PruneScript[] = [...PRUNE_SCRIPTS, ...STAGNATION_SCRIPTS, ...CORRECTION_SCRIPTS];
+const ALL_SCRIPTS: readonly PruneScript[] = [...PRUNE_SCRIPTS, ...STAGNATION_SCRIPTS, ...CORRECTION_SCRIPTS, ...CLOSING_SCRIPTS];
 
 /**
  * The activations a stagnation script is replayed under.
@@ -183,6 +185,11 @@ function scriptById(id: string): PruneScript {
 /** Replay one script through the frozen snapshot only. */
 async function replaySnapshot(script: PruneScript, options: ReplayOptions): Promise<ReplayTrace> {
   return replay(script, BaselineEngine as never, options);
+}
+
+/** Replay one script through the live engine only. */
+async function replayLive(script: PruneScript, options: ReplayOptions): Promise<ReplayTrace> {
+  return replay(script, InterventionEngine as never, options);
 }
 
 /**
@@ -797,4 +804,156 @@ test('the correction lift was verified against the faults a reader would expect'
   for (const entry of LIFT_FAULTS) {
     assert.ok(entry.fault.length > 0 && entry.found.length > 0, 'every fault names what it breaks');
   }
+});
+
+// ── 8. the closing check: its own corpus, its own comparison ────────────────
+
+/**
+ * The activations a closing script is replayed under.
+ *
+ * The closing check lives on `agent/turn-stopping` alone, so every other
+ * capability's payload-shape axis is noise — but the mode axis is not, and
+ * neither is the pair of budgets a closing judgment spends from. The evidence
+ * budget is an axis of its own: truncation is the one skip this path continues
+ * through, and a corpus without a tightened budget would never reach it.
+ */
+const CLOSING_ACTIVATIONS: readonly Activation[] = [
+  { label: 'active', options: { mode: 'active' } },
+  { label: 'observe', options: { mode: 'observe' } },
+  { label: 'off', options: { mode: 'off' } },
+  { label: 'active+closing-only', options: { mode: 'off', capabilities: { closing: 'active' } } },
+  { label: 'observe+closing-only', options: { mode: 'off', capabilities: { closing: 'observe' } } },
+  { label: 'active+closing-off', options: { mode: 'active', capabilities: { closing: 'off' } } },
+  { label: 'zero-turn-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerTurn: 0 } } },
+  { label: 'one-turn-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerTurn: 1 } } },
+  { label: 'zero-session-judgment-budget', options: { mode: 'active', policy: { maxJudgmentsPerSession: 0 } } },
+  { label: 'zero-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 0 } } },
+  { label: 'one-action-budget', options: { mode: 'active', policy: { maxInterventionsPerTurn: 1 } } },
+  { label: 'high-claim-floor', options: { mode: 'active', policy: { claimMinConfidence: 0.99 } } },
+  { label: 'narrow-evidence-budget', options: { mode: 'active', policy: { closingEvidenceChars: 400 } } },
+  { label: 'wide-evidence-budget', options: { mode: 'active', policy: { closingEvidenceChars: 20_000 } } },
+  { label: 'prune-also-on', options: { mode: 'active', capabilities: { prune: 'active' } } },
+  { label: 'stagnation-also-on', options: { mode: 'active', capabilities: { stagnation: 'active' } } }
+];
+
+/** Every closing script, so the corpus is one list. */
+const CLOSING_ONLY: readonly PruneScript[] = [...CLOSING_SCRIPTS];
+
+/** The closing records of one trace. */
+function closingRecordsOf(trace: ReplayTrace): Array<Record<string, unknown>> {
+  return recordsOf(trace).filter((record) => record.capability === 'closing');
+}
+
+/** The state a turn-stop boundary left the engine in, one entry per stop. */
+function stopsOf(trace: ReplayTrace): Array<{ steered: unknown[]; outcome: unknown; latched: boolean }> {
+  return trace.stopResults as Array<{ steered: unknown[]; outcome: unknown; latched: boolean }>;
+}
+
+test('the closing corpus covers every branch the check can take', async () => {
+  const reasons = new Set<string>();
+  let steered = 0;
+  let planned = 0;
+  for (const script of CLOSING_ONLY) {
+    for (const activation of CLOSING_ACTIVATIONS) {
+      // The *live* engine, deliberately: a coverage gate run against the frozen
+      // snapshot measures the old code and would stay green while the lifted
+      // engine renamed every reason it reports.
+      const trace = await replayLive(script, activation.options);
+      for (const reason of skipReasonsOf(trace)) reasons.add(reason);
+      for (const record of closingRecordsOf(trace)) {
+        if (record.action === 'steer-closing') {
+          planned += 1;
+          if (record.applied === true) steered += 1;
+        }
+      }
+    }
+  }
+  // The comparison can only be trusted on a branch the corpus really visited: a
+  // renamed skip reason must fail here, so every claim is a `has` on the concrete
+  // string rather than a count of "some reason".
+  for (const reason of [
+    'duplicate-intervention',
+    'intervention-cap',
+    'evidence-truncated',
+    'closing-claim-unavailable',
+    'closing-no-claim',
+    'closing-undecided',
+    'closing-evidence-consistent',
+    'closing-unconfirmed'
+  ]) {
+    assert.ok(reasons.has(reason), `the corpus must reach "${reason}" by that exact name; saw ${[...reasons].sort().join(', ')}`);
+  }
+  assert.ok(steered > 0, 'a contradiction really steers in active mode');
+  assert.ok(planned > steered, 'and observe plans the same objection without steering it');
+});
+
+test('the closing corpus observes, but never publishes, when only observing', async () => {
+  // Observe is a measurement of active. If it steered, the mode would be a
+  // second policy rather than a preview of the one that is about to run.
+  const trace = await replayLive(scriptById('closing-contradicted'), { mode: 'observe' });
+  const stops = stopsOf(trace);
+  assert.equal(stops.length, 1, 'one stop boundary');
+  assert.deepEqual(stops[0]!.steered, [], 'observe steers nothing into the turn');
+  const records = closingRecordsOf(trace);
+  assert.equal(records.filter((record) => record.action === 'steer-closing' && record.applied === false).length, 1, '...but plans the objection');
+  assert.equal(records.filter((record) => record.action === 'skip').length, 0, 'a planned objection is not a skip');
+  // And the episode is consumed exactly as active would consume it.
+  assert.equal(stops[0]!.latched, true, 'the turn is latched in observe too');
+});
+
+test('closing: the live engine decides exactly like the frozen baseline', async () => {
+  for (const script of CLOSING_ONLY) {
+    for (const activation of CLOSING_ACTIVATIONS) {
+      const { shared, legacy } = await replayBoth(script, activation.options);
+      assert.deepEqual(
+        shared.output,
+        legacy.output,
+        `closing parity failed: ${script.id} @ ${activation.label}\n shared: ${digestOfTrace(shared).join(' | ')}\n legacy: ${digestOfTrace(legacy).join(' | ')}`
+      );
+      assert.deepEqual(
+        shared.stopResults,
+        legacy.stopResults,
+        `closing steering parity failed: ${script.id} @ ${activation.label}`
+      );
+    }
+  }
+});
+
+// ── 9. negative controls: the closing comparison can fail ───────────────────
+
+test('negative control: a changed closing objection text is visible', async () => {
+  const script = scriptById('closing-contradicted');
+  const { shared, legacy } = await replayBoth(script, { mode: 'active' });
+  const perturbed = structuredClone(legacy) as unknown as { output: unknown; stopResults: unknown[] };
+  const stops = perturbed.stopResults as Array<{ steered: Array<{ text: string }> }>;
+  assert.ok(stops[0]!.steered.length === 1, 'the control needs a message to perturb');
+  stops[0]!.steered[0]!.text = `${stops[0]!.steered[0]!.text} `;
+  assert.notDeepEqual(shared.stopResults, perturbed.stopResults, 'a one-character change to the objection must be visible');
+});
+
+test('negative control: a missing closing latch is visible', async () => {
+  const script = scriptById('closing-same-turn-twice');
+  const { shared, legacy } = await replayBoth(script, { mode: 'active' });
+  const stops = (trace: ReplayTrace): boolean[] => stopsOf(trace).map((stop) => stop.latched);
+  assert.deepEqual(stops(legacy), [true, true], 'the same turn is latched at both boundaries');
+  const perturbed = stopsOf(legacy);
+  perturbed[1] = { ...perturbed[1]!, latched: false };
+  assert.notDeepEqual(stops(shared), perturbed.map((stop) => stop.latched), 'a lost per-turn latch must be visible');
+});
+
+test('negative control: a steered message while observing is visible', async () => {
+  const script = scriptById('closing-contradicted');
+  const { shared, legacy } = await replayBoth(script, { mode: 'observe' });
+  assert.deepEqual(stopsOf(legacy)[0]!.steered, [], 'observe steers nothing');
+  const perturbed = structuredClone(stopsOf(legacy));
+  perturbed[0] = { ...perturbed[0]!, steered: [{ source: 'stub', text: 'a message that should not exist' }] };
+  assert.notDeepEqual(stopsOf(shared), perturbed, 'a message steered in observe must be visible');
+});
+
+test('negative control: a perturbed evidence counter is visible', async () => {
+  const script = scriptById('closing-many-diagnostics');
+  const { shared, legacy } = await replayBoth(script, { mode: 'active' });
+  assert.ok(legacy.output.evidence.retainedChars > 0, 'the control needs a real counter');
+  const perturbed = { ...legacy.output.evidence, retainedChars: legacy.output.evidence.retainedChars + 1 };
+  assert.notDeepEqual(shared.output.evidence, perturbed, 'one character of the engine-level counter must be visible');
 });

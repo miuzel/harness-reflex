@@ -93,6 +93,8 @@ export interface PruneScript {
   readonly textCarrying?: boolean;
   /** Override the stagnation service's answer for this script (default: confirms). */
   readonly stagnation?: StagnationShape;
+  /** Override the closing service's answers for this script (default: contradicts). */
+  readonly closing?: ClosingShape;
   /**
    * Mark the pre-execute call's signal aborted.
    *
@@ -121,6 +123,37 @@ export type StagnationShape =
   | 'throw'
   /** Answers the first question stuck and every later one not-stuck. */
   | 'stuck-then-not';
+
+/**
+ * How a script's *closing* service answers.
+ *
+ * The closing decision buys two different judgments from the same capability:
+ * a classification of the turn's own sentences and a verification of the claims
+ * it accepted. Each shape therefore answers both halves, and the corpus needs
+ * several of them because each one is a distinct position in the closing order —
+ * a refused classification is the fail-open branch, an empty classification is
+ * the free-after-paying skip, an undecided verdict is the branch that must *not*
+ * be mistaken for a contradiction, and so on.
+ */
+export type ClosingShape =
+  /** Classifies every sentence as a claim and contradicts it. */
+  | 'contradicted'
+  /** Classifies and verifies: the turn's claims are consistent with the evidence. */
+  | 'consistent'
+  /** Classifies, but the verdict could not decide: `escalate`, not a contradiction. */
+  | 'escalate'
+  /** A void verdict: no pass, no escalation, no contradiction. */
+  | 'unconfirmed'
+  /** Classification succeeds, but nothing is a completion claim. */
+  | 'no-claim'
+  /** The classification answers, but every claim falls below the confidence floor. */
+  | 'low-confidence-claim'
+  /** The classifier throws: the decision-local fail-open branch. */
+  | 'classify-throws'
+  /** The verification throws: the outer fail-open branch. */
+  | 'verify-throws'
+  /** Contradicts only the *last* claim, so the order of the results matters too. */
+  | 'last-contradicted';
 
 // ── payload shapes ──────────────────────────────────────────────────────────
 
@@ -980,3 +1013,181 @@ export const CORRECTION_SCRIPTS: readonly PruneScript[] = [
     ]
   }
 ];
+
+// ── the closing corpus ──────────────────────────────────────────────────────
+
+/**
+ * One turn whose evidence carries a failure and whose words claim success.
+ *
+ * The two deterministic preconditions of the closing check are *both* required
+ * and neither is a semantic question: the turn said something long enough to be a
+ * claim candidate, and at least one retained evidence entry is a failure
+ * suspicion. A script that satisfies only one of them never reaches the judgment,
+ * which is why the corpus varies them independently.
+ * @param claims - the assistant text the stream carried.
+ * @param options - turn, step, and whether the evidence is a failure.
+ * @returns the steps: one result, then the stop boundary.
+ */
+function closingTurn(
+  claims: string,
+  options: { turn?: number; step?: number; failing?: boolean; out?: string } = {}
+): PruneStep[] {
+  const turn = options.turn ?? 1;
+  const step = options.step ?? 1;
+  const failing = options.failing ?? true;
+  return [
+    {
+      ev: 'tool',
+      tool: 'bash',
+      args: { command: failing ? 'npm test' : 'npm run lint' },
+      out: options.out ?? (failing ? 'Exit code 1: 3 tests failed in core/policy' : 'lint clean, 0 problems'),
+      ...(failing ? { isError: true } : {}),
+      turn,
+      step
+    },
+    { ev: 'turn-stop', turn, step, claims }
+  ];
+}
+
+/** The claim the corpus uses when the wording is not the thing under test. */
+const GREEN_CLAIM = 'All tests pass and the build is green.';
+
+export const CLOSING_SCRIPTS: readonly PruneScript[] = [
+  {
+    id: 'closing-contradicted',
+    note: 'the ordinary objection: a claim of success over own failed evidence steers once',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-consistent',
+    note: 'a claim the evidence supports is never objected to, and is still billed',
+    closing: 'consistent',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-escalate',
+    note: 'an undecided verdict is not a contradiction, and must not become an objection',
+    closing: 'escalate',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-unconfirmed',
+    note: 'a void verdict (no pass, no escalate, no contradiction) takes its own skip reason',
+    closing: 'unconfirmed',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-no-claim',
+    note: 'a classification that accepts nothing is paid for and then skipped',
+    closing: 'no-claim',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-low-confidence-claim',
+    note: 'a claim below the resolved confidence floor is not a claim',
+    closing: 'low-confidence-claim',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-classify-throws',
+    note: 'an unavailable classifier fails open inside the decision, not as a planning error',
+    closing: 'classify-throws',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-verify-throws',
+    note: 'a failure after classification is the outer fail-open branch',
+    closing: 'verify-throws',
+    steps: closingTurn(GREEN_CLAIM)
+  },
+  {
+    id: 'closing-last-claim-contradicted',
+    note: 'only the last claim of several is contradicted: the list, not just its length',
+    closing: 'last-contradicted',
+    steps: closingTurn('Ran the suite. Fixed the module. All tests pass and the build is green.')
+  },
+  {
+    id: 'closing-no-evidence',
+    note: 'a turn that produced no tool result never buys a closing judgment',
+    steps: [{ ev: 'turn-stop', turn: 1, step: 1, claims: GREEN_CLAIM }]
+  },
+  {
+    id: 'closing-no-failure-evidence',
+    note: 'a turn whose evidence carries no failure is not a suspicious closing',
+    steps: closingTurn(GREEN_CLAIM, { failing: false })
+  },
+  {
+    id: 'closing-silent-turn',
+    note: 'a turn that said nothing has no claim candidate, so nothing is bought',
+    steps: closingTurn('')
+  },
+  {
+    id: 'closing-short-utterance',
+    note: 'a single short sentence is below the candidate length floor',
+    steps: closingTurn('Done.')
+  },
+  {
+    id: 'closing-second-turn-is-a-new-episode',
+    note: 'the latch is per turn: the next turn may be objected to again',
+    steps: [
+      ...closingTurn(GREEN_CLAIM, { turn: 1, step: 1 }),
+      ...closingTurn(GREEN_CLAIM, { turn: 2, step: 2, failing: true, out: 'Exit code 1: still 2 failures' })
+    ]
+  },
+  {
+    id: 'closing-same-turn-twice',
+    note: 'one turn is objected to once, not once per stop boundary',
+    steps: [
+      ...closingTurn(GREEN_CLAIM, { turn: 1, step: 1 }),
+      { ev: 'turn-stop', turn: 1, step: 2, claims: 'Everything is green now, all tests pass.' }
+    ]
+  },
+  {
+    id: 'closing-truncated-evidence',
+    note: 'truncated evidence is *noted* and the decision continues — it is not a refusal',
+    steps: closingTurn(GREEN_CLAIM, {
+      // `other`-priority entries are the only ones the budget may drop, and each
+      // observation whose text has no failure marker contributes one. The budget
+      // is narrowed per activation so the corpus keeps a script that really
+      // truncates rather than trusting the default to be small.
+      out: Array.from({ length: 24 }, (_, index) => `observation ${index} of the build log`).join('\n')
+    })
+  },
+  {
+    id: 'closing-many-diagnostics',
+    note: 'diagnostic lines outrank the tail, and only they survive a tight budget',
+    steps: closingTurn(GREEN_CLAIM, {
+      out: Array.from({ length: 12 }, (_, index) => `error: module ${index} failed to resolve`).join('\n')
+    })
+  },
+  {
+    id: 'closing-non-ascii-claims',
+    note: 'the claims travel byte for byte through classification and verification',
+    steps: closingTurn('全部通过，测试全绿。构建也成功了。')
+  },
+  {
+    id: 'closing-after-prune-shares-the-budget',
+    note: 'a reduction and a closing judgment draw on the same turn allowance, in that order',
+    steps: [
+      ...closingTurn(GREEN_CLAIM, { turn: 1, step: 1, failing: true, out: 'Exit code 1: 3 tests failed' }),
+      { ev: 'tool', tool: 'bash', args: { command: 'after' }, out: lines(40, 'after'), turn: 1, step: 2 }
+    ]
+  },
+  {
+    id: 'closing-after-stagnation-shares-the-turn',
+    note: 'a pre-step correction books an action, and the closing check must see it gone',
+    steps: [
+      ...repeats(4, 'bash', { command: 'same' }, 'failed'),
+      { ev: 'pre-step', turn: 1, step: 5 },
+      { ev: 'turn-stop', turn: 1, step: 5, claims: GREEN_CLAIM }
+    ]
+  },
+  {
+    id: 'closing-claim-cap',
+    note: 'five sentences are bounded to the trailing three before anything is asked',
+    steps: closingTurn(
+      'First I looked at the module. Then I fixed the import. The suite ran. All tests pass now. And the build is green.'
+    )
+  }
+];
+
