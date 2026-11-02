@@ -34,6 +34,7 @@ const CORE_MODULES = [
   'closing.ts',
   'evidence.ts',
   'prune-plan.ts',
+  'orchestrate-host.ts',
   'orchestrate.ts',
   'orchestrate-stagnation.ts',
   'orchestrate-correction.ts'

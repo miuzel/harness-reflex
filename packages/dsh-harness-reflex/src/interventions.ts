@@ -1439,6 +1439,12 @@ export class InterventionEngine {
       {
         policy: () => this.#config,
         budget: () => state,
+        // The shared base asks "does this capability apply" the same way for every
+        // capability; for pruning the answer is the effective mode. `mode()` stays
+        // because the pruning decision needs the three-valued answer, not the
+        // boolean.
+        serves: () => this.modeOf('prune') !== 'off' && this.#config.enabled,
+        clock: () => ({ now: () => this.#now() }),
         mode: () => this.modeOf('prune'),
         threshold: () => this.#pruneThreshold,
         floor: () => ({

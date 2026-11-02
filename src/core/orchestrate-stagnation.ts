@@ -68,6 +68,7 @@
 import type { StagnationCheckResponse } from '../backend/types.js';
 import type { ClockPort } from '../ports/clock.js';
 import type { StagnationBackendPort } from '../ports/decision.js';
+import type { HostBillingPort, HostDecisionPort } from './orchestrate-host.js';
 import {
   judgmentCharge,
   runJudgment,
@@ -178,18 +179,18 @@ export interface StagnationState extends BudgetState {
   verdict?: StagnationCheckResponse;
 }
 
-/** Everything the shared layer cannot know by itself. */
-export interface HostStagnationPort<Decision, Corrected> {
-  /** The resolved policy in force right now. */
-  policy(): PolicySnapshot;
-  /** The counters this decision spends from and books against. */
-  budget(): StagnationState;
+/**
+ * Everything the shared layer cannot know by itself.
+ *
+ * {@link HostDecisionPort} answers the part every capability asks — policy,
+ * counters, clock, switch, and the three billing channels — so this interface
+ * states only what a *refusal or correction* additionally needs.
+ */
+export interface HostStagnationPort<Decision, Corrected>
+  extends HostDecisionPort<StagnationState>,
+    HostBillingPort<JudgedCharge, StagnationPlanRecord> {
   /** The service that answers the judgment. */
   backend(): StagnationBackendPort;
-  /** The clock, for the local-latency split. */
-  clock(): ClockPort;
-  /** Whether the decision applies at all (master switch on, capability not off). */
-  serves(): boolean;
   /** Name of the call being decided, for the record and the wording. */
   toolName(): string;
   /** The recorded window, oldest first, *without* the call about to run. */
@@ -235,18 +236,6 @@ export interface HostStagnationPort<Decision, Corrected> {
   denyFeedback(facts: StagnationFeedbackFacts): string;
   /** Word the corrective context attached to a step. */
   contextFeedback(facts: StagnationFeedbackFacts): string;
-  /**
-   * Record one abandoned plan by reason.
-   *
-   * The judgment is passed in because the record has to say what the refusal
-   * cost: a paid "not stuck" and a free "budget spent" are different answers, and
-   * a skip that reported both as free would understate the turn.
-   */
-  skip(reason: string, charge?: JudgedCharge): void;
-  /** Bill one judgment whose plan was abandoned. */
-  chargeJudgment(charge: JudgedCharge): void;
-  /** Record one applied or observed plan. */
-  conclude(plan: StagnationPlanRecord, applied: boolean, charge: JudgedCharge): void;
 }
 
 /** The outcome of one orchestrated decision. */

@@ -79,6 +79,7 @@ import {
   type ObservedStep,
   type StagnationSuspicion
 } from './judge.js';
+import type { HostBillingPort, HostDecisionPort } from './orchestrate-host.js';
 import { actionWithinBudget, bookAction, modeOf, type BudgetState, type PolicySnapshot } from './policy.js';
 import { clip } from './text.js';
 
@@ -133,18 +134,18 @@ export interface CorrectionState extends JudgmentState {
   step: number;
 }
 
-/** Everything the shared layer cannot know by itself. */
-export interface HostCorrectionPort<Result> {
-  /** The resolved policy in force right now. */
-  policy(): PolicySnapshot;
-  /** The counters this decision spends from and books against. */
-  budget(): CorrectionState;
+/**
+ * Everything the shared layer cannot know by itself.
+ *
+ * {@link HostDecisionPort} answers the part every capability asks — policy,
+ * counters, clock, switch, and the three billing channels — so this interface
+ * states only what a *correction* additionally needs.
+ */
+export interface HostCorrectionPort<Result>
+  extends HostDecisionPort<CorrectionState>,
+    HostBillingPort<JudgedCharge, CorrectionPlanRecord> {
   /** The service that answers the judgment. */
   backend(): StagnationBackendPort;
-  /** The clock, for the local-latency split. */
-  clock(): ClockPort;
-  /** Whether the decision applies at all (master switch on, capability not off). */
-  serves(): boolean;
   /** Name of the call whose result is being decided. */
   toolName(): string;
   /** The failure text, as the model would read it. */
@@ -184,17 +185,6 @@ export interface HostCorrectionPort<Result> {
   apply(feedback: string): Result;
   /** Word the correction handed to the model. */
   describe(facts: CorrectionFeedbackFacts): string;
-  /**
-   * Record one abandoned plan by reason.
-   *
-   * The judgment is passed in because the record has to say what the correction
-   * cost: a paid "not stuck" and a free "budget spent" are different answers.
-   */
-  skip(reason: string, charge?: JudgedCharge): void;
-  /** Bill one judgment whose plan was abandoned. */
-  chargeJudgment(charge: JudgedCharge): void;
-  /** Record one applied or observed plan. */
-  conclude(plan: CorrectionPlanRecord, applied: boolean, charge: JudgedCharge): void;
 }
 
 /** The outcome of one orchestrated decision. */

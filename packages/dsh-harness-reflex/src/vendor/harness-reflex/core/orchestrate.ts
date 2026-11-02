@@ -46,6 +46,7 @@
  *
  * @module core/orchestrate
  */
+import type { HostDecisionPort } from './orchestrate-host.js';
 import { actionWithinBudget, bookAction, spendJudgment, type BudgetState, type PolicySnapshot } from './policy.js';
 import { applyPruneFloor, type PruneFloorPlan } from './prune-plan.js';
 import { digestOf, estimateTokens, type TextBlockLike } from './text.js';
@@ -209,26 +210,40 @@ export interface PruneJudgmentCharge {
 }
 
 /**
- * Everything the shared layer cannot know by itself.
+ * Everything the pruning decision cannot know by itself.
  *
- * Every method is required: a host either can answer the question or it has
- * configured itself not to prune at all.
+ * {@link HostDecisionPort} answers the part every capability asks — policy,
+ * counters, billing channels — but this port departs from the base in two ways,
+ * and both are deliberate rather than pending:
+ *
+ * 1. **`skip` and `conclude` are wider here.** A pruning skip carries the
+ *    payload diagnostics (`digest`, `floored`, the segment counts) that make
+ *    "why was nothing pruned" answerable, and a pruning `conclude` carries the
+ *    four size columns and the retained locator that make a saving verifiable.
+ *    Narrowing either to the base signature would drop a field the audit trail
+ *    is defined by, so this port overrides them with the wider shape.
+ * 2. **`now()` replaces `clock()`.** The pruning decision only ever needs one
+ *    number, taken at hook entry; handing it a port for one reading would be a
+ *    ceremony. The signature is structurally compatible with `ClockPort`, so a
+ *    host can satisfy either reading from the same source.
+ *
+ * The rest — `serves()`, `budget()`, `chargeJudgment()` — keeps the base
+ * contract: `serves()` is answered from the effective mode, which this port
+ * already exposes as `mode()`.
  */
-export interface HostPrunePort {
-  /** The resolved policy in force right now (re-read per decision). */
-  policy(): PolicySnapshot;
-  /** This turn's counters. The shared layer mutates them through it. */
-  budget(): BudgetState;
+export interface HostPrunePort extends HostDecisionPort<BudgetState> {
   /** The effective mode of the `prune` capability. */
   mode(): 'off' | 'observe' | 'active';
+  /** Whether the decision applies at all: the mode is not `off`. */
+  serves(): boolean;
+  /** Latest clock reading. Structurally the same reading `ClockPort` gives. */
+  now(): number;
   /** Character count above which a payload is a pruning candidate. */
   threshold(): number;
   /** Floor settings in force. */
   floor(): PruneFloorSettings;
   /** Turn and step this decision belongs to, for the audit record. */
   position(): { turn: number; step: number };
-  /** Latest clock reading, for the local-latency split. */
-  now(): number;
   /** The memo namespace of this agent's session. */
   memoKey(): string;
   /** One memoized reduction, refreshed on hit; `undefined` when not remembered. */
