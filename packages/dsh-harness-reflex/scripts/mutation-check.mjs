@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 454;
+const EXPECTED_TESTS = 471;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -558,6 +558,97 @@ const MUTATIONS = [
       '      // Deliberately the raw window, not the progress-only one: see the doc above.',
       '      window: () => sharedProgressSteps(state.steps),'
     ].join('\n')
+  },
+  // ── the closing check (P4) ────────────────────────────────────────────────
+  // The closing decision is the one whose *only* model-visible consequence is a
+  // steered message, so each fault below makes the check say something it must
+  // not (or act when it must not). None of them can be caught by the prune or
+  // stagnation anchors: they all target a file those batches never wrote.
+  {
+    // The single most dangerous fault in this batch: an undecided verdict is how
+    // an unavailable backend degrades, and steering on it turns a service failure
+    // into a model-visible objection.
+    name: 'closing-escalate-steers',
+    area: 'an undecided verdict is never turned into an objection',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "    .filter((item) => item.outcome === 'contradicted')",
+    to: "    .filter((item) => item.outcome === 'contradicted' || item.outcome === 'escalate')"
+  },
+  {
+    // `evidence-truncated` is the one note that must not return. Making it a
+    // refusal disables the check on exactly the long runs that need it.
+    name: 'closing-truncation-refuses',
+    area: 'truncated evidence is noted, and the decision continues',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "  if (assembled.truncatedChars > 0) note('evidence-truncated');",
+    to: "  if (assembled.truncatedChars > 0) return refuse('evidence-truncated');"
+  },
+  {
+    // The latch is the turn, not the signature: a closing episode is the turn
+    // itself, so dropping it objects at every boundary of the same turn.
+    name: 'closing-turn-not-latched',
+    area: 'one turn is objected to once, not once per boundary',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "  if (port.alreadyObjected()) return refuse('duplicate-intervention');",
+    to: "  if (false) return refuse('duplicate-intervention');"
+  },
+  {
+    // The classifier failing is a decision-local fail-open with its own reason.
+    // Folding it into the outer catch loses which half of the judgment was down.
+    name: 'closing-classifier-not-local',
+    area: 'an unavailable classifier fails open inside the decision',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "    return refuse('closing-claim-unavailable');",
+    to: "    throw new Error('classifier unavailable');"
+  },
+  {
+    // Observe measures the same decision active would make. Publishing in it
+    // would make the mode a second policy rather than a preview.
+    name: 'closing-observe-steers',
+    area: 'observe plans the objection without steering it',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "  const applies = mode === 'active';",
+    to: '  const applies = true;'
+  },
+  {
+    // The ceiling is asked before the judgment, so a refused turn buys nothing.
+    name: 'closing-cap-after-judgment',
+    area: 'the turn ceiling is asked before any judgment is bought',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "  if (!actionWithinBudget(state, policy)) return refuse('intervention-cap');",
+    to: "  if (false) return refuse('intervention-cap');"
+  },
+  {
+    // Two requests, one judgment. Billing the classification separately spends a
+    // slot the turn budget did not grant.
+    name: 'closing-classification-not-billed',
+    area: 'a classification that finds no claim is still billed',
+    file: 'src/vendor/harness-reflex/core/orchestrate-closing.ts',
+    from: "    return refuse('closing-no-claim', classificationCharge);",
+    to: "    return refuse('closing-no-claim');"
+  },
+  {
+    // The engine-level counter is not per-agent; dropping it leaves the panel
+    // reporting a number no run produced.
+    name: 'closing-evidence-not-counted',
+    area: 'the engine-level evidence counters record what was assembled',
+    file: 'src/interventions.ts',
+    from: [
+      '        noteEvidence: (stats) => {',
+      '          this.#evidenceStats.retainedChars += stats.retainedChars;'
+    ].join('\n'),
+    to: [
+      '        noteEvidence: (stats) => {',
+      '          this.#evidenceStats.retainedChars += 0;'
+    ].join('\n')
+  },
+  {
+    // The empty-state rule: `off` must leave no trace, not even an agent state.
+    name: 'closing-off-creates-state',
+    area: 'a capability that is off leaves no trace at all',
+    file: 'src/interventions.ts',
+    from: "    if (this.modeOf('closing') === 'off' || !this.config.enabled) return;\n    const started = this.#now();",
+    to: "    const started = this.#now();"
   },
   // The two capability switches (g-009): the effort layer's on/off answer, and
   // the per-tool one. Each fault disables the switch itself, not a downstream

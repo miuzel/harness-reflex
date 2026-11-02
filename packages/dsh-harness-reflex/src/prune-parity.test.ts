@@ -957,3 +957,151 @@ test('negative control: a perturbed evidence counter is visible', async () => {
   const perturbed = { ...legacy.output.evidence, retainedChars: legacy.output.evidence.retainedChars + 1 };
   assert.notDeepEqual(shared.output.evidence, perturbed, 'one character of the engine-level counter must be visible');
 });
+
+// ── 10. the rules the closing check itself must not lose ────────────────────
+
+/**
+ * The closing check's own rules, each pinned on a script where it decides.
+ *
+ * The parity comparison proves the live engine and the snapshot agree; these
+ * assertions prove that *what they agree on* is still the right thing. Every one
+ * of them replays the **frozen snapshot**, which is the pre-refactor engine and
+ * therefore the old behaviour — calibrating an assertion to an implementation is
+ * only safe when the implementation is the old one.
+ */
+test('closing: an undecided verdict is never turned into an objection', async () => {
+  // `escalate` means the backend could not decide. Steering on it would turn a
+  // service failure into a model-visible objection, so the branch must be its own
+  // reason and must not steer anything.
+  const trace = await replaySnapshot(scriptById('closing-escalate'), { mode: 'active' });
+  const stops = stopsOf(trace);
+  assert.deepEqual(stops[0]!.steered, [], 'an undecided verdict steers nothing');
+  assert.equal(stops[0]!.latched, false, 'and does not consume the turn');
+  assert.equal(skipReasonsOf(trace).filter((reason) => reason === 'closing-undecided').length, 1, 'it reports its own reason');
+  const closing = (trace.output.costs as { byCapability: { closing: { judgments: number; applied: number } } }).byCapability.closing;
+  assert.equal(closing.applied, 0, 'no action is taken');
+  assert.equal(closing.judgments, 1, 'but the judgment it bought is billed: the turn really spent it');
+});
+
+test('closing: the two requests are one judgment, and it costs one slot', async () => {
+  // A classification and a verification are one logical judgment. If either were
+  // billed separately the turn would spend two slots, and a turn whose budget is
+  // one would refuse the closing check it should have been able to afford.
+  const contradicted = await replaySnapshot(scriptById('closing-contradicted'), { mode: 'active' });
+  const closing = (contradicted.output.costs as { byCapability: { closing: { judgments: number; applied: number } } }).byCapability.closing;
+  assert.equal(closing.judgments, 1, 'two requests, one judgment');
+  assert.equal(closing.applied, 1, 'and one action');
+  // A budget of one judgment is enough for a full check: the classification and
+  // the verification both fit inside it.
+  const tight = await replaySnapshot(scriptById('closing-contradicted'), {
+    mode: 'active',
+    policy: { maxJudgmentsPerTurn: 1 }
+  });
+  const tightSkips = tight.output.skips as Record<string, number>;
+  assert.equal(tightSkips['judgment-turn-cap'] ?? 0, 0, 'a one-slot turn still affords the whole check');
+  assert.equal(skipReasonsOf(tight).filter((reason) => reason === 'closing-no-claim').length, 0, 'and reaches its answer');
+});
+
+test('closing: truncated evidence is noted, not refused', async () => {
+  // The one skip in four modules that does not return. A closing check whose
+  // evidence was assembled from a truncated set still decides on what survived —
+  // stopping there would silently disable the check on exactly the long runs that
+  // need it most.
+  const trace = await replaySnapshot(scriptById('closing-many-diagnostics'), {
+    mode: 'active',
+    policy: { closingEvidenceChars: 400 }
+  });
+  const reasons = skipReasonsOf(trace);
+  assert.ok(reasons.includes('evidence-truncated'), `the note must be recorded; saw ${reasons.join(', ')}`);
+  assert.ok(trace.output.evidence.truncatedChars > 0, 'and the engine-level counter records what was dropped');
+  assert.equal(stopsOf(trace)[0]!.steered.length, 1, 'the decision continued past the note and objected');
+});
+
+test('closing: the classifier failing is a decision-local fail-open, not a planning error', async () => {
+  // Two different failures with two different meanings: an unavailable classifier
+  // never becomes an objection and is reported as such, while a failure after the
+  // classification falls to the outer fail-open. Reporting both as one reason
+  // would hide which half of the judgment was unavailable.
+  const trace = await replaySnapshot(scriptById('closing-classify-throws'), { mode: 'active' });
+  assert.equal(skipReasonsOf(trace).filter((reason) => reason === 'closing-claim-unavailable').length, 1, 'the local reason');
+  assert.equal(skipReasonsOf(trace).filter((reason) => reason === 'planning-error').length, 0, 'not the outer one');
+  assert.deepEqual(stopsOf(trace)[0]!.steered, [], 'and nothing is steered');
+
+  const outer = await replaySnapshot(scriptById('closing-verify-throws'), { mode: 'active' });
+  assert.equal(skipReasonsOf(outer).filter((reason) => reason === 'planning-error').length, 1, 'a verifier failure is the outer branch');
+  assert.deepEqual(stopsOf(outer)[0]!.steered, [], 'and it, too, leaves the turn alone');
+});
+
+test('closing: the per-turn latch is the turn, not the signature', async () => {
+  // The other three capabilities latch by identity, because a repeated call is an
+  // episode. A closing check has no such identity: the episode is the turn, so the
+  // same turn is never objected to twice and the next turn is a new episode.
+  const twice = await replaySnapshot(scriptById('closing-same-turn-twice'), { mode: 'active' });
+  const stops = stopsOf(twice);
+  assert.equal(stops.length, 2, 'two boundaries in one turn');
+  assert.equal(stops[0]!.steered.length, 1, 'the first objects');
+  assert.deepEqual(stops[1]!.steered, [], 'the second does not');
+  assert.equal(skipReasonsOf(twice).filter((reason) => reason === 'duplicate-intervention').length, 1, 'and says why');
+
+  const across = await replaySnapshot(scriptById('closing-second-turn-is-a-new-episode'), { mode: 'active' });
+  const stops2 = stopsOf(across);
+  assert.equal(stops2[0]!.steered.length, 1, 'the first turn objects');
+  assert.equal(stops2[1]!.steered.length, 1, 'and the next turn may object again: it is a new episode');
+});
+
+test('closing: the turn ceiling is asked before any judgment is bought', async () => {
+  const trace = await replaySnapshot(scriptById('closing-contradicted'), {
+    mode: 'active',
+    policy: { maxInterventionsPerTurn: 0 }
+  });
+  assert.ok(skipReasonsOf(trace).includes('intervention-cap'), 'the ceiling is reachable');
+  const closing = (trace.output.costs as { byCapability: { closing: { judgments: number; applied: number } } }).byCapability.closing;
+  assert.equal(closing.applied, 0, 'nothing is applied');
+  assert.equal(closing.judgments, 0, 'and the refused check bought no judgment');
+});
+
+test('closing: observe consumes the turn and publishes nothing', async () => {
+  const trace = await replaySnapshot(scriptById('closing-contradicted'), { mode: 'observe' });
+  const stops = stopsOf(trace);
+  assert.deepEqual(stops[0]!.steered, [], 'observe steers nothing into the turn');
+  assert.equal(stops[0]!.latched, true, 'but consumes the episode exactly as active would');
+  const closing = (trace.output.costs as { byCapability: { closing: { judgments: number; planned: number } } }).byCapability.closing;
+  assert.equal(closing.judgments, 1, 'and spends the same judgment');
+});
+
+test('closing: the four deterministic preconditions each stop on their own', async () => {
+  // Nothing the check does is a word list: whether a sentence claims completion is
+  // the backend's answer. These four preconditions are the only local judgement,
+  // and each one must be able to stop the check by itself.
+  const cases = ['closing-no-evidence', 'closing-no-failure-evidence', 'closing-silent-turn', 'closing-short-utterance'] as const;
+  for (const id of cases) {
+    const trace = await replaySnapshot(scriptById(id), { mode: 'active' });
+    const stops = stopsOf(trace);
+    assert.deepEqual(stops[0]!.steered, [], `${id}: nothing is steered`);
+    assert.equal((trace.output.costs as { byCapability: { closing: { judgments: number } } }).byCapability.closing.judgments, 0, `${id}: no judgment is bought`);
+    // These exits are silent on purpose: they describe every ordinary turn, and
+    // recording them would fill the histogram with noise rather than evidence.
+    assert.equal(skipReasonsOf(trace).filter((reason) => reason.startsWith('closing-')).length, 0, `${id}: and says nothing, because nothing was decided`);
+  }
+});
+
+test('closing: the objection quotes its contradictions and is bounded', async () => {
+  const trace = await replaySnapshot(scriptById('closing-contradicted'), { mode: 'active' });
+  const message = stopsOf(trace)[0]!.steered[0] as { text: string; source: string };
+  assert.equal(message.source, 'plugin:dsh-reflex', 'the message is attributed to this plugin');
+  assert.ok(message.text.includes('"All tests pass and the build is green."'), 'the contradicted claim is quoted');
+  assert.ok(message.text.length <= 600, 'and the text is bounded');
+  const record = closingRecordsOf(trace).find((entry) => entry.action === 'steer-closing')!;
+  assert.equal(record.turn, 1, 'the record names the turn it decided');
+  assert.equal(record.step, 1, 'and the step');
+  assert.equal(typeof record.confidence, 'number', 'and the confidence it rode on');
+});
+
+test('closing: claims are bounded to the trailing three before anything is asked', async () => {
+  const trace = await replaySnapshot(scriptById('closing-claim-cap'), { mode: 'active' });
+  assert.equal(stopsOf(trace)[0]!.steered.length, 1, 'the capped turn is objected to');
+  const record = closingRecordsOf(trace).find((entry) => entry.action === 'steer-closing')!;
+  // Three candidates at most: the trailing three sentences, not all five.
+  const quoted = String(record.feedback).split('; ').length;
+  assert.ok(quoted <= 3, `at most three claims are quoted; saw ${quoted}`);
+});
