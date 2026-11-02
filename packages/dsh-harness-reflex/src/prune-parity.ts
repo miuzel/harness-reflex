@@ -134,11 +134,23 @@ const ABORTED = (() => {
  * @param aborted - whether the call's signal is already aborted.
  * @returns the execution.
  */
-function execOf(name: string, args: unknown, agent: unknown, aborted = false): ToolExecution {
+function execOf(
+  name: string,
+  args: unknown,
+  agent: unknown,
+  aborted = false,
+  ordinal?: number
+): ToolExecution {
+  // The call identities are unique per execution, as the Host's are: a `callId`
+  // is minted once per call, so two calls can never share one even when they are
+  // the same command with the same arguments. An engine that keyed anything by
+  // the call rather than by the *signature* would be caught by a corpus that
+  // reused the identity, so the corpus deliberately does not.
+  const identity = ordinal === undefined ? name : `${name}-${ordinal}`;
   return {
-    callId: `call-${name}`,
-    token: `token-${name}`,
-    rootCallId: `root-${name}`,
+    callId: `call-${identity}`,
+    token: `token-${identity}`,
+    rootCallId: `root-${identity}`,
     name,
     arguments: args,
     signal: aborted ? ABORTED : new AbortController().signal,
@@ -518,6 +530,8 @@ export async function replay(
   const stopResults: unknown[] = [];
   let enteredTurn = 0;
   let enteredStep = 0;
+  /** Monotone identity counter, mirroring the Host's per-call ids. */
+  let callOrdinal = 0;
 
   for (const step of script.steps) {
     if (step.ev === 'pre-step') {
@@ -540,7 +554,8 @@ export async function replay(
     }
     if (step.ev === 'result') {
       // A result with no proposal in front of it: `tools/post-execute` only.
-      const exec = execOf(step.tool, step.args ?? {}, agent);
+      callOrdinal += 1;
+      const exec = execOf(step.tool, step.args ?? {}, agent, false, callOrdinal);
       const result = resultOf({ ev: 'tool', tool: step.tool, out: step.out, ...(step.isError === true ? { isError: true } : {}) });
       decisions.push(await engine.toolResult(exec, result, async () => downstreamOf({ ev: 'tool', tool: step.tool, out: step.out })));
       continue;
@@ -553,7 +568,10 @@ export async function replay(
     }
     const turn = step.turn ?? enteredTurn;
     const stepIndex = step.step ?? enteredStep;
-    const exec = execOf(step.tool, step.args ?? {}, agent, script.abortedCall === true);
+    // A monotone ordinal, not the step number: two steps of one script can share
+    // a step index after a turn boundary, and their call identities must not.
+    callOrdinal += 1;
+    const exec = execOf(step.tool, step.args ?? {}, agent, script.abortedCall === true, callOrdinal);
     preResults.push(describePre(await engine.toolCall(exec, async () => preDecisionOf(step) as never)));
     // The pre-step carries the turn boundary, then the step the call is about.
     await engine.preStep({ agent, messages: [], turn, step: stepIndex }, async () => ({ kind: 'enter' }) as never);

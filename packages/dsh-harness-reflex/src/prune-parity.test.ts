@@ -633,6 +633,7 @@ test('negative control: a freed action slot is visible', async () => {
   const perturbed = structuredClone(shared.output) as unknown as {
     costs: { byCapability: { gate: Record<string, number> } };
   };
-  perturbed.costs.byCapability.gate.interventions = Number(perturbed.costs.byCapability.gate.interventions ?? 0) - 1;
+  perturbed.costs.byCapability.gate.applied = Number(perturbed.costs.byCapability.gate.applied ?? 0) - 1;
   assert.notDeepEqual(perturbed, legacy.output, 'an unbooked correction must be visible in the account');
 });
+
