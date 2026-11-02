@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 439;
+const EXPECTED_TESTS = 446;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -490,6 +490,74 @@ const MUTATIONS = [
     // not have, so this is the pre-execute site.
     from: ['  invocation.noteRefused?.();'].join('\n'),
     to: ['  void 0;'].join('\n')
+  },
+  // The failure-correction decision now lives in the shared core (P3). These
+  // faults target the order and the rules that moved there, one per rule a
+  // reader would most expect a refactor to lose.
+  {
+    name: 'correction-ignores-action-ceiling',
+    area: 'a correction draws on the turn\u2019s shared action ceiling',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    // The trigger and the latch are left intact: only the ceiling check
+    // disappears, so an episode with no allowance left is still corrected.
+    from: '  if (!actionWithinBudget(port.budget(), port.policy())) {',
+    to: '  if (false) {'
+  },
+  {
+    name: 'correction-episode-not-latched',
+    area: 'one failure episode is corrected once, not once per attempt',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    from: '  if (port.alreadyCorrected()) {',
+    to: '  if (false) {'
+  },
+  {
+    name: 'correction-rewrites-a-blocked-result',
+    area: 'a result the rest of the waterfall blocked is left alone',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    from: '  if (invocation.blockedByDownstream) return passThrough();',
+    to: '  void 0;'
+  },
+  {
+    // The line that only active mode may install the rewrite. Without it the
+    // model reads a correction while the capability is only observing.
+    name: 'correction-observe-installs',
+    area: 'observe plans a correction without installing it',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    from: "  const applies = mode === 'active';",
+    to: '  const applies = true;'
+  },
+  {
+    // Named apart from the stagnation batch's `correction-unbooked` (that one is
+    // the pre-step message); this is post-execute's rewritten result.
+    name: 'correction-feedback-unbooked',
+    area: 'a planned correction draws on the same ceiling',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    from: ['  bookAction(port.budget());', '  port.conclude(plan, applies, charge);'].join('\n'),
+    to: '  port.conclude(plan, applies, charge);'
+  },
+  {
+    name: 'correction-judgment-unbilled',
+    area: 'a judgment whose plan was abandoned is still billed',
+    file: 'src/vendor/harness-reflex/core/orchestrate-correction.ts',
+    from: ['    port.chargeJudgment(charge);', '    const skip'].join('\n'),
+    to: '    const skip'
+  },
+  {
+    name: 'correction-dsh-window-filtered',
+    area: 'a failing poll is still a failure to correct',
+    file: 'src/interventions.ts',
+    // Anchored on the two neighbouring port methods, because the stagnation ports
+    // have the same window line and must keep theirs.
+    from: [
+      '      error: () => error,',
+      '      // Deliberately the raw window, not the progress-only one: see the doc above.',
+      '      window: () => state.steps,'
+    ].join('\n'),
+    to: [
+      '      error: () => error,',
+      '      // Deliberately the raw window, not the progress-only one: see the doc above.',
+      '      window: () => sharedProgressSteps(state.steps),'
+    ].join('\n')
   },
   // The two capability switches (g-009): the effort layer's on/off answer, and
   // the per-tool one. Each fault disables the switch itself, not a downstream

@@ -122,6 +122,13 @@ import {
   type StagnationFeedbackFacts,
   type StagnationPlanRecord
 } from './vendor/harness-reflex/core/orchestrate-stagnation.js';
+import {
+  describeCorrection,
+  orchestrateCorrection,
+  type CorrectionFeedbackFacts,
+  type CorrectionPlanRecord,
+  type HostCorrectionPort
+} from './vendor/harness-reflex/core/orchestrate-correction.js';
 import { clip, digestOf, estimateTokens, hasTextBlock, textOfContent } from './vendor/harness-reflex/core/text.js';
 
 // The decision primitives keep their historic import path: a caller that already
@@ -1506,7 +1513,34 @@ export class InterventionEngine {
     return outcome.result as PostToolDecision;
   }
 
-  /** Plan, and in active mode apply, the correction of one repeated failure. */
+  /**
+   * `tools/post-execute`: rewrite a result the run keeps failing to change.
+   *
+   * The *order* of this decision — the failure latch, the turn's allowance, the
+   * judgment and its memo, the episode latch, the booking — is
+   * `orchestrateCorrection`'s. What stays here is everything the shared layer
+   * cannot know:
+   *
+   * - **the window**: `state.steps`, recorded by this engine. It is handed over
+   *   *unfiltered*, unlike the stagnation windows: a failing poll is a failure
+   *   even though a wait is not progress, so `progressSteps` would be the wrong
+   *   rule on this path;
+   * - **the strength of the action**: `apply` answers with a `block` carrying the
+   *   feedback, which replaces the result outright. That is this Host's way of
+   *   showing a correction; a command hook would carry the same text as context
+   *   next to the untouched result, and the shared layer may not pick for it;
+   * - **the wording**: `describeCorrection` is the product text, and it is this
+   *   plugin's, not the core's — the same decision read by a different host
+   *   should still read naturally to that host's user.
+   *
+   * @param exec - the call whose result failed.
+   * @param result - the canonical outcome, for its error text.
+   * @param downstream - what the rest of the waterfall decided for the result.
+   * @param state - the deciding agent's bookkeeping.
+   * @param signature - the identity of the failure episode.
+   * @param started - clock reading at hook entry, for the latency split.
+   * @returns the result the Host commits.
+   */
   async #correctFailure(
     exec: ToolExecution,
     result: Readonly<ToolExecutionResult>,
@@ -1515,64 +1549,61 @@ export class InterventionEngine {
     signature: string,
     started: number
   ): Promise<PostToolDecision> {
-    const capability = this.modeOf('gate');
-    if (capability === 'off') return downstream;
-    if (downstream.kind === 'block') return downstream;
-    const suspicion = suspicionOf(state.steps, {
-      repeatThreshold: this.config.repeatThreshold,
-      failureThreshold: this.config.failureThreshold,
-      window: this.config.windowSize,
-      signature
-    });
-    if (!suspicion.suspicious || state.applied.has(`gate:${signature}`)) {
-      if (suspicion.suspicious) {
-        this.#skip('duplicate-intervention', { capability: 'gate', state, agent: exec.agent });
-      }
-      return downstream;
-    }
-    if (!actionWithinBudget(state, this.#config)) {
-      this.#skip('intervention-cap', { capability: 'gate', state, agent: exec.agent });
-      return downstream;
-    }
     const agentId = agentKeyOf(exec.agent);
-    const verdict = await this.#judge(state, exec.signal);
-    const judgment = judgmentCharge(verdict, started, this.#now());
-    if (!verdict.useful) {
-      this.#charge('gate', judgment);
-      this.#skip(verdict.skip ?? 'unconfirmed', {
-        capability: 'gate',
-        state,
-        agent: exec.agent,
-        judgment
-      });
-      return downstream;
-    }
-
-    const plan: InterventionPlan = {
-      capability: 'gate',
-      action: 'corrective-feedback',
-      reason: `${exec.name} failed ${suspicion.repeats} times; System 1 confirmed ${verdict.response.patternType ?? suspicion.pattern}`,
-      feedback: this.#failureFeedback(exec.name, this.#errorOf(result), suspicion, verdict.response),
-      detail: {
-        pattern: String(verdict.response.patternType ?? suspicion.pattern ?? 'unknown'),
-        confidence: verdict.response.confidence,
-        repeats: suspicion.repeats,
-        turn: state.turn,
-        step: state.step
-      }
+    const error = this.#errorOf(result);
+    const port: HostCorrectionPort<PostToolDecision> = {
+      policy: () => this.#config,
+      budget: () => state,
+      backend: () => this.#stagnation,
+      clock: () => ({ now: () => this.#now() }),
+      serves: () => this.#config.enabled,
+      toolName: () => exec.name,
+      error: () => error,
+      // Deliberately the raw window, not the progress-only one: see the doc above.
+      window: () => state.steps,
+      signature: () => signature,
+      suspicion: (steps) =>
+        suspicionOf(steps, {
+          repeatThreshold: this.config.repeatThreshold,
+          failureThreshold: this.config.failureThreshold,
+          window: this.config.windowSize,
+          signature
+        }),
+      alreadyCorrected: () => state.applied.has(`gate:${signature}`),
+      latchCorrected: () => state.applied.add(`gate:${signature}`),
+      passThrough: () => downstream,
+      // This Host's strength for a correction: the result is replaced by the
+      // feedback. `additionalContexts` the rest of the waterfall attached are
+      // carried over, so somebody else's context is not lost to ours.
+      apply: (feedback) => ({
+        kind: 'block',
+        feedback: [{ type: 'text', text: feedback }],
+        ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
+          ? { additionalContexts: [...downstream.additionalContexts] }
+          : {})
+      }),
+      describe: (facts: CorrectionFeedbackFacts) =>
+        describeCorrection(facts, { errorChars: 160, adviceChars: 240, totalChars: FEEDBACK_CHARS }),
+      skip: (reason, charge) =>
+        this.#skip(reason, {
+          capability: 'gate',
+          state,
+          agent: exec.agent,
+          ...(charge === undefined ? {} : { judgment: charge })
+        }),
+      chargeJudgment: (charge: JudgedCharge) => this.#charge('gate', charge),
+      conclude: (plan: CorrectionPlanRecord, applied: boolean, charge: JudgedCharge) =>
+        this.#conclude(plan as InterventionPlan, applied, exec.agent, { potentialSavedTokens: 0 }, charge)
     };
-    const applied = capability === 'active';
-    state.applied.add(`gate:${signature}`);
-    bookAction(state);
-    this.#conclude(plan, applied, exec.agent, { potentialSavedTokens: 0 }, judgment);
-    if (!applied) return downstream;
-    return {
-      kind: 'block',
-      feedback: [{ type: 'text', text: plan.feedback }],
-      ...(downstream.additionalContexts && downstream.additionalContexts.length > 0
-        ? { additionalContexts: [...downstream.additionalContexts] }
-        : {})
-    };
+    // `started` is kept in the signature because it is what the *hook* measured,
+    // and the shared layer takes its own reading at the moment the judgment is
+    // bought. Both read the same clock, so the latency this decision reports is
+    // unchanged by the lift; the parameter stays so a later local-latency rule
+    // can still see the hook's own entry time.
+    void started;
+    void agentId;
+    const outcome = await orchestrateCorrection({ failed: true, blockedByDownstream: downstream.kind === 'block' }, port);
+    return outcome.result;
   }
 
   // ── judgment, budgets, and memo ─────────────────────────────────────────────
@@ -2071,17 +2102,6 @@ export class InterventionEngine {
       `Reflex intervention: the last steps repeated the same call ${suspicion.repeats} times (System 1: ${verdict.patternType ?? suspicion.pattern}, ` +
         `confidence ${verdict.confidence.toFixed(2)}). Stop the loop and change strategy: ` +
         `${advice || 're-read the last failure, then either fix the cause or try a different tool.'}`,
-      FEEDBACK_CHARS
-    );
-  }
-
-  /** The corrective feedback carried by a repeated failing result. */
-  #failureFeedback(tool: string, error: string, suspicion: StagnationSuspicion, verdict: StagnationCheckResponse): string {
-    const advice = clip((verdict.recommendedIntervention ?? '').replace(/\s+/g, ' ').trim(), 240);
-    return clip(
-      `Reflex intervention: ${tool} failed ${suspicion.repeats} consecutive times with ${clip(error.replace(/\s+/g, ' ').trim(), 160)}. ` +
-        `System 1 confirms ${verdict.patternType ?? suspicion.pattern} (confidence ${verdict.confidence.toFixed(2)}). ` +
-        `This result is treated as a policy failure: change the command or the code before retrying. ${advice}`,
       FEEDBACK_CHARS
     );
   }

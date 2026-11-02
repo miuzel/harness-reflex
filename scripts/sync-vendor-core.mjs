@@ -35,7 +35,8 @@ const CORE_MODULES = [
   'evidence.ts',
   'prune-plan.ts',
   'orchestrate.ts',
-  'orchestrate-stagnation.ts'
+  'orchestrate-stagnation.ts',
+  'orchestrate-correction.ts'
 ];
 const PORT_DIR = 'ports';
 
