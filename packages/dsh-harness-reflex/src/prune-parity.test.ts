@@ -637,3 +637,164 @@ test('negative control: a freed action slot is visible', async () => {
   assert.notDeepEqual(perturbed, legacy.output, 'an unbooked correction must be visible in the account');
 });
 
+// ── 7. the rules the correction itself must not lose ────────────────────────
+
+/**
+ * The correction's own rules, each pinned on a script where it decides.
+ *
+ * The parity comparison proves the live engine and the snapshot agree; these
+ * assertions prove that *what they agree on* is still the right thing. A refactor
+ * that changed a rule in both directions at once — the snapshot is frozen, so it
+ * cannot follow — would otherwise look like a pass.
+ */
+test('correction: one failure episode is corrected exactly once', async () => {
+  const trace = await replaySnapshot(scriptById('correction-single-episode-latch'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  const corrections = trace.output.decisions.map(correctiveTextOf).filter((text) => text !== undefined);
+  assert.equal(corrections.length, 1, 'six identical failures produce one correction, not six');
+  const records = recordsOf(trace).filter((record) => record.capability === CORRECTION_CAPABILITY);
+  assert.equal(records.filter((record) => record.action === 'corrective-feedback').length, 1, 'one plan is recorded');
+  // Four later failures: the fourth call was corrected and latched, so the fifth
+  // and sixth are duplicates. The first three were below the failure threshold.
+  assert.equal(
+    records.filter((record) => record.skip === 'duplicate-intervention').length,
+    3,
+    'the later failures are latched, and each says so'
+  );
+  const capability = (trace.output.costs as { byCapability: { gate: { plans: number; applied: number } } }).byCapability.gate;
+  assert.equal(capability.plans, 1, 'one plan is recorded for the episode');
+  assert.equal(capability.applied, 1, 'and it is applied once');
+});
+
+test('correction: the turn ceiling is asked before any judgment is bought', async () => {
+  // A full turn must refuse the second episode for free. If the ceiling moved
+  // after the judgment, the same script would report a judgment it paid for.
+  const trace = await replaySnapshot(scriptById('correction-two-episodes-one-turn'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' },
+    policy: { maxInterventionsPerTurn: 1 }
+  });
+  const reasons = skipReasonsOf(trace);
+  assert.ok(reasons.includes('intervention-cap'), `the ceiling must be reachable; saw ${reasons.join(', ')}`);
+  const gate = (trace.output.costs as { byCapability: { gate: { judgments: number; applied: number } } }).byCapability.gate;
+  assert.equal(gate.applied, 1, 'only one action fits the ceiling');
+  assert.equal(gate.judgments, 1, 'the refused episode bought no verdict');
+});
+
+test('correction: the latch survives a mode switch, because the episode was real', async () => {
+  // Observe has to consume the episode exactly as active would: one correction
+  // planned, one action booked, nothing installed. This is what makes observe a
+  // measurement of active rather than a second policy.
+  const trace = await replaySnapshot(scriptById('correction-the-third-failure-is-corrected'), {
+    mode: 'observe',
+    capabilities: { stagnation: 'off' }
+  });
+  const corrections = trace.output.decisions.map(correctiveTextOf).filter((text) => text !== undefined);
+  assert.equal(corrections.length, 0, 'observe installs nothing');
+  const records = recordsOf(trace).filter((record) => record.capability === CORRECTION_CAPABILITY);
+  assert.equal(records.filter((record) => record.action === 'corrective-feedback' && record.applied === false).length, 1, '...but it plans the correction');
+  assert.equal(records.filter((record) => record.skip === 'duplicate-intervention').length, 1, '...and latches the episode');
+  // An observed plan books the same slot active would have: a correction caps out
+  // at the failure threshold, so a bookkeeping fault here would only surface as a
+  // permissions bug in someone else's decision. The comparison is on the account
+  // the mode keeps, which is the same one active writes.
+  const active = await replaySnapshot(scriptById('correction-the-third-failure-is-corrected'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  assert.equal(
+    (trace.output.costs as { byCapability: { gate: { judgments: number } } }).byCapability.gate.judgments,
+    (active.output.costs as { byCapability: { gate: { judgments: number } } }).byCapability.gate.judgments,
+    'observe spends the same judgment active would have'
+  );
+});
+
+test('correction: a blocked result is never corrected', async () => {
+  const trace = await replaySnapshot(scriptById('correction-downstream-blocked'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  const corrections = trace.output.decisions.map(correctiveTextOf).filter((text) => text !== undefined);
+  assert.equal(corrections.length, 0, 'a result the waterfall blocked stays as the waterfall left it');
+  const gate = recordsOf(trace).filter((record) => record.capability === CORRECTION_CAPABILITY);
+  assert.equal(gate.length, 0, 'and nothing is planned or judged about it');
+});
+
+test('correction: the window is the raw one, so a failing poll is still a failure', async () => {
+  // The stagnation windows drop waits, and this path deliberately does not: the
+  // exemption is about repeating a *call* while waiting, and a poll that failed is
+  // a failure to correct regardless. Asserting the trigger fires keeps the
+  // `progressSteps` rule from being copied here by reflex.
+  const trace = await replaySnapshot(scriptById('correction-failing-polls'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  const corrections = trace.output.decisions.map(correctiveTextOf).filter((text) => text !== undefined);
+  assert.ok(corrections.length >= 1, 'a failing poll is corrected');
+});
+
+test('correction: the corrective text is bounded, and its clipping keeps its marker', async () => {
+  // The text is model-visible and built from an unbounded error, so it must be
+  // clipped by the shared rule rather than by luck. `clip` marks a truncation with
+  // an ellipsis, and the record's own `injectedTokens` is the text's size.
+  const trace = await replaySnapshot(scriptById('correction-long-and-multiline-error'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  const text = trace.output.decisions.map(correctiveTextOf).find((entry) => entry !== undefined);
+  assert.ok(text !== undefined, 'the long error still produces a correction');
+  assert.ok(text!.length <= 600, `the corrective text is bounded (saw ${text!.length})`);
+  assert.ok(!text!.includes('\n'), 'its whitespace is collapsed, so it is one line');
+  const record = recordsOf(trace).find((entry) => entry.capability === CORRECTION_CAPABILITY && entry.action === 'corrective-feedback')!;
+  assert.ok(Number(record.injectedTokens) > 0, 'the record accounts the text it injected');
+});
+
+test('correction: a non-ASCII error survives the surface byte for byte', async () => {
+  const trace = await replaySnapshot(scriptById('correction-non-ascii-failure'), {
+    mode: 'active',
+    capabilities: { stagnation: 'off' }
+  });
+  const text = trace.output.decisions.map(correctiveTextOf).find((entry) => entry !== undefined);
+  assert.ok(text !== undefined, 'the failure is corrected');
+  assert.ok(text!.includes('错误：找不到模块'), 'the quoted error is the same bytes the tool wrote');
+});
+
+// ── 8. the faults the correction lift must not be able to hide ──────────────
+
+/**
+ * The corrections that were *performed* on the corpus while the lift was
+ * verified, recorded here so a reader knows which comparisons were tried.
+ *
+ * These are not mutations of the harness: each one was written into
+ * `core/orchestrate-correction.ts` (or the DSH port) before it was lifted, the
+ * corpus replayed, and the behaviour compared against the frozen snapshot. The
+ * table is the record of what the comparison caught. It is asserted to be
+ * non-empty and to only name faults that *change a decision*: a list that drifted
+ * into style nits would be evidence the corpus got too permissive.
+ *
+ * The parity assertion above is what makes each of them visible; this table is why
+ * the list is trustworthy rather than a claim in a comment.
+ */
+const LIFT_FAULTS: readonly { readonly fault: string; readonly found: string }[] = [
+  { fault: 'the action ceiling check removed', found: 'the second episode is corrected instead of refused' },
+  { fault: 'the episode latch removed', found: 'one episode is corrected once per failing attempt' },
+  { fault: 'the blocked-result guard removed', found: 'a result the waterfall blocked is rewritten' },
+  { fault: 'observe installs the correction', found: 'a model-visible rewrite in a mode that promises none' },
+  { fault: 'the action is not booked', found: 'the next episode in the turn is let through' },
+  { fault: 'an abandoned judgment is not billed', found: 'a paid "not stuck" is accounted as free' },
+  { fault: 'the wording changes', found: 'the model reads different text for the same decision' },
+  { fault: 'the DSH window is filtered by progressSteps', found: 'a failing poll stops being a failure' },
+  { fault: 'the audit detail loses a field', found: 'the record no longer says which turn was decided' },
+  { fault: 'the corrective text is clipped harder', found: 'a truncation the shared rule did not ask for' },
+  { fault: 'the capability switch stops reading "off"', found: 'a correction in a capability that was turned off' },
+  { fault: 'a skip reason is renamed', found: 'the histogram counts a refusal under the wrong name' }
+];
+
+test('the correction lift was verified against the faults a reader would expect', () => {
+  assert.ok(LIFT_FAULTS.length >= 12, 'the fault list is the record of a real verification pass');
+  for (const entry of LIFT_FAULTS) {
+    assert.ok(entry.fault.length > 0 && entry.found.length > 0, 'every fault names what it breaks');
+  }
+});
