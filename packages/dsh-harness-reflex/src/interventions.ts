@@ -114,6 +114,11 @@ import {
 import { applyPruneFloor } from './vendor/harness-reflex/core/prune-plan.js';
 import { orchestratePrune, type PruneFeedbackFacts } from './vendor/harness-reflex/core/orchestrate.js';
 import {
+  CLOSING_LATCH,
+  orchestrateClosing,
+  type HostClosingPort
+} from './vendor/harness-reflex/core/orchestrate-closing.js';
+import {
   orchestrateStagnationPre,
   orchestrateStagnationStep,
   progressSteps as sharedProgressSteps,
@@ -1239,132 +1244,75 @@ export class InterventionEngine {
    * @param payload - the agent whose turn reached its stop boundary.
    */
   async turnStopping(payload: { agent: unknown; turn: number; signal?: AbortSignal }): Promise<void> {
-    const capability = this.modeOf('closing');
-    if (capability === 'off' || !this.config.enabled) return;
+    // The mode check happens in the shared layer, deliberately: "off" is not a
+    // weaker decision, it is the absence of one, and a host that read the mode
+    // here as well would be the second place the switch is interpreted.
+    // The very first question is whether this decision exists at all. A turn that
+    // closes while the capability is off (or the master switch is off) must leave
+    // no trace — not even an empty per-agent state, which would show up in
+    // `stateOf()` as an agent the engine has seen. Asking it before touching any
+    // state is what keeps "off" the absence of a decision rather than a decision
+    // that did nothing.
+    if (this.modeOf('closing') === 'off' || !this.config.enabled) return;
     const started = this.#now();
     try {
       const agentId = agentKeyOf(payload.agent);
       const state = this.#state(agentId, payload.agent);
-      const claimsText = state.claims;
-      // Two deterministic facts decide whether a closing judgment is worth
-      // buying: the turn said something, and at least one result is a failure
-      // suspicion. Neither fact concludes *which* sentence claims completion —
-      // that is the System One question asked below.
-      if (claimsText.length === 0 || !state.evidenceSuspect) return;
-      const candidates = claimCandidates(claimsText);
-      if (candidates.length === 0) return;
-      if (state.applied.has(`closing:turn:${payload.turn}`)) {
-        this.#skip('duplicate-intervention', { capability: 'closing', state, agent: payload.agent });
-        return;
-      }
-      if (!actionWithinBudget(state, this.#config)) {
-        this.#skip('intervention-cap', { capability: 'closing', state, agent: payload.agent });
-        return;
-      }
-      if (payload.signal?.aborted) return;
-
-      // Assemble what the judgment will read. Truncation is by priority and
-      // never removes a failure-marker line; the amount dropped is reported.
-      const assembled = assembleEvidence(state.evidence, this.config.closingEvidenceChars);
-      this.#evidenceStats.retainedChars += assembled.retainedChars;
-      this.#evidenceStats.truncatedChars += assembled.truncatedChars;
-      if (assembled.truncatedChars > 0) {
-        this.#skip('evidence-truncated', { capability: 'closing', state, agent: payload.agent });
-      }
-
-      // The closing classification is a judgment like any other: one request
-      // with at most MAX_CLAIMS scored questions, bought from the same turn and
-      // session budget as a stagnation check.
-      const classifySkip = spendJudgment(state, this.#config);
-      if (classifySkip) {
-        this.#skip(classifySkip, { capability: 'closing', state, agent: payload.agent });
-        return;
-      }
-      const classifyStarted = this.#now();
-      let classification: Awaited<ReturnType<ReflexGateService['classifyClaims']>>;
-      try {
-        classification = await this.#gate.classifyClaims({
-          statements: candidates,
-          intent: this.config.intent,
-          context: assembled.text.slice(0, 600)
-        });
-      } catch {
-        // FAIL-OPEN: an unavailable classifier must not become a model-visible
-        // objection, and it must never fall back to the retired word list.
-        this.#skip('closing-claim-unavailable', { capability: 'closing', state, agent: payload.agent });
-        return;
-      }
-      const claims = classification.results
-        .filter((item) => item.isClaim && item.confidence >= this.config.claimMinConfidence)
-        .map((item) => ({ statement: item.statement }));
-      const classifyTokens = candidates.reduce((sum, statement) => sum + estimateTokens(statement), 0);
-      const classificationCharge: JudgmentCharge = {
-        judgments: 1,
-        memoHits: 0,
-        localLatencyMs: Math.max(0, this.#now() - classifyStarted - classification.latencyMs),
-        remoteLatencyMs: classification.latencyMs,
-        judgeTokens: classifyTokens
+      const turn = payload.turn;
+      const port: HostClosingPort = {
+        policy: () => this.#config,
+        budget: () => state,
+        clock: () => ({ now: () => this.#now() }),
+        serves: () => this.#config.enabled,
+        mode: () => this.modeOf('closing'),
+        turn: () => turn,
+        claims: () => state.claims,
+        evidenceSuspect: () => state.evidenceSuspect,
+        evidence: () => state.evidence,
+        evidenceBudget: () => this.config.closingEvidenceChars,
+        aborted: () => payload.signal?.aborted === true,
+        // The latch is *per turn*, not per signature: a closing episode is the
+        // turn itself. This is the one latch that does not fit the `Host*Port`
+        // shape the other capabilities use.
+        alreadyObjected: () => state.applied.has(CLOSING_LATCH.applied(turn)),
+        latchObjected: () => state.applied.add(CLOSING_LATCH.applied(turn)),
+        agentId: () => agentId,
+        classify: async (request) => {
+          const answer = await this.#gate.classifyClaims({
+            statements: [...request.statements],
+            intent: this.config.intent,
+            context: request.context
+          });
+          return answer;
+        },
+        verify: async (claims, evidence, options) => {
+          const answer = await this.#gate.verify([...claims], evidence, options);
+          return answer;
+        },
+        claimMinConfidence: () => this.config.claimMinConfidence,
+        describe: (facts) => this.#closingFeedback(facts.contradicted),
+        // The action itself stays here. Steering is the only way a listener may
+        // extend a turn, and the message it carries is this Host's to word.
+        steer: (feedback) => this.#steer(payload.agent, this.#message(agentId, turn, state.step, feedback)),
+        // `#evidenceStats` is engine-level, not per-agent: it counts what this
+        // activation assembled, across every agent it served.
+        noteEvidence: (stats) => {
+          this.#evidenceStats.retainedChars += stats.retainedChars;
+          this.#evidenceStats.truncatedChars += stats.truncatedChars;
+        },
+        skip: (reason, charge) =>
+          this.#skip(reason, {
+            capability: 'closing',
+            state,
+            agent: payload.agent,
+            ...(charge === undefined ? {} : { judgment: charge })
+          }),
+        chargeJudgment: (charge) => this.#charge('closing', charge),
+        conclude: (plan, applied, charge) =>
+          this.#conclude(plan as InterventionPlan, applied, payload.agent, { potentialSavedTokens: 0 }, charge)
       };
-      if (claims.length === 0) {
-        this.#charge('closing', classificationCharge);
-        this.#skip('closing-no-claim', {
-          capability: 'closing',
-          state,
-          agent: payload.agent,
-          judgment: classificationCharge
-        });
-        return;
-      }
-
-      // Classification and verification are one logical closing judgment: the
-      // classification decides *whether* anything is worth verifying, and both
-      // requests are charged (tokens and latency) against the one judgment the
-      // turn budget allowed.
-      const verdict = await this.#gate.verify(claims, assembled.text, {
-        latchCacheKey: `reflex-closing:${agentId}:${payload.turn}`
-      });
-      const judgeTokens =
-        classifyTokens + claims.reduce((sum, item) => sum + estimateTokens(item.statement), estimateTokens(assembled.text));
-      const judgment: JudgmentCharge = {
-        judgments: 1,
-        memoHits: 0,
-        localLatencyMs: Math.max(0, this.#now() - started - verdict.latencyMs - classification.latencyMs),
-        remoteLatencyMs: classification.latencyMs + verdict.latencyMs,
-        judgeTokens
-      };
-      // `escalate` is not a contradiction. It means the gate could not decide —
-      // an unavailable backend degrades exactly this way — and steering a turn on
-      // an undecided verdict would turn a backend failure into a model-visible
-      // objection. Only a verdict that really contradicts the claim steers.
-      const contradicted = verdict.results
-        .filter((item) => item.outcome === 'contradicted')
-        .map((item) => clip(item.statement, 160));
-      const undecided = verdict.results.filter((item) => item.outcome === 'escalate').length;
-      if (contradicted.length === 0) {
-        this.#charge('closing', judgment);
-        this.#skip(undecided > 0 ? 'closing-undecided' : verdict.passed ? 'closing-evidence-consistent' : 'closing-unconfirmed', {
-          capability: 'closing',
-          state,
-          agent: payload.agent,
-          judgment
-        });
-        return;
-      }
-
-      const plan: InterventionPlan = {
-        capability: 'closing',
-        action: 'steer-closing',
-        reason: `closing evidence contradicts ${contradicted.length} completion claim(s)`,
-        feedback: this.#closingFeedback(contradicted),
-        detail: { confidence: verdict.results[0]?.confidence, turn: payload.turn, step: state.step }
-      };
-      const applied = capability === 'active';
-      // Latched in both modes, for the same reason as the stagnation path: the
-      // episode is consumed once, and only the steering is gated on the mode.
-      state.applied.add(`closing:turn:${payload.turn}`);
-      bookAction(state);
-      this.#conclude(plan, applied, payload.agent, { potentialSavedTokens: 0 }, judgment);
-      if (applied) this.#steer(payload.agent, this.#message(agentId, payload.turn, state.step, plan.feedback));
+      void started;
+      await orchestrateClosing(port);
     } catch {
       // FAIL-OPEN: a failed closing check leaves the turn boundary alone.
       this.#skip('planning-error', { capability: 'closing', agent: payload.agent });

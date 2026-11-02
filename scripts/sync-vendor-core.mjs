@@ -37,7 +37,8 @@ const CORE_MODULES = [
   'orchestrate-host.ts',
   'orchestrate.ts',
   'orchestrate-stagnation.ts',
-  'orchestrate-correction.ts'
+  'orchestrate-correction.ts',
+  'orchestrate-closing.ts'
 ];
 const PORT_DIR = 'ports';
 
