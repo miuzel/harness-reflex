@@ -2559,9 +2559,9 @@ test('the reader the guide documents is an export of the package root, and retur
   assert.deepEqual(
     surface.tools,
     reflexToolNames(resolveConfig({ backend: 'mock' })),
-    'the public surface advertises the default four tools (route stays opt-in)'
+    'the public surface advertises the default five tools (route stays opt-in)'
   );
-  assert.equal(surface.tools.length, 4, 'and pruning and the ledger are not on the tool surface');
+  assert.equal(surface.tools.length, 5, 'and pruning and the ledger are not on the tool surface');
 
   // 2. The same function through the declared entry, doing the real retrieval.
   const publicModule = (await import(pathToFileURL(declaredEntry()).href)) as { readPrunedOriginal?: typeof readPrunedOriginal };

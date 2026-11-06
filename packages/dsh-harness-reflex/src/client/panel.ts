@@ -113,8 +113,8 @@ export const INTERVENTION_CAPABILITIES = ['stagnation', 'prune', 'gate', 'closin
 /** One capability name in the panel vocabulary. */
 export type PanelInterventionCapability = (typeof INTERVENTION_CAPABILITIES)[number];
 
-/** The five tool suffixes this plugin registers, in registration order. Restated; see above. */
-export const REFLEX_TOOL_SUFFIXES = ['choice', 'score', 'route', 'screen', 'gate'] as const;
+/** The six tool suffixes this plugin registers, in registration order. Restated; see above. */
+export const REFLEX_TOOL_SUFFIXES = ['choice', 'score', 'route', 'screen', 'gate', 'delegate'] as const;
 
 /** One tool suffix in the panel vocabulary. */
 export type PanelToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
@@ -133,7 +133,11 @@ export const TOOL_DEFAULT_ENABLED: Record<PanelToolSuffix, boolean> = {
   score: true,
   route: false,
   screen: true,
-  gate: true
+  gate: true,
+  // On by default, and additionally conditional on the Host: the switch is
+  // shown, and the delegate only registers when the Host delegation tool
+  // declares `reasoning_effort` (`modelSelection: true`).
+  delegate: true
 };
 
 /**
@@ -149,14 +153,15 @@ export type ToolAdvice = 'expose' | 'optional';
 /**
  * The advice shown next to each suffix, and the basis of "apply the recommended
  * set". Advice is not configuration: it never writes anything, and it agrees
- * with the Host default — four suffixes on, `route` off.
+ * with the Host default — five suffixes on, `route` off.
  */
 export const TOOL_ADVICE: Record<PanelToolSuffix, ToolAdvice> = {
   choice: 'expose',
   score: 'expose',
   route: 'optional',
   screen: 'expose',
-  gate: 'expose'
+  gate: 'expose',
+  delegate: 'expose'
 };
 
 /**
@@ -164,8 +169,8 @@ export const TOOL_ADVICE: Record<PanelToolSuffix, ToolAdvice> = {
  *
  * Derived from {@link TOOL_ADVICE} rather than written out a second time, so the
  * button and the labels can never disagree about what is recommended. The result
- * is the documented default: `choice`, `score`, `screen`, and `gate` on,
- * `route` off.
+ * is the documented default: `choice`, `score`, `screen`, `gate`, and
+ * `delegate` on, `route` off.
  * @returns suffix → enabled.
  */
 export function recommendedToolSwitches(): Record<string, boolean> {

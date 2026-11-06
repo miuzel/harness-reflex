@@ -4,7 +4,9 @@ import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig, type ResolvedReflexConfig } from './config.js';
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
-import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames } from './tools.js';
+import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames, resolveReflexToolExecutables } from './tools.js';
+import type { ReflexDelegationSeam, ReflexToolSuffix } from './tools.js';
+import { createReflexDelegation, inspectDelegationTool } from './delegation-dispatch.js';
 import { installLedgerCommand } from './command.js';
 import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
@@ -263,19 +265,52 @@ function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSur
   let registrationEvents = 0;
   let disposed = false;
 
+  // Resolved live: the Host's delegation tool is registered under a name *it*
+  // owns (`toolName`, default `subagent`), so the delegate wraps whatever is
+  // actually in the registry. Re-reading it on every reconciliation means a Host
+  // that mounts or enables that tool later still gets a delegate.
+  const delegation = (): ReflexDelegationSeam | undefined =>
+    createReflexDelegation({
+      ctx,
+      ledger: runtime.ledger,
+      decide: (request) => runtime.choice(request),
+      minConfidence: runtime.effort.minConfidence,
+      warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
+    });
+
+  /**
+   * Suffixes enabled by config *and* backed by something this Host can really serve.
+   *
+   * `delegate` is executable only when the Host delegation tool exists *and*
+   * declares `reasoning_effort` (`modelSelection: true`); registration and the
+   * seam read the same predicate, so the registry and the published surface
+   * cannot disagree.
+   */
+  const executableSuffixes = (config: ResolvedReflexConfig): ReflexToolSuffix[] => {
+    const target = inspectDelegationTool(ctx);
+    const delegateTarget = target !== undefined && target.acceptsReasoningEffort ? target.toolName : undefined;
+    return resolveReflexToolExecutables(
+      enabledReflexToolSuffixes(config),
+      delegateTarget === undefined ? {} : { delegateTarget }
+    );
+  };
+
   const publish = (): void => {
     // Vocabulary order, not registration order: the panel and the runtime
     // surface must not reshuffle just because a tool was toggled later.
     runtime.noteToolSurface(
-      reflexToolNames(runtime.effectiveConfig).filter((name) => owned.has(name) && ctx.tools.get(name) !== undefined)
+      executableSuffixes(runtime.effectiveConfig)
+        .map((suffix) => `${runtime.effectiveConfig.toolPrefix}${suffix}`)
+        .filter((name) => owned.has(name) && ctx.tools.get(name) !== undefined)
     );
   };
 
   return {
     refresh(config: ResolvedReflexConfig): void {
       if (disposed) return;
-      const desired = reflexToolNames(config);
-      const wanted = new Set(desired);
+      const wanted = new Set(
+        executableSuffixes(config).map((suffix) => `${config.toolPrefix}${suffix}`)
+      );
       // Remove first: a duplicate registration throws, and a prefix rename has
       // no name in common with the old surface. A name we still want but that
       // the registry no longer answers for is dropped too, so a stray removal
@@ -285,7 +320,9 @@ function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSur
         owned.delete(name);
         unregister();
       }
-      for (const definition of defineReflexTools(runtime, config)) {
+      const seam = delegation();
+      for (const definition of defineReflexTools(runtime, config, seam)) {
+        if (!wanted.has(definition.name)) continue;
         if (owned.has(definition.name)) continue;
         try {
           owned.set(definition.name, ctx.tools.register(definition));

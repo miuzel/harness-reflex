@@ -196,6 +196,8 @@ export const zh = {
   toolWhen_screen: '读到网页、外部 PR 评论、第三方日志等不可信输入之后，先筛一遍再当作数据处理。',
   toolWhat_gate: '用真实输出与证据逐条核对断言，给出通过、矛盾或需升级的判定。',
   toolWhen_gate: '准备宣布完成或关闭任务之前，逐条核对验收判据与真实输出。',
+  toolWhat_delegate: '把任务派给子代理，并由 System One 判定它该用多深的思考；权限、预设与递归限制仍由宿主的委派工具执行。',
+  toolWhen_delegate: '要把一段自成一体的工作交给子代理、而合适思考档位并不明显时。它刻意没有思考档位参数，想精确指定请直接调用宿主的委派工具；本工具仅在宿主委派工具声明了 reasoning_effort（modelSelection 已开启）时才会注册。',
 
   labelBackend: '后端实现',
   labelBaseUrl: 'Base URL',
@@ -531,6 +533,8 @@ export const en: Record<keyof typeof zh, string> = {
   toolWhen_screen: 'Right after reading a web page, a foreign PR comment or a third-party log, before treating it as data.',
   toolWhat_gate: 'Checks claims against real output and evidence, answering pass, contradicted or escalate.',
   toolWhen_gate: 'Before declaring completion or closing a task: verify each acceptance criterion against real output.',
+  toolWhat_delegate: 'Hands a task to a subagent and lets System One decide how deeply it should think; permissions, presets and recursion limits stay with the host delegation tool.',
+  toolWhen_delegate: 'When a self-contained piece of work goes to a subagent and the right reasoning depth is not obvious. It deliberately has no reasoning-depth parameter: call the host delegation tool directly to pin one. It is only registered when the host delegation tool declares reasoning_effort (modelSelection enabled).',
 
   labelBackend: 'Backend implementation',
   labelBaseUrl: 'Base URL',

@@ -47,8 +47,8 @@ const MUTATIONS = [
     name: 'drop-tool-at-registration',
     area: 'registers every enabled tool',
     file: 'src/index.ts',
-    from: 'for (const definition of defineReflexTools(runtime, config)) {',
-    to: 'for (const definition of defineReflexTools(runtime, config).slice(0, 3)) {'
+    from: 'for (const definition of defineReflexTools(runtime, config, seam)) {',
+    to: 'for (const definition of defineReflexTools(runtime, config, seam).slice(0, 3)) {'
   },
   {
     name: 'route-default-drift',
@@ -689,6 +689,47 @@ const MUTATIONS = [
     file: 'src/bridge.ts',
     from: '    this.#reconfigureRouting?.(resolved.routing);',
     to: '    if (false) this.#reconfigureRouting?.(resolved.routing);'
+  },
+  {
+    name: 'delegate-default-off',
+    area: 'reflex_delegate is on by default and switchable',
+    file: 'src/tools.ts',
+    from: '  delegate: true\n};',
+    to: '  delegate: false\n};'
+  },
+  {
+    // Type-level: the level has its own union, so the compiler catches it too.
+    name: 'delegate-marker-forwarded',
+    area: 'the delegated level is a concrete one, never the reflex marker',
+    file: 'src/delegation-dispatch.ts',
+    from: '        reasoning_effort: effort,',
+    to: '        reasoning_effort: "reflex",'
+  },
+  {
+    // Runtime-level, casts past the union: only the *behavioural* assertion
+    // (what the Host tool actually received) can catch this one.
+    name: 'delegate-marker-forwarded-at-runtime',
+    area: 'the delegated level is a concrete one, never the reflex marker',
+    file: 'src/delegation-dispatch.ts',
+    from: '        reasoning_effort: effort,',
+    to: '        reasoning_effort: ("reflex" as unknown) as DelegationEffort,'
+  },
+  {
+    // The seam's refusal is what stops a delegate being offered when the Host
+    // tool cannot carry a level. Removing it is caught by two independent
+    // tests: the gate in isolation, and the registry/surface agreement.
+    name: 'delegate-seam-accepts-model-selection-off',
+    area: 'a Host tool that cannot carry a level gets no delegate at all',
+    file: 'src/delegation-dispatch.ts',
+    from: '  if (!target.acceptsReasoningEffort) {',
+    to: '  if (target.acceptsReasoningEffort === false && (target as { never?: boolean }).never === true) {'
+  },
+  {
+    name: 'delegate-accepts-injected-level',
+    area: 'argument validation is declared by the tool',
+    file: 'src/tools.ts',
+    from: "          assertDeclaredArguments(name('delegate'), ['prompt', 'description', 'provider', 'model', 'cwd'], args as never);\n",
+    to: ''
   },
   {
     name: 'rename-route-frozen',

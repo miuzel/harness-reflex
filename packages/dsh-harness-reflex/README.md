@@ -144,6 +144,7 @@ dsh plugin --profile web add ./packages/dsh-harness-reflex
 | `reflex_screen` | `content`, `source?`, `strict?` | 提示注入/指令劫持筛查，命中时附数据围栏 |
 | `reflex_gate` | `assertions[{statement,criteria?}]`, `evidence`, `strictness?` | 声明-证据核对门禁（Fail-Closed） |
 | `reflex_route`（默认关闭） | `goal`, `candidates[{name,description}]`, `topK?` | 候选工具/技能概率排序（只排序不卡阈值） |
+| `reflex_delegate` | `prompt`, `description`, `provider?`, `model?`, `cwd?` | 委派子代理，由 System One 判定思考档位；无档位参数，**仅在宿主 `modelSelection` 开启时注册** |
 
 另外三项能力**不在工具清单里**：
 

@@ -1177,7 +1177,8 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
     score: ['0–1 的连续分', '连续评分'],
     route: ['概率排序', '缩小范围'],
     screen: ['提示注入', '不可信输入'],
-    gate: ['逐条核对', '验收判据']
+    gate: ['逐条核对', '验收判据'],
+    delegate: ['交给子代理', '思考档位']
   };
   const copy = textOf(tree);
   for (const suffix of REFLEX_TOOL_SUFFIXES) {
@@ -1186,10 +1187,10 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
     assert.ok(copy.includes(when), `${suffix} does not say when to call it`);
   }
 
-  // The advice is stated per tool: four suggested, one to turn on when needed.
+  // The advice is stated per tool: five suggested, one to turn on when needed.
   // Counts, so a misplaced label is caught too.
   const occurrences = (needle: string): number => copy.split(needle).length - 1;
-  assert.equal(occurrences('建议暴露'), 4, 'the tools the agent should keep are not marked as such');
+  assert.equal(occurrences('建议暴露'), 5, 'the tools the agent should keep are not marked as such');
   assert.equal(occurrences('按需开启'), 1, 'route is the one tool that is not part of the recommended set');
   assert.equal(occurrences('已由自动干预覆盖'), 0, 'the intervention-covered advice outlived the tools it described');
   assert.equal(occurrences('仅诊断'), 0, 'the diagnostic-only advice outlived the ledger tool');
@@ -1209,7 +1210,8 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
     score: true,
     route: false,
     screen: true,
-    gate: true
+    gate: true,
+    delegate: true
   };
   fire(find(tree, 'button', '应用推荐组合'), 'onClick');
   tree = await mounted.runtime.flush();
