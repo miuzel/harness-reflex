@@ -14,7 +14,7 @@ import { Config, resolveConfig, type ReflexConfig } from './config.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import { callTool } from './testing.js';
+import { callTool, nativeExecutorPlugin, loaderEventReceiver } from './testing.js';
 import { REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
 
 /**
@@ -79,6 +79,8 @@ async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
   const ctx = new Context();
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(ToolRuntime);
+  // dsh-tools >= 0.2.2 ships no executor; the Host mounts the native one.
+  await ctx.plugin(nativeExecutorPlugin);
   await ctx.plugin(LlmRuntime);
   await ctx.plugin(CommandRuntime);
   await ctx.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href });
@@ -98,10 +100,9 @@ async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
     runtime,
     commit(next: ReflexConfig): void {
       const resolved = Config(next) as unknown as Record<string, { get(): unknown }>;
-      const live = entry.fiber!.config as unknown as Record<string, unknown>;
+      const live = entry.fiber!.effectiveConfig as unknown as Record<string, unknown>;
       for (const key of Object.keys(resolved)) commitVolatile(live[key], resolved[key]!);
-      const self = Object.create(entry.fiber!.ctx) as Record<symbol, unknown>;
-      self[Context.filter] = (owner: { fiber?: unknown }) => owner.fiber === entry.fiber;
+      const self = loaderEventReceiver(entry.fiber!);
       entry.fiber!.ctx.emit(self, 'loader/volatile-update', [Object.keys(next)] as never);
     },
     dispose: () => ctx.fiber.dispose()

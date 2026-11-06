@@ -17,17 +17,23 @@ test('routing after host model selection and after reload applies final physical
     models: { 'reflex-1': [{ provider: 'physical', model: 'sol', description: 'general' }] }
   } }));
   registerPhysicalAdapter(ctx, 'physical', { models: ['sol'], reasoningEfforts: ['low', 'medium', 'high'] });
-  let selection: LlmCallConfig = { provider: 'reflex', model: 'reflex-1', reasoningEffort: 'reflex' as any };
-  const selected = { current: selection, assembled: selection };
-  installModelSelection(ctx, selected);
+  installModelSelection(ctx);
   let installation = installModelRouting(ctx, { llm: ctx.llm, router: runtime.modelRouter, effort: runtime.effort, maxTaskChars: 10000 });
   const session = Session.create('reload-routing' as SessionId);
-  const agent = { ...fakeAgent({ id: 'reload-routing' }), session } as unknown as Agent;
+  // `agent.model.current()` is the loop's own selection reader: it is what
+  // `agent/pre-step` carries and what `agent/request`'s seed config is frozen
+  // from. The test drives that input, not the waterfall's output.
+  let selection: LlmCallConfig = { provider: 'reflex', model: 'reflex-1', reasoningEffort: 'reflex' as any };
+  const agent = {
+    ...fakeAgent({ id: 'reload-routing' }),
+    session,
+    model: { current: () => selection }
+  } as unknown as Agent;
   let events = 0;
   ctx.on('reflex/effort', () => { events++; });
   try {
     for (let turn = 1; turn <= 2; turn++) {
-      const config = await dispatchAgentRequest(ctx, agent, { turn, task: 'design migration protocol', config: { provider: 'physical', model: 'sol', reasoningEffort: 'medium' as any } });
+      const config = await dispatchAgentRequest(ctx, agent, { turn, task: 'design migration protocol', config: selection });
       assert.equal(config.provider, 'physical');
       assert.equal(config.model, 'sol');
       assert.notEqual(config.reasoningEffort, 'reflex');
@@ -37,14 +43,12 @@ test('routing after host model selection and after reload applies final physical
     }
     assert.equal(effortRecordsOf(session.ownEvents()).length, 2);
     selection = { provider: 'physical', model: 'sol', reasoningEffort: 'medium' as any };
-    selected.current = selected.assembled = selection;
     const before = runtime.ledger.getEntries().length;
     const pinned = await dispatchAgentRequest(ctx, agent, { turn: 3, task: 'design migration protocol', config: selection });
     assert.deepEqual(pinned, selection);
     assert.equal(events, 2, 'fixed physical effort emits no current Reflex decision');
     assert.equal(runtime.ledger.getEntries().length, before, 'fixed physical effort does not run either decision');
     selection = { ...selection, reasoningEffort: 'reflex' as any };
-    selected.current = selected.assembled = selection;
     await dispatchAgentRequest(ctx, agent, { turn: 4, task: 'design migration protocol', config: selection });
     assert.equal(events, 3, 'explicit adaptive effort on physical route retains the feature');
   } finally {

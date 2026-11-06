@@ -42,6 +42,9 @@ const HOST_MODULES = [
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session',
+  // dsh-tools ≥ 0.2.2 ships no executor of its own: the Host mounts the native
+  // one, and the test harness mounts it too so `tools.execute()` can dispatch.
+  '@deepseek-ai/dsh-tool-executor-native',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-system-prompt',
   '@deepseek-ai/schemastery',

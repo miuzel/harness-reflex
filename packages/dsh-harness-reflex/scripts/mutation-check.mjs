@@ -77,6 +77,7 @@ const MUTATIONS = [
       '      stopConfigWatch();',
       '      stopObserving();',
       '      stopRouting();',
+      '      inheritance.dispose();',
       '      unregisterLedger();',
       '      interventions.dispose();',
       '      unmountPanel();',

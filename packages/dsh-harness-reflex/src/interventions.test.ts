@@ -47,7 +47,7 @@ import {
   PRUNED_ORIGINAL_RECORD_TYPE,
   type InterventionAuditRecord
 } from './session-audit.js';
-import { createToolContext, fakeAgent, resultText } from './testing.js';
+import { createToolContext, executeOne, fakeAgent, resultText } from './testing.js';
 import { JevDecisionBackend, MockDecisionBackend, ToolResultPruner } from './vendor/harness-reflex/index.js';
 import type { ActionStep, GateResponse, PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
 
@@ -524,12 +524,7 @@ test('active denies a repeated call through the real registry without any reflex
     );
     let calls = 0;
     const execute = (): Promise<ToolExecutionResult> =>
-      ctx.tools.execute({
-        callId: `iv-${++calls}` as never,
-        name: 'iv_probe',
-        arguments: { command: 'ls' },
-        signal: new AbortController().signal
-      });
+      executeOne(ctx, { callId: `iv-${++calls}`, name: 'iv_probe', args: { command: 'ls' } });
 
     assert.equal((await execute()).isError, false);
     assert.equal((await execute()).isError, false);
@@ -579,11 +574,10 @@ test('a repeated job query through the real registry is exempt, while the same q
     );
     let calls = 0;
     const execute = (jobId?: string): Promise<ToolExecutionResult> =>
-      ctx.tools.execute({
-        callId: `job-${++calls}` as never,
+      executeOne(ctx, {
+        callId: `job-${++calls}`,
         name: 'job_output',
-        arguments: jobId === undefined ? { wait: true } : { job_id: jobId, wait: true },
-        signal: new AbortController().signal
+        args: jobId === undefined ? { wait: true } : { job_id: jobId, wait: true }
       });
 
     for (let index = 0; index < 5; index += 1) {
@@ -887,12 +881,7 @@ test('disposal detaches every listener and drops every engine state', async () =
       })
     );
     const execute = (): Promise<ToolExecutionResult> =>
-      ctx.tools.execute({
-        callId: `disposal-${calls}` as never,
-        name: 'iv_disposal',
-        arguments: { text: LONG_RESULT },
-        signal: new AbortController().signal
-      });
+      executeOne(ctx, { callId: `disposal-${calls}`, name: 'iv_disposal', args: { text: LONG_RESULT } });
 
     const before = await execute();
     assert.equal(before.isError, false);
@@ -1590,13 +1579,7 @@ test('the observe column of a real session leaves a durable record and no model-
         }
       })
     );
-    const result = await ctx.tools.execute({
-      callId: 'iv-noisy-1' as never,
-      name: 'iv_noisy',
-      arguments: { text: REDUCIBLE_RESULT },
-      signal: new AbortController().signal,
-      agent
-    });
+    const result = await executeOne(ctx, { callId: 'iv-noisy-1', name: 'iv_noisy', args: { text: REDUCIBLE_RESULT }, agent });
     assert.equal(result.isError, false);
     assert.equal(resultText(result), REDUCIBLE_RESULT, 'the model reads the raw result');
 
@@ -1818,13 +1801,7 @@ test('active reduces the payload the registry really returns, and retains the or
 
     // No post-execute listener of this test's own: the registry's default accept
     // is the decision the engine has to work from, and it carries no content.
-    const result = await ctx.tools.execute({
-      callId: 'iv-bulky-1' as never,
-      name: 'iv_bulky',
-      arguments: { text: REDUCIBLE_RESULT },
-      signal: new AbortController().signal,
-      agent
-    });
+    const result = await executeOne(ctx, { callId: 'iv-bulky-1', name: 'iv_bulky', args: { text: REDUCIBLE_RESULT }, agent });
     assert.equal(result.isError, false);
     const installed = resultText(result);
     assert.ok(installed.length > 0);
@@ -1855,13 +1832,7 @@ test('active reduces the payload the registry really returns, and retains the or
     assert.equal(retrieved!.digest, record.digest, 'and the digest the decision was made under');
 
     // A duplicate payload reuses the retained copy instead of writing a second one.
-    const second = await ctx.tools.execute({
-      callId: 'iv-bulky-2' as never,
-      name: 'iv_bulky',
-      arguments: { text: REDUCIBLE_RESULT },
-      signal: new AbortController().signal,
-      agent
-    });
+    const second = await executeOne(ctx, { callId: 'iv-bulky-2', name: 'iv_bulky', args: { text: REDUCIBLE_RESULT }, agent });
     assert.equal(resultText(second), installed, 'the same payload reduces to the same installed text');
     const replicated = prunedOriginalsOf(session.ownEvents());
     assert.equal(replicated.length, 1, 'retention is per payload, not per install');
@@ -1921,11 +1892,10 @@ test('the reduction is computed from the content the waterfall really returns, n
       return { kind: 'accept', content: [{ type: 'text', text: replaced }] } as PostToolDecision;
     });
 
-    const result = await ctx.tools.execute({
-      callId: 'iv-replaced-1' as never,
+    const result = await executeOne(ctx, {
+      callId: 'iv-replaced-1',
       name: 'iv_replaced',
-      arguments: {},
-      signal: new AbortController().signal,
+      args: {},
       agent: fakeAgent({ id: 'replaced' })
     });
     assert.deepEqual(seen, [replaced], 'the judgment ran on the replacement, not on the result it shadowed');
@@ -2024,13 +1994,7 @@ test('the real pruning service keeps observe and active on one form, one cost, o
           async () => ({ kind: 'enter' as const, messages })
         );
       const read = async (step: number) =>
-        ctx.tools.execute({
-          callId: `parity-${mode}-${step}` as never,
-          name: 'reflex_prune',
-          arguments: { text: 'x' },
-          signal: new AbortController().signal,
-          agent
-        });
+        executeOne(ctx, { callId: `parity-${mode}-${step}`, name: 'reflex_prune', args: { text: 'x' }, agent });
       void read;
       await enter(1, 1);
       // Two identical reducible payloads (the second must hit the memo), then a
@@ -2335,26 +2299,14 @@ test('a capability-only activation still gets the turn frame, the result pipelin
         async () => ({ kind: 'enter' as const, messages })
       );
     const failing = () =>
-      ctx.tools.execute({
-        callId: `gate-only-${calls}` as never,
-        name: 'iv_gate_only',
-        arguments: { command: 'npm run build' },
-        signal: new AbortController().signal,
-        agent
-      });
+      executeOne(ctx, { callId: `gate-only-${calls}`, name: 'iv_gate_only', args: { command: 'npm run build' }, agent });
 
     await enter(1, 1);
     const firstTurn: string[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) firstTurn.push(resultText(await failing()));
     // A second, different failing signature in the same turn is over the cap.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await ctx.tools.execute({
-        callId: `gate-only-other-${attempt}` as never,
-        name: 'iv_gate_only',
-        arguments: { command: 'npm test' },
-        signal: new AbortController().signal,
-        agent
-      });
+      await executeOne(ctx, { callId: `gate-only-other-${attempt}`, name: 'iv_gate_only', args: { command: 'npm test' }, agent });
     }
     const report = installation.engine.report();
     assert.equal(report.active.applied, 1, 'one correction in the turn, exactly the cap');
@@ -2635,13 +2587,7 @@ test('the reader the guide documents is an export of the package root, and retur
         }
       })
     );
-    const result = await ctx.tools.execute({
-      callId: 'iv-public-1' as never,
-      name: 'iv_public',
-      arguments: { text: REDUCIBLE_RESULT },
-      signal: new AbortController().signal,
-      agent
-    });
+    const result = await executeOne(ctx, { callId: 'iv-public-1', name: 'iv_public', args: { text: REDUCIBLE_RESULT }, agent });
     const installed = resultText(result);
     assert.ok(installed.length > 0 && installed.length < REDUCIBLE_RESULT.length, 'the result the model reads really shrank');
     const locator = interventionRecordsOf(session.ownEvents())[0]?.originalLocator;
@@ -3656,13 +3602,7 @@ test('a skip is an ignorable session record, never a model message or a plan', a
         }
       })
     );
-    const result = await ctx.tools.execute({
-      callId: 'iv-small-1' as never,
-      name: 'iv_small',
-      arguments: { text: 'ok' },
-      signal: new AbortController().signal,
-      agent
-    });
+    const result = await executeOne(ctx, { callId: 'iv-small-1', name: 'iv_small', args: { text: 'ok' }, agent });
     assert.equal(resultText(result), 'ok', 'the model reads the result untouched');
 
     const records = interventionRecordsOf(session.ownEvents());

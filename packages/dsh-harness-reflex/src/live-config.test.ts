@@ -17,9 +17,11 @@ import {
   createToolContext,
   dispatchAgentRequest,
   fakeAgent,
+  nativeExecutorPlugin,
   registerPhysicalAdapter,
   userMessage,
-  type FakePhysicalAdapter
+  type FakePhysicalAdapter,
+  loaderEventReceiver
 } from './testing.js';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 
@@ -161,6 +163,8 @@ test('the real loader commits a config-only save without remounting and the next
   try {
     await ctx.plugin(SystemPrompt);
     await ctx.plugin(ToolRuntime);
+    // dsh-tools >= 0.2.2 ships no executor; the Host mounts the native one.
+    await ctx.plugin(nativeExecutorPlugin);
     await ctx.plugin(LlmRuntime);
     await ctx.plugin(CommandRuntime);
     await ctx.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href });
@@ -196,10 +200,9 @@ test('the real loader commits a config-only save without remounting and the next
     // The settings save: a doc is written, the loader resolves it, then commits
     // the changed volatile references into the running entry.
     const resolvedNext = Config(NEW_POOL) as unknown as Record<string, { get(): unknown }>;
-    const live = entry.fiber!.config as unknown as Record<string, unknown>;
+    const live = entry.fiber!.effectiveConfig as unknown as Record<string, unknown>;
     for (const key of Object.keys(resolvedNext)) commitVolatile(live[key], resolvedNext[key]!);
-    const self = Object.create(entry.fiber!.ctx) as Record<symbol, unknown>;
-    self[Context.filter] = (owner: { fiber?: unknown }) => owner.fiber === entry.fiber;
+    const self = loaderEventReceiver(entry.fiber!);
     entry.fiber!.ctx.emit(self, 'loader/volatile-update', [Object.keys(NEW_POOL)] as never);
 
     assert.equal(loaderProbe().applies, 1, 'path B reproduced: committing a volatile config does NOT re-apply the plugin');

@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis';
-import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
+import { agentEvents, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent';
 import LlmRuntime, {
   LlmAdapter,
   isAgentLoopRequest,
@@ -11,24 +11,93 @@ import LlmRuntime, {
   type StreamChunk,
   type UserMessage
 } from '@deepseek-ai/dsh-llm';
-import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
+import ToolRuntime, { type ToolBatchResult, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import CommandRuntime from '@deepseek-ai/dsh-commands';
-
+import * as nativeExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import { apply, applyReflex, Config, inject, name as pluginName } from './index.js';
 import type { ReflexRuntime } from './bridge.js';
 import type { ReflexConfig } from './config.js';
 
-/** Branded call id, taken from the registry signature so no extra dependency is needed. */
-type CallId = Parameters<Context['tools']['execute']>[0]['callId'];
+/**
+ * Call metadata for one synthesized registry call.
+ *
+ * dsh-tools ≥ 0.2.2 no longer accepts a single call: `tools.execute()` takes a
+ * `ToolBatchInput` and settles a `ToolBatchResult`. A call is therefore
+ * addressed by `ToolCallBlock.id`, carries its arguments as the raw JSON
+ * string the model would have produced, and keeps its own `callId` here only
+ * to reach it back out of the batch.
+ */
+export interface TestToolCall {
+  /** Model-issued call id this batch entry is addressed by. */
+  readonly callId: string;
+  /** Registered tool name. */
+  readonly name: string;
+  /** Model-shaped arguments; serialized into the call block. */
+  readonly args?: unknown;
+  /** Owning agent, which selects its scoped executor. */
+  readonly agent?: Agent;
+}
 
 /**
- * Mint a registry-legal call id.
- * @param id - unique suffix.
- * @returns the branded id.
+ * Run one synthesized call through the real registry pipeline.
+ * @param ctx - a context whose `tools` service is live.
+ * @param call - the call to dispatch.
+ * @returns the batch entry whose id matches {@link TestToolCall.callId}.
+ * @throws Error when the batch settled a different call.
  */
-function callId(id: string): CallId {
-  return id as CallId;
+export async function executeOne(ctx: Context, call: TestToolCall): Promise<ToolExecutionResult> {
+  const batch: ToolBatchResult = await ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: call.callId as never, name: call.name, arguments: JSON.stringify(call.args ?? {}) }],
+    signal: new AbortController().signal,
+    ...(call.agent ? { agent: call.agent } : {})
+  });
+  const entry = batch.results.find((candidate) => (candidate.callId as unknown as string) === call.callId);
+  if (!entry) throw new Error(`the batch settled no result for ${call.callId}`);
+  return entry.result;
+}
+
+/** Branded reasoning effort id, taken from the selection type so no extra dependency is needed. */
+type EffortId = NonNullable<ModelSelection['reasoningEffort']>;
+
+/**
+ * The `modelSelection` an `agent/pre-step` payload now requires.
+ *
+ * The waterfall payload gained `agent`, `modelSelection`, and (in tests) a
+ * `model` it does not read. Requirements beyond the identity the step already
+ * carries are supplied from the agent's own composed options, falling back to
+ * the reflex route, so a test never invents a selection the loop could not.
+ * @param agent - the agent stepping.
+ * @returns the selection the loop would carry into the step.
+ */
+export function stepSelection(agent: Agent): Readonly<ModelSelection> {
+  const options = (agent as { options?: { provider?: string; model?: string; reasoningEffort?: unknown } }).options;
+  return {
+    provider: options?.provider ?? 'reflex',
+    model: options?.model ?? 'reflex-auto',
+    ...(options?.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort as EffortId })
+  };
+}
+
+/**
+ * Build the `agent/pre-step` payload the waterfall now declares.
+ * @param agent - the agent stepping.
+ * @param turn - turn number.
+ * @param step - step number.
+ * @param messages - messages the step carries.
+ * @param signal - cancellation state.
+ * @param modelSelection - selection the loop carries into the step; defaults to the agent's own.
+ * @returns the payload, spelled out rather than cast.
+ */
+export function preStepPayload(
+  agent: Agent,
+  turn: number,
+  step: number,
+  messages: readonly UserMessage[],
+  signal: AbortSignal = new AbortController().signal,
+  modelSelection: Readonly<ModelSelection> = stepSelection(agent)
+): { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal; modelSelection: Readonly<ModelSelection> } {
+  return { agent, messages: [...messages], turn, step, signal, modelSelection };
 }
 
 /**
@@ -43,8 +112,43 @@ function callId(id: string): CallId {
  * @module dsh-reflex/testing
  */
 
+/**
+ * Reproduce the loader's own `loader/volatile-update` dispatch.
+ *
+ * The real loader emits with `Object.create(fiber.ctx)` carrying a
+ * `Context.filter` that admits only listeners owned by the committing fiber.
+ * Cordis 4.x hands out context-bound *proxies* of a fiber, so a fiber read off
+ * one context is never `===` the fiber its own context reports; comparing
+ * against `fiber.ctx.fiber` is the identity the event store records.
+ *
+ * @param entryFiber - the fiber the loader resolved for the entry.
+ * @returns the receiver the loader emits with.
+ */
+export function loaderEventReceiver(entryFiber: { ctx: Context }): Record<symbol, unknown> {
+  const owner = entryFiber.ctx;
+  const self = Object.create(owner) as Record<symbol, unknown>;
+  self[Context.filter] = (candidate: { fiber?: unknown }) => candidate.fiber === owner.fiber;
+  return self;
+}
+
 /** The plugin as Cordis sees it, for `ctx.plugin()`-based lifecycle tests. */
 export const reflexPlugin = { name: pluginName, inject, Config, apply };
+
+/**
+ * The Host's native executor, shaped as a Cordis plugin spec.
+ *
+ * dsh-tools >= 0.2.2 moved execution out of the registry: `tools.execute()`
+ * throws TOOL_EXECUTOR_UNAVAILABLE until an executor plugin is selected, so a
+ * harness that only mounts `ToolRuntime` can no longer dispatch anything. The
+ * module's `apply` is a plain function, so `{ ...module }` would lose its
+ * context binding, and `ctx.plugin()` reads `inject` only from a spec object,
+ * never from a derived function — hence the explicit fields.
+ */
+export const nativeExecutorPlugin = {
+  name: nativeExecutor.name,
+  inject: nativeExecutor.inject,
+  apply: (scope: Context) => nativeExecutor.apply(scope)
+};
 
 /** A booted application with the reflex tools registered. */
 export interface ReflexTestHost {
@@ -66,6 +170,11 @@ export async function createToolContext(): Promise<Context> {
   const ctx = new Context();
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(ToolRuntime);
+  // dsh-tools >= 0.2.2 owns dispatch but ships no executor: execution moved
+  // into a separately mounted executor plugin, and `tools.execute()` throws
+  // TOOL_EXECUTOR_UNAVAILABLE until one is selected. The Host loads the native
+  // executor as part of its own composition, so the harness mounts it too.
+  await ctx.plugin(nativeExecutorPlugin);
   await ctx.plugin(LlmRuntime);
   await ctx.plugin(CommandRuntime);
   return ctx;
@@ -86,13 +195,7 @@ export async function createReflexHost(config?: ReflexConfig): Promise<ReflexTes
   return {
     ctx,
     runtime,
-    callTool: (name: string, args: unknown = {}) =>
-      ctx.tools.execute({
-        callId: callId(`reflex-test-${++calls}`),
-        name,
-        arguments: args,
-        signal: new AbortController().signal
-      }),
+    callTool: (name: string, args: unknown = {}) => executeOne(ctx, { callId: `reflex-test-${++calls}`, name, args }),
     dispose: () => ctx.fiber.dispose()
   };
 }
@@ -105,12 +208,7 @@ export async function createReflexHost(config?: ReflexConfig): Promise<ReflexTes
  * @returns the registry result (never throws for tool-level failures).
  */
 export function callTool(ctx: Context, name: string, args: unknown = {}): Promise<ToolExecutionResult> {
-  return ctx.tools.execute({
-    callId: callId(`reflex-test-${name}-${Math.random().toString(36).slice(2, 8)}`),
-    name,
-    arguments: args,
-    signal: new AbortController().signal
-  });
+  return executeOne(ctx, { callId: `reflex-test-${name}-${Math.random().toString(36).slice(2, 8)}`, name, args });
 }
 
 /**
@@ -314,9 +412,11 @@ export async function dispatchAgentRequest(
   const signal = options.signal ?? new AbortController().signal;
 
   const messages = options.task !== undefined ? [userMessage(options.task)] : [];
+  // The step's selection is the config the loop is about to request with, which
+  // is what the Host's model-selection listener compares against its header.
   await events.waterfall(
     'agent/pre-step',
-    { turn: options.turn ?? 1, step: options.step ?? 1, signal, messages },
+    preStepPayload(agent, options.turn ?? 1, options.step ?? 1, messages, signal, fallback),
     async () => ({ kind: 'enter' as const, messages })
   );
 
