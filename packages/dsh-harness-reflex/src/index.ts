@@ -10,6 +10,7 @@ import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
 import { appendInterventionRecord, appendPrunedOriginal } from './session-audit.js';
 import { installActualProjection } from './actual-projection.js';
+import { installDelegatedEffortInheritance } from './effort-delegation.js';
 
 /**
  * DSH Host plugin that exposes the `harness-reflex` System One decision runtime
@@ -141,6 +142,23 @@ export {
   snapEffort
 } from './effort.js';
 export { EFFORT_RECORD_TYPE, appendEffortRecord, effortRecordsOf, toEffortAuditRecord } from './session-audit.js';
+export {
+  EFFORT_INHERIT_RECORD_TYPE,
+  appendEffortInheritRecord,
+  effortInheritRecordsOf,
+  isEffortInheritAuditRecord
+} from './session-audit.js';
+export type { EffortInheritAuditRecord } from './session-audit.js';
+export {
+  DELEGATION_EFFORT_REASON,
+  currentSelectionOf,
+  installDelegatedEffortInheritance,
+  isDelegatedSession
+} from './effort-delegation.js';
+export type {
+  DelegatedEffortInheritance,
+  DelegatedEffortInheritanceOptions
+} from './effort-delegation.js';
 // Retrieval of a pruned original is a public API, not an internal detail: the guide
 // tells a reader to import the function from the package root, so the root entry has
 // to export it together with the two names a caller needs to use it — the record's
@@ -367,6 +385,15 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     });
 
     const stopRouting = installRouting(ctx, runtime);
+    // A delegated agent cannot decide its own effort: the loop fixes the step's
+    // selection before the request waterfall, so the marker is replaced with the
+    // parent's level *on the selection itself* — before the next step reads it.
+    const inheritance = installDelegatedEffortInheritance(ctx, {
+      enabled: () => runtime.effort.enabled,
+      sessionById: (id) => (ctx as any).sessions?.get?.(id),
+      warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message)
+    });
+    runtime.attachEffortInheritance(inheritance);
     // The ledger is an audit question a person asks, not a decision the model
     // makes, so it is a Host command instead of a tool: `/reflex-ledger` reads
     // the same runtime and never opens a turn.
@@ -421,6 +448,7 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       stopConfigWatch();
       stopObserving();
       stopRouting();
+      inheritance.dispose();
       unregisterLedger();
       interventions.dispose();
       unmountPanel();

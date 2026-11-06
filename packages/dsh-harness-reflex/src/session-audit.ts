@@ -42,6 +42,19 @@ export const INTERVENTION_RECORD_TYPE = 'plugin:dsh-reflex/intervention';
  */
 export const PRUNED_ORIGINAL_RECORD_TYPE = 'plugin:dsh-reflex/pruned-original';
 
+/**
+ * Session-log record type of one delegated-agent effort downgrade.
+ *
+ * A delegated agent that was configured to decide its own effort (`reflex` /
+ * `auto`) cannot do so: the loop fixes the step's effort before any plugin hook
+ * runs, so the decision has to be taken on the *selection* instead, before that
+ * step reads it. That is a change of intent, not a routine decision, so it gets
+ * its own record rather than a disguised `effort` one: the configured marker is
+ * kept verbatim next to the level actually inherited, and a reader can see that
+ * the level came from the parent rather than from a System 1 judgment.
+ */
+export const EFFORT_INHERIT_RECORD_TYPE = 'plugin:dsh-reflex/effort-inherit';
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface PluginRecordMap {
     /** One adaptive reasoning-effort decision, as dispatched. */
@@ -50,6 +63,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'plugin:dsh-reflex/intervention': InterventionAuditRecord;
     /** One pre-prune payload kept so a replacement stays verifiable. */
     'plugin:dsh-reflex/pruned-original': PrunedOriginalRecord;
+    /** One delegated-agent marker replaced by the parent's level. */
+    'plugin:dsh-reflex/effort-inherit': EffortInheritAuditRecord;
   }
 }
 
@@ -337,6 +352,100 @@ export function isEffortAuditRecord(data: unknown): data is EffortAuditRecord {
     typeof record.line === 'string' &&
     typeof record.at === 'number' &&
     (record.applied === null || typeof record.applied === 'string')
+  );
+}
+
+/**
+ * The JSON payload of one delegated-agent effort downgrade.
+ *
+ * Deliberately one record per *decision*, not per request: a child session may
+ * see its selection re-emitted several times, and only a change of outcome is
+ * news. `applied: null` means the marker was removed outright (the adapter's own
+ * default), which is a real outcome and must not look like a missing field.
+ */
+export interface EffortInheritAuditRecord {
+  /** The marker the deployment configured on the delegated agent (`reflex`/`auto`). */
+  requested: string;
+  /** The level the child now uses; `null` when the marker was removed. */
+  applied: string | null;
+  /**
+   * Why the delegation could not decide: `reflex`/`auto` is a per-turn
+   * System 1 decision taken inside the request waterfall, while a delegated
+   * step's effort is fixed before that waterfall runs.
+   */
+  reason: 'subagent-cannot-decide';
+  /** The parent level that was copied; absent when the parent had none. */
+  inherited?: string;
+  /** Whether the parent had a recorded selection at all. */
+  parentLevel: 'present' | 'absent' | 'unreadable';
+  /** Provider/model of the child selection carrying the marker. */
+  provider: string;
+  model: string;
+  /** Human-readable, one line: what was configured and what it became. */
+  line: string;
+  /** Unix epoch milliseconds of the rewrite. */
+  at: number;
+  agentId?: string;
+  delegationDepth?: number;
+}
+
+/**
+ * Append one delegated-agent effort downgrade to a Session's log.
+ *
+ * Best-effort by the same contract as every other audit record here: a missing
+ * session (synthetic agent) or a rejected payload is swallowed and reported as
+ * `undefined`, never allowed to fail a turn.
+ * @param session - the delegated agent's session, when it has one.
+ * @param record - the rewrite to record.
+ * @returns the committed sequence number, or `undefined` when nothing was written.
+ */
+export function appendEffortInheritRecord(session: unknown, record: EffortInheritAuditRecord): number | undefined {
+  const target = session as Session | undefined;
+  if (!target || typeof appendPluginRecord !== 'function') return undefined;
+  try {
+    return appendPluginRecord(target, EFFORT_INHERIT_RECORD_TYPE, record) as unknown as number;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read back the delegated-agent effort downgrades of one Session log.
+ * @param events - the session log, or any slice of it.
+ * @returns the validated records, oldest first; malformed payloads are dropped.
+ */
+export function effortInheritRecordsOf(events: readonly SessionEvent[] | undefined): EffortInheritAuditRecord[] {
+  const records: EffortInheritAuditRecord[] = [];
+  for (const event of events ?? []) {
+    let record;
+    try {
+      record = pluginRecordOf(event);
+    } catch {
+      continue;
+    }
+    if (!record || record.type !== EFFORT_INHERIT_RECORD_TYPE) continue;
+    if (isEffortInheritAuditRecord(record.data)) records.push(record.data);
+  }
+  return records;
+}
+
+/**
+ * Validate one restored downgrade payload before a reader trusts it.
+ * @param data - the payload committed by an earlier build.
+ * @returns whether it carries the fields this plugin writes.
+ */
+export function isEffortInheritAuditRecord(data: unknown): data is EffortInheritAuditRecord {
+  if (typeof data !== 'object' || data === null) return false;
+  const record = data as Partial<EffortInheritAuditRecord>;
+  return (
+    typeof record.requested === 'string' &&
+    (record.applied === null || typeof record.applied === 'string') &&
+    record.reason === 'subagent-cannot-decide' &&
+    (record.parentLevel === 'present' || record.parentLevel === 'absent' || record.parentLevel === 'unreadable') &&
+    typeof record.provider === 'string' &&
+    typeof record.model === 'string' &&
+    typeof record.line === 'string' &&
+    typeof record.at === 'number'
   );
 }
 

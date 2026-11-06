@@ -879,8 +879,17 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
       // explicitly chosen as reflex/auto, or when an unpinned request names the
       // virtual provider (which defaults to adaptive effort). If the user selected
       // High, Low, Medium, Off, or Provider Default, reflex does not touch effort.
+      // A delegated agent may not decide its effort here: `dsh-agent-loop` fixes
+      // the step's selection before this waterfall runs and rejects any effort we
+      // propose afterwards ("use agent.model.select() before step preparation").
+      // The decision is taken on the child's selection instead, ahead of the step
+      // (see `effort-delegation.ts`), so this layer must neither decide nor rewrite
+      // an effort for a delegated request — it only routes.
+      const delegated = describeAgent(payload.agent).role === 'subagent';
+
       const isAdaptive =
         !effortOff &&
+        !delegated &&
         (isAdaptiveMarker(requested) ||
           (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(options.effort.setting)));
 
@@ -945,6 +954,13 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
           if (kept === undefined) delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
           else rewritten.reasoningEffort = kept as LlmCallConfig['reasoningEffort'];
           return rewritten;
+        }
+        // A delegated request keeps exactly the effort its selection fixed: not
+        // aligned, not snapped. Alignment is still a rewrite of the fixed value,
+        // and the loop compares the two for equality. The selection layer has
+        // already made sure this value is a concrete level the adapter accepts.
+        if (delegated) {
+          return routed === config ? config : { ...routed };
         }
         // Concrete effort (high, low, off...) or provider default: align if needed, never adapt!
         if (routed === config && requested !== undefined) {

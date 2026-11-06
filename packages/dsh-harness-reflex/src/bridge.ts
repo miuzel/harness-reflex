@@ -35,6 +35,7 @@ import type {
 } from './config.js';
 import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
+import type { DelegatedEffortInheritance } from './effort-delegation.js';
 import type { InterventionEngine } from './interventions.js';
 import { VirtualModelRouter } from './router.js';
 
@@ -170,6 +171,14 @@ export class ReflexRuntime {
   readonly effort: EffortInterceptor;
   /** Status-bar surface of the adaptive effort decisions of this activation. */
   readonly effortStatusFeed: EffortStatusFeed;
+  /**
+   * Delegated-agent effort inheritance, when this activation installed one.
+   *
+   * A delegated agent cannot decide its own effort, so the marker is replaced on
+   * its `model/selection` before the step reads it. Held here so the panel and
+   * diagnostics can report how often that happened.
+   */
+  #effortInheritance?: DelegatedEffortInheritance;
 
   #disposed = false;
   #surface: readonly string[] = [];
@@ -609,6 +618,23 @@ export class ReflexRuntime {
   ): void {
     this.#reconfigureRouting = reconfigure;
     this.#routingRegistrationEvents = registrationEvents;
+  }
+
+  /**
+   * Attach the delegated-agent effort inheritance of this activation.
+   * @param inheritance - the installed listener, or undefined to detach.
+   */
+  attachEffortInheritance(inheritance: DelegatedEffortInheritance | undefined): void {
+    this.#effortInheritance = inheritance;
+  }
+
+  /**
+   * How many delegated selections this activation rewrote to a concrete level.
+   *
+   * Monotonic: it counts the marker replacements, not the steps that used them.
+   */
+  get effortInheritanceRewrites(): number {
+    return this.#effortInheritance?.rewrites ?? 0;
   }
 
   /** Provider registrations this activation made (monotonic; diagnostics). */
