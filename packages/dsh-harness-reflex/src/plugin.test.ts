@@ -163,18 +163,18 @@ test('resolveConfig normalizes the marker and sends concrete levels to the model
   );
 });
 
-test('the five reflexive capabilities use the MCP-compatible names', () => {
+test('the six reflexive capabilities use the MCP-compatible names', () => {
   assert.deepEqual(
     reflexToolNames(resolveConfig({ backend: 'mock' })).sort(),
-    ['reflex_choice', 'reflex_gate', 'reflex_score', 'reflex_screen'].sort(),
-    'the default surface is the four recommended tools: route is opt-in'
+    ['reflex_choice', 'reflex_delegate', 'reflex_gate', 'reflex_score', 'reflex_screen'].sort(),
+    'the default surface is the five recommended tools: route is opt-in'
   );
   assert.deepEqual(
     reflexToolNames(resolveConfig({ backend: 'mock', tools: { enabled: { route: true } } })).sort(),
     REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`).sort(),
-    'turning route on restores the full five-tool vocabulary'
+    'turning route on restores the full six-tool vocabulary'
   );
-  assert.equal(REFLEX_TOOL_SUFFIXES.length, 5);
+  assert.equal(REFLEX_TOOL_SUFFIXES.length, 6);
   assert.deepEqual(
     reflexToolNames(resolveConfig({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } })),
     REFLEX_TOOL_SUFFIXES.map((suffix) => `rv_${suffix}`)
@@ -185,7 +185,7 @@ test('apply registers every enabled tool with a model-visible description', asyn
   const host = await createReflexHost({ backend: 'mock' });
   try {
     const names = reflexToolNames(resolveConfig({ backend: 'mock' }));
-    assert.equal(names.length, 4, 'only the default-on tools are registered');
+    assert.equal(names.length, 5, 'only the default-on tools are registered');
     assert.deepEqual([...host.runtime.toolSurface], names);
     assert.equal(host.ctx.tools.get('reflex_route'), undefined, 'route is not registered by default');
     assert.equal(host.ctx.tools.get('reflex_prune'), undefined, 'prune is no longer a tool at all');

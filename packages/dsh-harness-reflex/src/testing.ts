@@ -11,7 +11,7 @@ import LlmRuntime, {
   type StreamChunk,
   type UserMessage
 } from '@deepseek-ai/dsh-llm';
-import ToolRuntime, { type ToolBatchResult, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
+import ToolRuntime, { defineTool, type ToolBatchResult, type ToolDefinition, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import CommandRuntime from '@deepseek-ai/dsh-commands';
 import * as nativeExecutor from '@deepseek-ai/dsh-tool-executor-native';
@@ -164,9 +164,25 @@ export interface ReflexTestHost {
 
 /**
  * Boot Cordis with `systemPrompt`, `tools`, `llm`, and `commands` loaded.
+ *
+ * The Host's delegation tool is registered as part of the composition, because
+ * `reflex_delegate` is a wrapper around it and a harness without it would not
+ * reflect a normal deployment. A test that needs the no-delegation case uses
+ * {@link createToolContextWithoutDelegation}.
  * @returns the root context, ready for `apply` or `ctx.plugin`.
  */
-export async function createToolContext(): Promise<Context> {
+export async function createToolContext(options: { record?: Array<Record<string, unknown>> } = {}): Promise<Context> {
+  const ctx = await createToolContextWithoutDelegation();
+  ctx.tools.register(delegationStandIn(options).definition);
+  return ctx;
+}
+
+/**
+ * Boot Cordis with every service the plugin depends on, but **no** delegation
+ * tool — the one deployment shape in which `reflex_delegate` must not register.
+ * @returns the root context.
+ */
+export async function createToolContextWithoutDelegation(): Promise<Context> {
   const ctx = new Context();
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(ToolRuntime);
@@ -178,6 +194,74 @@ export async function createToolContext(): Promise<Context> {
   await ctx.plugin(LlmRuntime);
   await ctx.plugin(CommandRuntime);
   return ctx;
+}
+
+/**
+ * The Host's delegation tool, shaped as the harness mounts it.
+ *
+ * `reflex_delegate` is a *wrapper*: it registers only when the Host tool exists
+ * and declares `reasoning_effort` (i.e. the deployment set `modelSelection:
+ * true`). A harness without that tool therefore reproduces an unusual deployment
+ * rather than the normal one, so the default host mounts this stand-in — same
+ * name, same parameter list as `@deepseek-ai/dsh-tool-subagent` publishes when
+ * model selection is on — and records what the wrapper forwards. Tests that need
+ * a Host *without* delegation simply do not seed it (see
+ * {@link createReflexHostWithTools}).
+ */
+export interface DelegationStandIn {
+  /** Registry name the Host uses by default. */
+  readonly name: string;
+  /** Every argument object the delegate forwarded, oldest first. */
+  readonly calls: Array<Record<string, unknown>>;
+  /** The definition to register. */
+  readonly definition: ToolDefinition;
+}
+
+/**
+ * Build the Host delegation-tool stand-in.
+ * @param options - omit `reasoningEffort` to model a deployment with model selection off.
+ * @returns the stand-in, with its recorded dispatches.
+ */
+export function delegationStandIn(
+  options: { reasoningEffort?: boolean; record?: Array<Record<string, unknown>>; refuse?: string } = {}
+): DelegationStandIn {
+  const calls: Array<Record<string, unknown>> = options.record ?? [];
+  const definition = defineTool({
+    name: 'subagent',
+    description:
+      'Stand-in for the Host delegation tool: publishes the same parameter list as `tool-subagent` with model selection enabled, and records what `reflex_delegate` forwards.',
+    parameters: {
+      cwd: { type: 'string' },
+      description: { type: 'string', required: true },
+      prompt: { type: 'string', required: true },
+      ...(options.reasoningEffort === false
+        ? {}
+        : {
+            provider: { type: 'string' },
+            model: { type: 'string' },
+            reasoning_effort: { type: 'string' }
+          })
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          kind: { type: 'string', required: true, const: 'activation' },
+          subagentId: { type: 'string', required: true }
+        }
+      },
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text' as const, text: `started subagent ${(value as { subagentId: string }).subagentId}` }
+      ]
+    },
+    async execute(raw: Record<string, unknown>) {
+      calls.push(raw);
+      if (options.refuse !== undefined) throw new Error(options.refuse);
+      return { kind: 'activation' as const, subagentId: `stand-in-child-${calls.length}` };
+    }
+  });
+  return { name: 'subagent', calls, definition };
 }
 
 /**
@@ -209,6 +293,40 @@ export async function createReflexHost(config?: ReflexConfig): Promise<ReflexTes
  */
 export function callTool(ctx: Context, name: string, args: unknown = {}): Promise<ToolExecutionResult> {
   return executeOne(ctx, { callId: `reflex-test-${name}-${Math.random().toString(36).slice(2, 8)}`, name, args });
+}
+
+/**
+ * Boot a context, register extra tools on it *before* the plugin mounts, and
+ * then apply the plugin — the order the real Host uses.
+ *
+ * `reflex_delegate` is conditional on the Host's delegation tool, and that
+ * condition is resolved when the tool surface is installed. A stand-in
+ * registered afterwards would therefore never be wrapped, so tests that need a
+ * delegate must seed the registry first, exactly as the Host does.
+ * @param config - deployment config.
+ * @param seed - registers the pre-existing tools; called before the plugin applies.
+ * @param options - `delegation: false` boots a context with no Host delegation tool.
+ * @returns the host handle.
+ */
+export async function createReflexHostWithTools(
+  config: ReflexConfig | undefined,
+  seed: (ctx: Context) => void,
+  options: { delegation?: boolean; record?: Array<Record<string, unknown>> } = {}
+): Promise<ReflexTestHost> {
+  const ctx =
+    options.delegation === false
+      ? await createToolContextWithoutDelegation()
+      : await createToolContext(options.record === undefined ? {} : { record: options.record });
+  seed(ctx);
+  const runtime = applyReflex(ctx, config);
+  let calls = 0;
+
+  return {
+    ctx,
+    runtime,
+    callTool: (name: string, args: unknown = {}) => executeOne(ctx, { callId: `reflex-test-${++calls}`, name, args }),
+    dispose: () => ctx.fiber.dispose()
+  };
 }
 
 /**

@@ -14,7 +14,7 @@ import { Config, resolveConfig, type ReflexConfig } from './config.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import { callTool, nativeExecutorPlugin, loaderEventReceiver } from './testing.js';
+import { callTool, delegationStandIn, loaderEventReceiver, nativeExecutorPlugin } from './testing.js';
 import { REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
 
 /**
@@ -83,6 +83,9 @@ async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
   await ctx.plugin(nativeExecutorPlugin);
   await ctx.plugin(LlmRuntime);
   await ctx.plugin(CommandRuntime);
+  // The Host's delegation tool is part of a normal deployment: `reflex_delegate`
+  // is a wrapper around it, so it is present here too.
+  ctx.tools.register(delegationStandIn().definition);
   await ctx.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href });
 
   loaderApplies = 0;
