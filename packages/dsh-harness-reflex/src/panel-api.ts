@@ -519,12 +519,18 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
 /**
  * Project the delegation switch, the host patch it edits, and the live capability.
  *
- * The two "not working" reasons are kept apart on purpose, because the fix
- * differs: `model-selection-off` is a host tool that does not publish the level
- * (tick the switch, restart), while `missing-tool` is a host without a
- * delegation tool at all (nothing this plugin can do). `restartRequired` is the
- * one fact that explains "I ticked it and nothing happened": the file now asks,
- * but the running host still reports the old tool schema.
+ * The "not working" reasons are kept apart on purpose, because the fix differs:
+ * `model-selection-off` is a tool that does not publish the level (tick the
+ * switch, restart), while `missing-tool` is a host without a delegation tool at
+ * all (nothing this plugin can do). `unknown` is neither: it means the capability
+ * was not probed, and it must never be rendered as "off".
+ *
+ * `registered` now follows **configuration** (g-054), so the one contradiction
+ * this view exists to prevent — "the switch is ticked, the tool is never
+ * registered" — can no longer be produced by the plugin. `restartRequired` is
+ * the remaining explanation for "I ticked it and the level still does not take
+ * effect": the file asks, but the running host still does not publish the
+ * parameter.
  * @param config - the configuration in force.
  * @param facts - gathered runtime facts.
  * @returns the wire projection of the delegation block.
@@ -537,7 +543,14 @@ export function projectDelegation(config: ResolvedReflexConfig, facts: PanelRunt
   // The runtime's own reading wins over the file's: a stale file that asks for
   // the field while the tool still refuses is precisely the restart case.
   const broken = state === 'model-selection-off' || state === 'missing-tool';
-  const reason = enabled && broken ? facts.delegationHealth?.reason : facts.hostPatch?.reason;
+  const reason =
+    enabled && broken
+      ? facts.delegationHealth?.reason
+      : // An unprobed capability explains itself: without this the panel would
+        // fall back to the patch's reason and imply the patch was the problem.
+        enabled && state === 'unknown' && registered
+        ? facts.delegationHealth?.reason
+        : facts.hostPatch?.reason;
   return {
     enabled,
     registered,

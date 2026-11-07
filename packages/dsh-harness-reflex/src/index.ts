@@ -1,3 +1,4 @@
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 
@@ -6,8 +7,8 @@ import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
 import { defineReflexTools, delegationExecutables, enabledReflexToolSuffixes, reflexToolNames, resolveReflexToolExecutables } from './tools.js';
 import type { ReflexDelegationSeam, ReflexToolSuffix } from './tools.js';
-import { createReflexDelegation, inspectDelegationTool } from './delegation-dispatch.js';
-import { readDelegationHealth, watchDelegationHealth } from './delegation-health.js';
+import { DELEGATION_TOOL_NAME, createReflexDelegation } from './delegation-dispatch.js';
+import { readDelegationHealth, watchDelegationHealth, type DelegationHealth } from './delegation-health.js';
 import { installLedgerCommand } from './command.js';
 import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
@@ -286,10 +287,13 @@ function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSur
   let registrationEvents = 0;
   let disposed = false;
 
-  // Resolved live: the Host's delegation tool is registered under a name *it*
-  // owns (`toolName`, default `subagent`), so the delegate wraps whatever is
-  // actually in the registry. Re-reading it on every reconciliation means a Host
-  // that mounts or enables that tool later still gets a delegate.
+  // Resolved live from configuration only. The honest capability check cannot
+  // happen here: this runs during `apply()`, where the plugin has no agent
+  // scope, and `dsh-tools` is a *scoped* registry whose global view does not
+  // contain a tool attached inside an agent preset — which is exactly where a
+  // real deployment puts `tool-subagent`. Probing the global view at mount is
+  // what made a correctly configured Host register nothing at all (g-054).
+  // Whether the Host can carry a level is judged at call time, by the Host.
   const delegation = (): ReflexDelegationSeam | undefined =>
     createReflexDelegation({
       ctx,
@@ -300,21 +304,21 @@ function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSur
     });
 
   /**
-   * Suffixes enabled by config *and* backed by something this Host can really serve.
+   * Suffixes enabled by config *and* consented to by the operator.
    *
-   * `delegate` is executable only when the Host delegation tool exists *and*
-   * declares `reasoning_effort` (`modelSelection: true`); registration and the
-   * seam read the same predicate, so the registry and the published surface
-   * cannot disagree.
+   * Registering the delegate is a **configuration** decision: `delegation.enabled`
+   * is the consent that writes the Host's `modelSelection` switch, and once it is
+   * given the wrapper is registered unconditionally. It deliberately does not
+   * consult the registry — at this point in the lifecycle there is no agent scope
+   * to read as, so any registry answer would describe a view no session uses.
+   * `delegationExecutables` still withholds the target when consent is off, which
+   * is the one gate registration keeps.
    */
-  const executableSuffixes = (config: ResolvedReflexConfig): ReflexToolSuffix[] => {
-    const target = inspectDelegationTool(ctx);
-    const delegateTarget = target !== undefined && target.acceptsReasoningEffort ? target.toolName : undefined;
-    // "The user asked for it" and "this Host can serve it" are combined once, by
-    // the module that owns the predicate, so the registry and the published
-    // surface cannot drift apart.
-    return resolveReflexToolExecutables(enabledReflexToolSuffixes(config), delegationExecutables(config, delegateTarget));
-  };
+  const executableSuffixes = (config: ResolvedReflexConfig): ReflexToolSuffix[] =>
+    resolveReflexToolExecutables(
+      enabledReflexToolSuffixes(config),
+      delegationExecutables(config, DELEGATION_TOOL_NAME)
+    );
 
   const publish = (): void => {
     // Vocabulary order, not registration order: the panel and the runtime
@@ -426,17 +430,25 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     tools.refresh(resolved);
 
     // The Host capability the delegate needs is read from the live registry, so
-    // it can disappear under a running activation (a reload of `tool-subagent`,
-    // a patch edit, a Host that replaces the tool). This watch owns the one
-    // reaction the design allows: warn once, and let the reconciler withdraw the
-    // tool. It never writes a configuration file — a switch that went off might
-    // be a person's own decision, and turning it back on is theirs to make.
+    // a broken one is reported and warned about. The read is **scoped**: a preset
+    // deployment attaches `tool-subagent` to an agent, not to the global view, so
+    // reading globally would call a working Host "off" (g-054). Until an agent
+    // registers here the reading is `unknown` — which the panel shows as "not
+    // probed", never as a fault. It never writes a configuration file: a switch
+    // that went off might be a person's own decision, and turning it back on is
+    // theirs to make.
+    //
+    // Registration is *not* a reaction of this watch any more (see
+    // `executableSuffixes`): a tool must not appear or vanish because a scope
+    // happened to become readable. The watch only reports.
+    let observedAgent: Agent | undefined;
+    const readHealth = (): DelegationHealth => readDelegationHealth(ctx, observedAgent);
     const delegationHealth = watchDelegationHealth({
-      read: () => readDelegationHealth(ctx),
+      read: readHealth,
       warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message),
       onChange: () => {
         if (runtime.disposed) return;
-        tools.refresh(runtime.effectiveConfig);
+        tools.publish();
       }
     });
     runtime.attachDelegationHealth(
@@ -445,6 +457,17 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
         tools.refresh(runtime.effectiveConfig);
       }
     );
+
+    // No listener is installed for the tool registry: the reading is taken on
+    // the panel's own poll (see `panel-mount.ts`), with whatever agent scope is
+    // known by then. Re-reading on every registry change proved nothing — the
+    // global view cannot resolve a preset-hosted tool — and cost a probe per
+    // change.
+    runtime.attachDelegationScope((agent) => {
+      observedAgent = agent;
+      // A new scope is a genuinely new view, so the reading is taken again in it.
+      delegationHealth.check();
+    });
 
     // A config-only settings save does not remount this plugin: the loader
     // commits the new values into the volatile references and dispatches this
@@ -460,10 +483,10 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     // every change instead of assumed static.
     const stopObserving = ctx.on('tools/change', () => {
       if (runtime.disposed) return;
-      // Re-read the delegation capability first: a registry change is exactly
-      // when `reasoning_effort` can appear or disappear, and the panel must show
-      // the reason with the surface it explains.
-      delegationHealth.check();
+      // The published surface is re-derived, not the delegation *reading*: the
+      // registry's global view cannot resolve a preset-hosted delegation tool, so
+      // a probe on every change would only ever answer "unknown" — and an
+      // "unknown" that triggered a refresh would be churn without information.
       tools.publish();
     });
 

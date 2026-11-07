@@ -70,19 +70,29 @@ interface DelegationToolArguments {
  *    (`toolName`, default `subagent`), so candidate names are tried in order;
  * 2. the tool *declares* `reasoning_effort`. The Host only adds that parameter
  *    to its schema when the deployment sets `modelSelection: true`; with the
- *    switch off the tool accepts no level at all, and a wrapper that registered
- *    anyway could only either silently drop the System One decision or send a
- *    parameter the Host will reject.
+ *    switch off the tool accepts no level at all.
  *
  * The parameter list is the model-facing schema the Host publishes, so this is
  * an observable contract, not internals.
+ *
+ * ## Why the scope argument is not optional decoration
+ *
+ * `dsh-tools` is a *scoped* registry: `get(name)` with no scope reads the
+ * **global** view, and a tool mounted inside an **agent preset** — which is
+ * where a real deployment attaches `tool-subagent` — is not in that view at
+ * all. Reading the global view to decide whether this Host can delegate
+ * therefore answers "no tool" on every preset-hosted deployment, however
+ * correctly `modelSelection` is configured. Passing the calling agent reads the
+ * view that deployment actually serves, and is the only reading that can tell
+ * "the capability is off" from "this scope does not show it".
  * @param ctx - context whose `tools` service is live.
+ * @param agent - the scope to read as; omitted selects the global view.
  * @returns the registered name and whether it accepts a level, or `undefined`
- * when this Host exposes no delegation tool at all.
+ * when that scope exposes no delegation tool at all.
  */
-export function inspectDelegationTool(ctx: Context): DelegationTarget | undefined {
+export function inspectDelegationTool(ctx: Context, agent?: Agent): DelegationTarget | undefined {
   for (const candidate of DELEGATION_TARGET_CANDIDATES) {
-    const definition = ctx.tools.get(candidate);
+    const definition = ctx.tools.get(candidate, agent);
     if (definition === undefined) continue;
     const properties = (definition.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
     return { toolName: candidate, acceptsReasoningEffort: properties !== undefined && 'reasoning_effort' in properties };
@@ -92,6 +102,16 @@ export function inspectDelegationTool(ctx: Context): DelegationTarget | undefine
 
 /** Candidate names of the Host delegation tool, in lookup order. */
 const DELEGATION_TARGET_CANDIDATES = ['subagent', 'reflex_subagent'] as const;
+
+/**
+ * The name the seam dispatches to when no scope is available to confirm it.
+ *
+ * This is the Host tool's documented default (`toolName`, default `subagent`).
+ * Naming it here rather than reading it at mount is the whole point of the
+ * registration fix: at mount there is no agent scope, so the registry cannot
+ * answer, and "cannot answer" must not read as "cannot delegate".
+ */
+export const DELEGATION_TOOL_NAME: string = DELEGATION_TARGET_CANDIDATES[0];
 
 /**
  * The Host delegation tool as this activation can use it.
@@ -109,7 +129,8 @@ export interface DelegationTarget {
 
 /** The log line emitted when the Host tool exists but cannot carry a level. */
 export const DELEGATION_MODEL_SELECTION_DISABLED =
-  'dsh-reflex: reflex_delegate is not registered because the subagent tool has modelSelection disabled; enable it to let System 1 choose the child\'s reasoning level';
+  'dsh-reflex: the subagent tool does not declare reasoning_effort (modelSelection is off), so a delegated call that carries a level will be refused by the Host; ' +
+  'enable modelSelection to let System 1 choose the child\'s reasoning level';
 
 /**
  * Read the parent's own effort and model from its composed options.
@@ -150,24 +171,40 @@ function delegationFailure(result: { error?: { message?: string; info?: { name?:
 /**
  * Build the seam `reflex_delegate` dispatches through.
  *
- * Returns `undefined` in both cases where the wrapper must not exist:
- * the Host exposes no delegation tool at all (nothing to wrap), or it exposes
- * one that cannot carry a reasoning level (see {@link inspectDelegationTool}).
- * Registering in the second case would be the one outcome the design forbids —
- * a tool that appears to let System One decide while the decision is silently
- * dropped — so the refusal is logged loudly instead.
+ * ## Why this does not inspect the registry
+ *
+ * It used to refuse to build unless the live registry showed a delegation tool
+ * that *declares* `reasoning_effort`. That probe ran during `apply()`, where the
+ * plugin has no agent scope — and `dsh-tools` is scoped, so the probe read the
+ * **global** view. A real deployment attaches `tool-subagent` inside an **agent
+ * preset**, which the global view does not contain. The consequence was the bug
+ * this seam now avoids: a correctly configured Host (patch written,
+ * `modelSelection: true` dumped from the running config, the panel switch on)
+ * still got no `reflex_delegate`, because the one place the plugin looked for
+ * the capability is the one place a preset can never appear.
+ *
+ * So the capability question is not answered here at all. What this Host can
+ * serve is judged at **call time**, in the caller's own scope, by the Host's own
+ * argument validation: a `subagent` that does not accept `reasoning_effort`
+ * rejects the call, and {@link delegationFailure} rethrows that refusal verbatim.
+ * That refusal is strictly better evidence than a schema probe taken at mount —
+ * it comes from the very scope that would serve the call.
+ *
+ * Whether the *user* consented is a separate question, and it is not answered
+ * here either: `delegationExecutables` withholds the target unless
+ * `delegation.enabled` is true, so the registry only ever asks for a seam that
+ * configuration already asked for.
  *
  * @param options - the registry, the ledger, System One, and the confidence floor.
- * @returns the seam, or `undefined` when the wrapper must not register.
+ * @returns the seam. Never `undefined` for a capability reason: registration is
+ *   decided by configuration, not by a registry view taken at mount.
  */
 export function createReflexDelegation(options: ReflexDelegationOptions): ReflexDelegationSeam | undefined {
-  const target = inspectDelegationTool(options.ctx);
-  if (target === undefined) return undefined;
-  if (!target.acceptsReasoningEffort) {
-    options.warn?.(DELEGATION_MODEL_SELECTION_DISABLED);
-    return undefined;
-  }
-  const toolName = target.toolName;
+  // The Host tool's own default name. It is not read from the registry because
+  // no scope is available at mount (see above); the Host still owns the name, so
+  // a deployment that renamed it gets an honest "unknown tool" from dispatch
+  // rather than a wrapper that silently fails to appear.
+  const toolName = DELEGATION_TOOL_NAME;
 
   const { ctx, ledger } = options;
 
@@ -203,12 +240,20 @@ export function createReflexDelegation(options: ReflexDelegationOptions): Reflex
       };
 
       const agent = callingAgent ?? options.agent?.();
+      // Resolved per call, in the caller's own scope. This is where the registry
+      // *can* answer — unlike at mount — so a Host that renamed its delegation
+      // tool (`toolName`) is still reached. When the scope exposes none of the
+      // candidate names, the default is used and the dispatcher's own "unknown
+      // tool" is the answer, which is the honest one: this plugin must not
+      // report a Host capability it cannot see.
+      const target = agent === undefined ? undefined : inspectDelegationTool(ctx, agent);
+      const name = target === undefined ? toolName : target.toolName;
       const batch = await ctx.tools.execute({
         calls: [
           {
             type: 'tool-call',
             id: `reflex-delegate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` as never,
-            name: toolName,
+            name,
             arguments: JSON.stringify(arguments_)
           }
         ],
@@ -217,11 +262,11 @@ export function createReflexDelegation(options: ReflexDelegationOptions): Reflex
       });
 
       const entry = batch.results[0];
-      if (entry === undefined) throw new Error(`the delegation tool ${toolName} settled no result`);
+      if (entry === undefined) throw new Error(`the delegation tool ${name} settled no result`);
       if (entry.result.isError) throw delegationFailure(entry.result);
       const value = entry.result.value as { subagentId?: unknown } | undefined;
       if (typeof value?.subagentId !== 'string' || value.subagentId.length === 0) {
-        throw new Error(`the delegation tool ${toolName} returned no subagentId`);
+        throw new Error(`the delegation tool ${name} returned no subagentId`);
       }
       return { subagentId: value.subagentId };
     }

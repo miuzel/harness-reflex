@@ -1,3 +1,5 @@
+import type { Agent } from '@deepseek-ai/dsh-agent';
+
 import {
   Calibrator,
   DecisionLedger,
@@ -185,6 +187,8 @@ export class ReflexRuntime {
   #surface: readonly string[] = [];
   /** Reads the live delegation capability; set by the plugin lifecycle. */
   #delegationHealth?: () => DelegationHealth;
+  /** Records the agent scope the delegation capability is read in. */
+  #noteDelegationScope?: (agent: Agent) => void;
   #interventions?: InterventionEngine;
   /**
    * The config the Host resolved for this activation, kept as it was passed in.
@@ -639,7 +643,7 @@ export class ReflexRuntime {
    * Attach the live delegation-capability read of this activation.
    *
    * Set by the plugin lifecycle right after the tool surface, so the panel can
-   * explain *why* `reflex_delegate` is absent instead of silently omitting it.
+   * explain what the Host actually publishes instead of silently omitting it.
    * The runtime does not own the registry: it only reports what the Host says.
    * @param read - returns the current reading.
    * @param refresh - re-checks the registry and reconciles the tool surface.
@@ -649,7 +653,29 @@ export class ReflexRuntime {
     this.#refreshDelegation = refresh;
   }
 
-  /** Re-check the Host delegation capability, withdrawing the tool if it broke. */
+  /**
+   * Attach the hook that records the agent scope the capability is read in.
+   *
+   * `dsh-tools` is scoped, and a preset-hosted delegation tool is invisible from
+   * the global view. The lifecycle owns the reading, so it also owns the scope:
+   * this only lets a caller that *does* have an `Agent` (the panel poll, a
+   * session-aware caller) tell it which scope to read as. Never decides
+   * registration — that is configuration's job.
+   * @param note - receives the scope to read the delegation capability in.
+   */
+  attachDelegationScope(note?: (agent: Agent) => void): void {
+    this.#noteDelegationScope = note;
+  }
+
+  /**
+   * Record the scope future delegation reads should use.
+   * @param agent - the calling agent, or a preset to read as.
+   */
+  noteDelegationScope(agent: Agent): void {
+    this.#noteDelegationScope?.(agent);
+  }
+
+  /** Re-check the Host delegation capability in the recorded scope. */
   checkDelegationHealth(): DelegationHealth | undefined {
     this.#refreshDelegation?.();
     return this.#delegationHealth?.();

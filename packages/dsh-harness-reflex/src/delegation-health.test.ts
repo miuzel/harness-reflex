@@ -8,6 +8,7 @@ import {
   DELEGATION_BROKEN_WARNING,
   DELEGATION_MODEL_SELECTION_OFF_REASON,
   DELEGATION_TOOL_MISSING_REASON,
+  DELEGATION_UNPROBED_REASON,
   readDelegationHealth,
   watchDelegationHealth,
   type DelegationHealth
@@ -16,7 +17,9 @@ import { DELEGATION_ROW_ID, PROFILE_PATCH_FILENAME, enableHostModelSelection } f
 import {
   createReflexHost,
   createReflexHostWithTools,
+  createScopedDelegationHost,
   createToolContext,
+  createToolContextWithoutDelegation,
   delegationStandIn
 } from './testing.js';
 import {
@@ -54,8 +57,8 @@ const BROKEN: DelegationHealth = {
 /** A reading for a Host that never had a delegation tool. */
 const MISSING: DelegationHealth = { state: 'missing-tool', reason: DELEGATION_TOOL_MISSING_REASON, delegateAvailable: false };
 
-test('the live reading distinguishes no tool, a bare tool, and a usable one', async () => {
-  // No tool at all.
+test('the live reading distinguishes a usable tool, a bare one, and an unreadable view', async () => {
+  // A level-carrying tool, read globally: it is genuinely visible there.
   const bare = await createToolContext();
   try {
     assert.deepEqual(readDelegationHealth(bare), { state: 'ready', toolName: 'subagent', delegateAvailable: true });
@@ -64,19 +67,22 @@ test('the live reading distinguishes no tool, a bare tool, and a usable one', as
   }
 
   // The default context ships the level-carrying stand-in; a context without it
-  // is the "this host has no delegation tool" shape.
+  // has no delegation tool at all. Read *globally*, that absence proves nothing
+  // — a preset-hosted tool is invisible from the global view, which is exactly
+  // the g-054 confusion — so the honest answer is `unknown`, never "missing".
   const { createToolContextWithoutDelegation } = await import('./testing.js');
   const none = await createToolContextWithoutDelegation();
   try {
     const health = readDelegationHealth(none);
-    assert.equal(health.state, 'missing-tool');
-    assert.equal(health.delegateAvailable, false);
-    assert.equal(health.reason, DELEGATION_TOOL_MISSING_REASON);
+    assert.equal(health.state, 'unknown', 'an unreadable view is not evidence of absence');
+    assert.equal(health.reason, DELEGATION_UNPROBED_REASON);
+    assert.equal(health.delegateAvailable, false, 'and nothing observed means nothing is claimed');
   } finally {
     await none.fiber.dispose();
   }
 
-  // A tool that exists but cannot carry a level.
+  // A tool that exists but cannot carry a level, again read globally: the tool
+  // *is* visible, so this reading is evidence and is reported plainly.
   const stripped = await createToolContextWithoutDelegation();
   try {
     stripped.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
@@ -86,6 +92,32 @@ test('the live reading distinguishes no tool, a bare tool, and a usable one', as
     assert.equal(health.reason, DELEGATION_MODEL_SELECTION_OFF_REASON);
   } finally {
     await stripped.fiber.dispose();
+  }
+});
+
+test('a scoped read distinguishes a preset-hosted tool from a genuinely absent one', async () => {
+  // The g-054 shape: the tool lives only inside an agent scope.
+  const hosted = await createScopedDelegationHost();
+  try {
+    assert.equal(readDelegationHealth(hosted.ctx).state, 'unknown', 'globally: no evidence either way');
+    assert.equal(
+      readDelegationHealth(hosted.ctx, hosted.scope).state,
+      'ready',
+      'in the agent scope that would serve the call: genuinely ready'
+    );
+  } finally {
+    await hosted.dispose();
+  }
+
+  // A scope that really has no delegation tool *is* evidence of absence.
+  const absent = await createToolContextWithoutDelegation();
+  try {
+    const elsewhere = { id: 'empty-scope' } as never;
+    const health = readDelegationHealth(absent, elsewhere);
+    assert.equal(health.state, 'missing-tool', 'a readable scope without the tool is real evidence');
+    assert.equal(health.reason, DELEGATION_TOOL_MISSING_REASON);
+  } finally {
+    await absent.fiber.dispose();
   }
 });
 
@@ -165,7 +197,7 @@ test('forget() makes the next activation count as new, so a deliberate off is no
   assert.deepEqual(warnings, []);
 });
 
-test('a broken capability is withdrawn without the profile patch being written', async () => {
+test('a broken capability is reported without the profile patch being written', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'reflex-heal-'));
   try {
     const patch = join(dir, PROFILE_PATCH_FILENAME);
@@ -185,7 +217,7 @@ test('a broken capability is withdrawn without the profile patch being written',
         read: () => readDelegationHealth(host.ctx),
         warn: (message) => warnings.push(message)
       });
-      assert.equal(watch.health.state, 'missing-tool');
+      assert.equal(watch.health.state, 'unknown', 'no scope was readable, so nothing is claimed');
       watch.check();
 
       // The self-heal's whole contract: it *reports*, and it writes nothing.
@@ -199,8 +231,11 @@ test('a broken capability is withdrawn without the profile patch being written',
   }
 });
 
-test('withdrawing follows the published surface: a broken tool is not advertised', async () => {
+test('a broken tool is reported, and the panel and the registry still agree', async () => {
   // Drive the real registration path with a tool that has no level parameter.
+  // The wrapper is registered (configuration says so) *and* the reading says the
+  // level cannot be carried — the two no longer contradict each other, which was
+  // the g-054 panel bug: a ticked switch and a permanently absent tool.
   const { createReflexHostWithTools } = await import('./testing.js');
   const host = await createReflexHostWithTools(
     { backend: 'mock', delegation: { enabled: true } },
@@ -210,10 +245,10 @@ test('withdrawing follows the published surface: a broken tool is not advertised
     { delegation: false }
   );
   try {
-    assert.equal(host.ctx.tools.get('reflex_delegate'), undefined, 'the wrapper is not registered');
+    assert.ok(host.ctx.tools.get('reflex_delegate'), 'the wrapper is registered from configuration');
     assert.ok(
-      ![...host.runtime.toolSurface].includes('reflex_delegate'),
-      'and the surface the panel reads does not advertise it'
+      [...host.runtime.toolSurface].includes('reflex_delegate'),
+      'and the surface the panel reads advertises it, so the two agree'
     );
     const health = host.runtime.delegationHealth;
     assert.equal(health?.state, 'model-selection-off');
@@ -280,6 +315,68 @@ test('once the host serves it, the restart prompt disappears', () => {
   assert.equal(snapshot.delegation.restartRequired, false, 'no restart is pending once the host serves the field');
   assert.equal(snapshot.delegation.registered, true);
   assert.equal(snapshot.delegation.reason, undefined);
+});
+
+test('the panel can no longer show "ticked but never registered" (g-054)', () => {
+  // The contradiction that made the bug invisible: the switch was on, the tool
+  // was absent, and the panel explained neither. Registration follows
+  // configuration now, so a ticked switch always shows a registered tool — even
+  // when the capability was never probed (the preset-hosted case, where the
+  // global view cannot answer).
+  const config = resolveConfig({ backend: 'mock', delegation: { enabled: true } });
+  for (const state of ['ready', 'unknown', 'model-selection-off'] as const) {
+    const snapshot = buildPanelSnapshot(
+      {
+        config,
+        backendName: 'mock',
+        pools: [],
+        routingActive: false,
+        // What the reconciler actually published: configuration, nothing else.
+        toolSurface: ['reflex_choice', 'reflex_score', 'reflex_screen', 'reflex_gate', 'reflex_delegate'],
+        ledger: new DecisionLedger(null),
+        apiKeyPresent: false,
+        effort: undefined,
+        hostPatch: { path: '/x/cordis.patch.yml', source: 'DSH_PROFILE_DIR', enabled: true },
+        delegationHealth: {
+          state,
+          ...(state === 'unknown'
+            ? { reason: DELEGATION_UNPROBED_REASON }
+            : state === 'model-selection-off'
+              ? { reason: DELEGATION_MODEL_SELECTION_OFF_REASON }
+              : {})
+        }
+      },
+      5
+    );
+    assert.equal(snapshot.delegation.enabled, true, `${state}: the consent is recorded`);
+    assert.equal(snapshot.delegation.registered, true, `${state}: a ticked switch always has a registered tool`);
+    assert.notEqual(
+      snapshot.delegation.enabled && !snapshot.delegation.registered,
+      true,
+      `${state}: "ticked but never registered" is unrepresentable`
+    );
+  }
+
+  // An unprobed capability says so, instead of borrowing the patch's reason and
+  // implying the patch is at fault.
+  const unprobed = buildPanelSnapshot(
+    {
+      config,
+      backendName: 'mock',
+      pools: [],
+      routingActive: false,
+      toolSurface: ['reflex_delegate'],
+      ledger: new DecisionLedger(null),
+      apiKeyPresent: false,
+      effort: undefined,
+      hostPatch: { path: '/x/cordis.patch.yml', source: 'DSH_PROFILE_DIR', enabled: true },
+      delegationHealth: { state: 'unknown' as const, reason: DELEGATION_UNPROBED_REASON }
+    },
+    5
+  );
+  assert.equal(unprobed.delegation.state, 'unknown', 'never rendered as "off"');
+  assert.equal(unprobed.delegation.restartRequired, false, 'and no restart is suggested on no evidence');
+  assert.equal(unprobed.delegation.reason, DELEGATION_UNPROBED_REASON, 'the honest reason is carried');
 });
 
 test('the switch starts off, and a default deployment writes nothing anywhere', async () => {

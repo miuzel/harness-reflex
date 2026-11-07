@@ -741,7 +741,7 @@ window.__ModuleLoader__.load({
 			    // Distinct from `effectiveUnknown` on purpose: both mean "not read yet", but
 			    // they sit on different cards, and a sentence shared by two cards cannot be
 			    // used to assert that *this* card read its fact.
-			    delegationStateUnknown: '宿主能力状态尚未读取',
+			    delegationStateUnknown: '尚未探测：读不到 agent 作用域，不能据此判断开或关',
 			    delegationPatchUnknown: '未解析到 profile patch 路径',
 			    delegationPatchOn: '已要求开启',
 			    delegationPatchOff: '尚未要求开启',
@@ -1034,7 +1034,7 @@ window.__ModuleLoader__.load({
 			    delegationStateReady: 'On — a decided level reaches the child',
 			    delegationStateOff: 'Off — the host delegation tool has no reasoning_effort argument',
 			    delegationStateNoTool: 'This host exposes no delegation tool to wrap',
-			    delegationStateUnknown: 'Host capability state not read yet',
+			    delegationStateUnknown: 'Not probed — no agent scope was readable, so neither on nor off is claimed',
 			    delegationPatchUnknown: 'Profile patch path not resolved',
 			    delegationPatchOn: 'Asked for',
 			    delegationPatchOff: 'Not asked for',

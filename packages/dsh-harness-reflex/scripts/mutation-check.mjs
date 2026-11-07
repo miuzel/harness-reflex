@@ -715,14 +715,23 @@ const MUTATIONS = [
     to: '        reasoning_effort: ("reflex" as unknown) as DelegationEffort,'
   },
   {
-    // The seam's refusal is what stops a delegate being offered when the Host
-    // tool cannot carry a level. Removing it is caught by two independent
-    // tests: the gate in isolation, and the registry/surface agreement.
-    name: 'delegate-seam-accepts-model-selection-off',
-    area: 'a Host tool that cannot carry a level gets no delegate at all',
+    // g-054: the read has to be *scoped*. Dropping the scope argument restores
+    // the exact bug — the global view cannot see a preset-hosted tool, so a
+    // correctly configured Host reads as "no delegation tool".
+    name: 'delegate-inspect-ignores-scope',
+    area: 'the delegation probe reads the caller scope, not the global view',
     file: 'src/delegation-dispatch.ts',
-    from: '  if (!target.acceptsReasoningEffort) {',
-    to: '  if (target.acceptsReasoningEffort === false && (target as { never?: boolean }).never === true) {'
+    from: '    const definition = ctx.tools.get(candidate, agent);',
+    to: '    const definition = ctx.tools.get(candidate);'
+  },
+  {
+    // g-054: registration is decided by configuration alone. Re-introducing a
+    // registry probe in the mount path is the regression under test.
+    name: 'delegate-registration-probes-global-view',
+    area: 'reflex_delegate registers from configuration, not from a mount-time probe',
+    file: 'src/index.ts',
+    from: '      delegationExecutables(config, DELEGATION_TOOL_NAME)',
+    to: '      delegationExecutables(config, ctx.tools.get(DELEGATION_TOOL_NAME) === undefined ? undefined : DELEGATION_TOOL_NAME)'
   },
   {
     name: 'delegate-accepts-injected-level',
@@ -766,6 +775,15 @@ const MUTATIONS = [
     file: 'src/delegation-health.ts',
     from: '    } else if (wasAvailable && !reported && next.state === \'model-selection-off\') {',
     to: '    } else if (!reported \u0026\u0026 next.state === \'model-selection-off\') {'
+  },
+  {
+    // g-054: an unreadable view must stay `unknown`. Reporting it as "the tool is
+    // missing" is the false claim the panel showed on every preset-hosted Host.
+    name: 'health-unreadable-view-reported-as-missing',
+    area: 'an unprobed capability is unknown, never reported as off',
+    file: 'src/delegation-health.ts',
+    from: '    if (agent === undefined) {\n      return { state: \'unknown\', reason: DELEGATION_UNPROBED_REASON, delegateAvailable: false };\n    }',
+    to: '    if (agent === undefined) {\n      return { state: \'missing-tool\', reason: DELEGATION_TOOL_MISSING_REASON, delegateAvailable: false };\n    }'
   },
   {
     // The patch edit must merge, not rewrite. Appending a second row when one

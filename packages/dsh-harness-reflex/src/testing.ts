@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis';
 import { agentEvents, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent';
+import { createScope, type Scope } from '@deepseek-ai/dsh-scope';
 import LlmRuntime, {
   LlmAdapter,
   isAgentLoopRequest,
@@ -326,6 +327,46 @@ export async function createReflexHostWithTools(
     runtime,
     callTool: (name: string, args: unknown = {}) => executeOne(ctx, { callId: `reflex-test-${++calls}`, name, args }),
     dispose: () => ctx.fiber.dispose()
+  };
+}
+
+/**
+ * Boot a context and put the Host delegation tool **inside an agent scope**.
+ *
+ * This is the shape a real deployment has: `tool-subagent` is attached to the
+ * agent preset, so `ctx.tools.get('subagent')` — the global view — does not see
+ * it and `ctx.tools.get('subagent', scope)` does. A test that only ever
+ * registers globally cannot reproduce g-054, because the global view is exactly
+ * the view the bug was reading.
+ *
+ * The scope is minted the way the Host mints one: under a context that declares
+ * `tools`, which the scoped context then inherits.
+ * @param options - `reasoningEffort: false` models a host with model selection off.
+ * @returns the root context and the scope key its delegation tool lives in.
+ */
+export async function createScopedDelegationHost(
+  options: { reasoningEffort?: boolean; record?: Array<Record<string, unknown>> } = {}
+): Promise<{ ctx: Context; scope: Agent; dispose: () => Promise<void> }> {
+  const ctx = await createToolContextWithoutDelegation();
+  // `ScopeKey` is structural (any object), so the key doubles as the `Agent`
+  // argument the public helpers take; the registry only needs it to be the same
+  // identity the scope was minted with.
+  const key = { id: `agent-scope-${Math.random().toString(36).slice(2, 8)}` } as unknown as Agent;
+  let minted: Scope | undefined;
+  // `createScope` inherits the dependency API of the context it is minted under,
+  // so it has to be minted inside a context that declares `tools`.
+  await ctx.inject(['tools'], async (declaring) => {
+    minted = createScope(declaring, key);
+    minted.ctx.tools.register(delegationStandIn(options).definition);
+  });
+  const scope = minted as Scope;
+  return {
+    ctx,
+    scope: key,
+    dispose: async () => {
+      await scope.dispose();
+      await ctx.fiber.dispose();
+    }
   };
 }
 

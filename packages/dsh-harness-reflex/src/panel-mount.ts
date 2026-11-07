@@ -16,6 +16,7 @@
  *
  * @module dsh-reflex/panel-mount
  */
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage } from 'node:http';
 
@@ -72,6 +73,14 @@ export function panelFacts(
   ctx?: Context,
   hostPatch?: HostPatchOptions
 ): PanelRuntimeFacts {
+  // Tell the lifecycle which scope to read the delegation capability in. A
+  // preset-hosted `subagent` is invisible from the registry's global view, so a
+  // panel that probes without a scope reports "unknown" forever on a host whose
+  // delegation is perfectly configured. A live agent (or, before any exists, a
+  // live preset) is the scope a session would actually be served from.
+  const scope = delegationScopeOf(ctx);
+  if (scope !== undefined) runtime.noteDelegationScope(scope);
+
   const cached = ctx ? catalogCache.get(ctx) : undefined;
   if (ctx && (!cached || cached.length === 0 || cached.every(g => g.models.length === 0))) {
     // Background async fetch so panelFacts remains synchronous
@@ -145,6 +154,33 @@ export function panelFacts(
     ...(systemOneHealth === undefined ? {} : { systemOneHealth }),
     ...(modelCatalog === undefined ? {} : { modelCatalog })
   };
+}
+
+/**
+ * The scope a delegation-capability read should use, when one is available.
+ *
+ * Prefers a live agent: that is the scope whose view actually serves a session's
+ * tool calls. Falls back to the root agent, then to a live preset (the scope a
+ * fresh session would be composed from). `undefined` when the host exposes
+ * neither — the reading is then `unknown`, which is honest, rather than a global
+ * view that a preset-hosted tool can never appear in.
+ * @param ctx - any context carrying the agent registry, when the host has one.
+ * @returns a readable scope, or `undefined` when nothing can be read as.
+ */
+function delegationScopeOf(ctx: Context | undefined): Agent | undefined {
+  const registry = (ctx as { agents?: { list?: () => Agent[]; roots?: () => Agent[] } } | undefined)?.agents;
+  if (registry === undefined) return undefined;
+  try {
+    const live = registry.list?.() ?? [];
+    if (live.length > 0) return live[0];
+    const roots = registry.roots?.() ?? [];
+    if (roots.length > 0) return roots[0];
+  } catch {
+    // A closing registry is not a capability fault: report nothing rather than
+    // pretend the host turned the capability off.
+    return undefined;
+  }
+  return undefined;
 }
 
 /**

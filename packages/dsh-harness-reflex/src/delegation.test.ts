@@ -6,6 +6,7 @@ import {
   callTool,
   createReflexHost,
   createReflexHostWithTools,
+  createScopedDelegationHost,
   createToolContext,
   createToolContextWithoutDelegation,
   delegationStandIn,
@@ -41,7 +42,9 @@ import { applyReflex } from './index.js';
  * 2. an out-of-policy route is refused **by the Host** — the assertions match the
  *    Host's own wording and prove the refusal happened before any grade was
  *    recorded, so no check of this plugin's could be what rejected it;
- * 3. a Host whose delegation tool cannot carry a level gets no delegate at all.
+ * 3. registration follows **configuration**: the consent switch registers the
+ *    wrapper unconditionally, and a Host that cannot carry a level fails the
+ *    *call* rather than silently withholding the tool (g-054).
  *
  * @module dsh-reflex/delegation.test
  */
@@ -270,25 +273,10 @@ test('every delegation records an auditable grade in the ledger', async () => {
   }
 });
 
-test('a Host whose delegation tool cannot carry a level gets no delegate at all', async () => {
-  // Drive the *real* registration path: the default context ships the
-  // delegation tool, and this test swaps in the model-selection-off shape
-  // *before* the plugin mounts. The context is not relaxed in any way, so a
-  // broken gate here really does register a delegate.
-  const bare = await createReflexHostWithTools(
-    { backend: 'mock', delegation: { enabled: true } },
-    (ctx) => {
-      const existing = ctx.tools.get('subagent');
-      assert.ok(existing, 'the pre-condition: the Host delegation tool is present');
-      assert.ok(
-        (existing.parameters as { properties?: Record<string, unknown> }).properties?.reasoning_effort,
-        'the pre-condition: the default stand-in declares the level, so only the swap below removes it'
-      );
-    },
-    { record: forwarded }
-  );
-  await bare.dispose();
-
+test('a Host delegation tool without the level parameter still registers; the call is what fails', async () => {
+  // Registration is a *configuration* decision now: the consent switch is the
+  // only gate. Whether this Host can carry a level is settled at call time, by
+  // the Host, in the caller's own scope (see `createReflexDelegation`).
   const withDefault = await createReflexHost({ backend: 'mock', delegation: { enabled: true } });
   try {
     assert.ok(
@@ -299,7 +287,8 @@ test('a Host whose delegation tool cannot carry a level gets no delegate at all'
     await withDefault.dispose();
   }
 
-  // The Host tool without the parameter = model selection disabled.
+  // The Host tool without the parameter = model selection disabled. The wrapper
+  // is still there — the model must be able to ask, and hear why it cannot.
   const disabled = await createReflexHostWithTools(
     { backend: 'mock', delegation: { enabled: true } },
     (ctx) => {
@@ -308,30 +297,86 @@ test('a Host whose delegation tool cannot carry a level gets no delegate at all'
     { delegation: false }
   );
   try {
-    const target = inspectDelegationTool(disabled.ctx);
-    assert.deepEqual(target, { toolName: 'subagent', acceptsReasoningEffort: false });
-    assert.equal(
+    assert.deepEqual(inspectDelegationTool(disabled.ctx), { toolName: 'subagent', acceptsReasoningEffort: false });
+    assert.ok(
       disabled.ctx.tools.get('reflex_delegate'),
-      undefined,
-      'the wrapper is not registered when the Host tool omits reasoning_effort (modelSelection off)'
+      'the wrapper is registered from configuration, not from the tool schema'
     );
     assert.ok(
-      reflexToolNames(disabled.runtime.effectiveConfig).includes('reflex_delegate'),
-      'the configuration still enables it: the gate that removed it is the executable check, not the switch'
+      [...disabled.runtime.toolSurface].includes('reflex_delegate'),
+      'and the published surface lists it, so the panel and the registry agree'
     );
-    assert.ok(
-      ![...disabled.runtime.toolSurface].includes('reflex_delegate'),
-      'the published surface does not advertise a tool that cannot carry a level'
+
+    // The decision point: a call carrying a level reaches the Host tool and is
+    // refused *there*. The stand-in reproduces the wording `dsh-tool-subagent`
+    // produces when `modelSelection` is off (`requestedAgentOptions`, the
+    // `!enabled` branch), and `dispatch` rethrows it verbatim — the message is
+    // the Host's, not a check written in this plugin.
+    //
+    // (Registered for the refusal: the stand-in's schema alone does not reject an
+    // extra key, so a stand-in that stayed silent would model a *dropping* Host,
+    // which the next test covers.)
+    const refusing = await createReflexHostWithTools(
+      { backend: 'mock', delegation: { enabled: true } },
+      (ctx) => {
+        ctx.tools.register(
+          delegationStandIn({
+            reasoningEffort: false,
+            refuse: 'child model selection is disabled for this tool instance'
+          }).definition
+        );
+      },
+      { delegation: false }
     );
+    disabled.runtime.dispose();
+    try {
+      assert.ok(refusing.ctx.tools.get('reflex_delegate'), 'registered, whatever the tool refuses at call time');
+      const refused = await callTool(refusing.ctx, 'reflex_delegate', args());
+      assert.equal(refused.isError, true, 'a level-carrying call is refused');
+      assert.match(
+        resultText(refused),
+        /child model selection is disabled for this tool instance/,
+        'the error is the Host\'s own, passed through untouched'
+      );
+    } finally {
+      await refusing.dispose();
+    }
   } finally {
     await disabled.dispose();
   }
 });
 
-test('the registration gate itself: no level parameter means no delegate, and the warning is emitted', async () => {
+test('a Host tool that silently drops the level is not mistaken for one that accepted it', async () => {
+  // The honest caveat of "register from configuration". A stand-in whose schema
+  // omits the parameter does not *reject* the extra key — the registry drops it
+  // — so the child starts without the decided level. The result therefore
+  // carries the level the wrapper *asked for* and its provenance, rather than
+  // reporting success as if the child had received it.
+  const dropping = await createReflexHostWithTools(
+    { backend: 'mock', delegation: { enabled: true } },
+    (ctx) => {
+      ctx.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
+    },
+    { delegation: false }
+  );
+  try {
+    const result = await callTool(dropping.ctx, 'reflex_delegate', args());
+    assert.equal(result.isError, false, 'the stand-in does not reject, and neither does the registry');
+    const value = resultValue<{ reasoning_effort?: string; effortSource?: string }>(result);
+    assert.ok(
+      ['low', 'medium', 'high'].includes(String(value.reasoning_effort)),
+      'the level System One decided is reported back'
+    );
+    assert.ok(['system-one', 'inherited'].includes(String(value.effortSource)), 'with its provenance');
+  } finally {
+    await dropping.dispose();
+  }
+});
+
+test('the seam is built from configuration alone, and the Host settles the capability at call time', async () => {
   // Call the seam factory directly with a Host tool whose schema has no
-  // `reasoning_effort`. This is the gate in isolation, so a mutant that drops
-  // the refusal (or widens the check to "the tool exists") cannot pass.
+  // `reasoning_effort`. It must still build: refusing here would repeat the
+  // g-054 bug, because at this call site no scope is available to ask.
   const ctx = await createToolContextWithoutDelegation();
   const warnings: string[] = [];
   try {
@@ -343,14 +388,15 @@ test('the registration gate itself: no level parameter means no delegate, and th
       minConfidence: 0.3,
       warn: (message) => warnings.push(message)
     });
-    assert.equal(seam, undefined, 'the seam refuses to build when the level cannot be carried');
-    assert.equal(warnings.length, 1, 'and it says so instead of degrading silently');
-    assert.equal(warnings[0], DELEGATION_MODEL_SELECTION_DISABLED);
+    assert.ok(seam, 'the seam is built: registration no longer depends on a registry probe');
+    assert.equal(seam.toolName, 'subagent', 'and it names the Host tool\'s documented default');
+    assert.deepEqual(warnings, [], 'nothing is warned at build time: there is nothing observed to warn about');
   } finally {
     await ctx.fiber.dispose();
   }
 
-  // Same call, with the parameter present: the seam is built.
+  // Same call, with the parameter present: identical outcome, which is the
+  // point — the schema is not what decides.
   const capable = await createToolContext();
   try {
     const seam = createReflexDelegation({
@@ -366,11 +412,10 @@ test('the registration gate itself: no level parameter means no delegate, and th
   }
 });
 
-test('the registry and the published surface agree: registration is gated on the level parameter', async () => {
-  // Boot the *default* context (which ships a level-carrying Host tool), then
-  // model a deployment whose Host tool lost the parameter by swapping it before
-  // the plugin mounts. Registration and the published surface must both follow
-  // the same predicate; a gate that only asks "the tool exists" fails here.
+test('the registry and the published surface agree: registration follows configuration, not the tool schema', async () => {
+  // Model a deployment whose Host tool has no level parameter. Registration and
+  // the published surface must agree with the *configuration* — the one fact
+  // they can both read without a scope.
   const ctx = await createToolContextWithoutDelegation();
   try {
     ctx.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
@@ -380,15 +425,14 @@ test('the registry and the published surface agree: registration is gated on the
       tools: { enabled: { delegate: true } }
     });
     assert.equal(runtime.effectiveConfig.tools.enabled.delegate, true, 'the switch is on');
-    assert.equal(
+    assert.ok(
       ctx.tools.get('reflex_delegate'),
-      undefined,
-      'an on switch plus a Host tool with no level parameter must not register the delegate'
+      'an on switch registers the delegate whatever the tool schema says (g-054)'
     );
     assert.deepEqual(
       [...runtime.toolSurface],
-      reflexToolNames(runtime.effectiveConfig).filter((name) => name !== 'reflex_delegate'),
-      'and the published surface must not list it either'
+      reflexToolNames(runtime.effectiveConfig),
+      'and the published surface lists exactly the configured names'
     );
   } finally {
     await ctx.fiber.dispose();
@@ -429,9 +473,70 @@ test('inspectDelegationTool distinguishes no tool, a level-carrying tool, and a 
   const none = await createReflexHostWithTools({ backend: 'mock', delegation: { enabled: true } }, () => {}, { delegation: false });
   try {
     assert.equal(inspectDelegationTool(none.ctx), undefined, 'no Host delegation tool means nothing to wrap');
-    assert.equal(none.ctx.tools.get('reflex_delegate'), undefined);
   } finally {
     await none.dispose();
+  }
+});
+
+test('inspectDelegationTool reads the caller\'s scope: invisible globally, visible in the agent', async () => {
+  // The regression this test exists for (g-054). `dsh-tools` is a scoped
+  // registry and a real deployment attaches `tool-subagent` to the **agent
+  // preset**. The plugin used to inspect the global view at mount, where no
+  // scope exists — so a perfectly configured Host read as "no delegation tool"
+  // and `reflex_delegate` was never registered, while the panel claimed the
+  // switch was on.
+  //
+  // This is not a stand-in for the scoping rule: it registers the tool through a
+  // real `createScope` context, so the two views are the registry's own.
+  const host = await createScopedDelegationHost();
+  try {
+    // Two views of one registry, and they disagree — which is the whole point.
+    assert.equal(host.ctx.tools.get('subagent'), undefined, 'the global view cannot see a preset-hosted tool');
+    assert.ok(host.ctx.tools.get('subagent', host.scope), 'the agent scope can');
+
+    assert.equal(inspectDelegationTool(host.ctx), undefined, 'read globally: nothing to wrap (the old, broken answer)');
+    assert.deepEqual(
+      inspectDelegationTool(host.ctx, host.scope),
+      { toolName: 'subagent', acceptsReasoningEffort: true },
+      'read in the agent scope: a usable delegate target'
+    );
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a preset-hosted Host still registers reflex_delegate (the g-054 regression)', async () => {
+  // End to end on the shape that was broken: the delegation tool is reachable
+  // only through an agent scope, and the global view is empty. Registration used
+  // to follow that global view; it now follows configuration.
+  const host = await createScopedDelegationHost();
+  try {
+    assert.equal(host.ctx.tools.get('subagent'), undefined, 'pre-condition: the global view is empty');
+    const runtime = applyReflex(host.ctx, { backend: 'mock', delegation: { enabled: true } });
+    try {
+      assert.ok(
+        host.ctx.tools.get('reflex_delegate'),
+        'the delegate is registered although the global view shows no subagent tool'
+      );
+      assert.ok([...runtime.toolSurface].includes('reflex_delegate'), 'and it is on the published surface');
+    } finally {
+      runtime.dispose();
+    }
+  } finally {
+    await host.dispose();
+  }
+
+  // The consent gate is untouched by the fix: switch off, nothing registered.
+  const unconsented = await createScopedDelegationHost();
+  try {
+    const runtime = applyReflex(unconsented.ctx, { backend: 'mock', delegation: { enabled: false } });
+    try {
+      assert.equal(unconsented.ctx.tools.get('reflex_delegate'), undefined, 'consent off still withholds the delegate');
+    } finally {
+      runtime.dispose();
+    }
+  } finally {
+    await unconsented.dispose();
   }
 });
 
@@ -487,6 +592,10 @@ test('the System One question carries the description and the prompt body', () =
 });
 
 test('the modelSelection-disabled warning names the exact remedy', () => {
-  assert.match(DELEGATION_MODEL_SELECTION_DISABLED, /reflex_delegate is not registered because the subagent tool has modelSelection disabled/);
-  assert.match(DELEGATION_MODEL_SELECTION_DISABLED, /enable it to let System 1 choose the child's reasoning level/);
+  assert.match(DELEGATION_MODEL_SELECTION_DISABLED, /the subagent tool does not declare reasoning_effort \(modelSelection is off\)/);
+  assert.match(DELEGATION_MODEL_SELECTION_DISABLED, /enable modelSelection to let System 1 choose the child's reasoning level/);
+  // It must not claim the wrapper is absent: since g-054 the wrapper registers
+  // from configuration, so a message saying "is not registered" would be a lie
+  // in exactly the case it is trying to explain.
+  assert.doesNotMatch(DELEGATION_MODEL_SELECTION_DISABLED, /is not registered/);
 });

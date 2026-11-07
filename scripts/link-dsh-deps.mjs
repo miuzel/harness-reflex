@@ -41,6 +41,9 @@ const HOST_MODULES = [
   '@deepseek-ai/dsh-commands',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-llm',
+  // Tests build real agent scopes with `createScope`, because `dsh-tools` is a
+  // scoped registry and a preset-hosted tool is only visible through one.
+  '@deepseek-ai/dsh-scope',
   '@deepseek-ai/dsh-session',
   // dsh-tools ≥ 0.2.2 ships no executor of its own: the Host mounts the native
   // one, and the test harness mounts it too so `tools.execute()` can dispatch.
