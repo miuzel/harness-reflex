@@ -10,7 +10,18 @@ import { resolveConfig, type ReflexConfig } from './config.js';
 import { createReflexHost, createToolContext, callTool, resultValue, type ReflexTestHost } from './testing.js';
 import { reflexToolNames } from './tools.js';
 
-const TOOL_NAMES = reflexToolNames(resolveConfig({ backend: 'mock' }));
+/**
+ * The surface a fully consented deployment exposes, in vocabulary order.
+ *
+ * The delegation capability is a separate opt-in, so it is stated here even
+ * though most cases in this file are about unloading: the cases that mount with
+ * `backend: 'mock'` alone would otherwise disagree with this list about the
+ * delegate. Cases that do not consent use `DEFAULT_TOOL_NAMES` instead.
+ */
+const CONSENTED = { backend: 'mock' as const, delegation: { enabled: true } };
+const TOOL_NAMES = reflexToolNames(resolveConfig(CONSENTED));
+/** What a default (unconsented) deployment registers. */
+const DEFAULT_TOOL_NAMES = reflexToolNames(resolveConfig({ backend: 'mock' }));
 
 /** A harmless tool used to make the process-wide registry emit `tools/change`. */
 function probeTool(name: string) {
@@ -94,7 +105,7 @@ test('disposing the context unregisters every tool and disposes the runtime', as
 test('unloading the plugin fiber releases tools, the observer, and the runtime', async () => {
   const ctx = await createToolContext();
   try {
-    const { fiber, runtime } = await loadReflexFiber(ctx, { backend: 'mock' });
+    const { fiber, runtime } = await loadReflexFiber(ctx, CONSENTED);
     const publishes = countSurfacePublishes(runtime);
 
     for (const name of TOOL_NAMES) assert.ok(ctx.tools.get(name), `${name} should be registered`);
@@ -152,12 +163,12 @@ test('a second activation after a full unload rebuilds a working surface', async
 test('two activations on one context own disjoint surfaces and release in any order', async () => {
   const ctx = await createToolContext();
   try {
-    const alpha = await loadReflexFiber(ctx, { backend: 'mock', toolPrefix: 'alpha_' });
-    const beta = await loadReflexFiber(ctx, { backend: 'mock', toolPrefix: 'beta_' });
+    const alpha = await loadReflexFiber(ctx, { ...CONSENTED, toolPrefix: 'alpha_' });
+    const beta = await loadReflexFiber(ctx, { ...CONSENTED, toolPrefix: 'beta_' });
 
     assert.ok(ctx.tools.get('alpha_choice'));
     assert.ok(ctx.tools.get('beta_choice'));
-    assert.deepEqual([...alpha.runtime.toolSurface], reflexToolNames(resolveConfig({ backend: 'mock', toolPrefix: 'alpha_' })));
+    assert.deepEqual([...alpha.runtime.toolSurface], reflexToolNames(resolveConfig({ ...CONSENTED, toolPrefix: 'alpha_' })));
 
     // The command name is context-global while tools are per activation: the
     // first activation owns it, the second leaves the registry alone, and the

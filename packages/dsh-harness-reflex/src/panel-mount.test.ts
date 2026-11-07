@@ -249,11 +249,21 @@ test('the mount registers the route family on the Web server only when it exists
 
   context.activate();
   assert.deepEqual(context.effects, ['reflex panel routes']);
-  assert.deepEqual(context.routes.map((route) => route.path), [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger]);
+  assert.deepEqual(context.routes.map((route) => route.path), [
+    PANEL_ROUTES.snapshot,
+    PANEL_ROUTES.health,
+    PANEL_ROUTES.clearLedger,
+    PANEL_ROUTES.delegation
+  ]);
   assert.deepEqual([...new Set(context.routes.map((route) => route.kind))], ['exact']);
 
   context.deactivate();
-  assert.deepEqual(context.disposed, [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger]);
+  assert.deepEqual(context.disposed, [
+    PANEL_ROUTES.snapshot,
+    PANEL_ROUTES.health,
+    PANEL_ROUTES.clearLedger,
+    PANEL_ROUTES.delegation
+  ]);
   dispose();
 });
 
@@ -299,7 +309,11 @@ test('one activation owns the panel and a second is reported and ignored', () =>
   assert.equal(context.injections.length, 1, 'the second activation opened a second panel');
   assert.deepEqual(context.warnings, ['the reflex settings panel is already mounted on this context; the first activation owns it']);
   context.activate();
-  assert.deepEqual(context.routes.map((route) => route.path), [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger], 'the second activation registered routes');
+  assert.deepEqual(
+    context.routes.map((route) => route.path),
+    [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger, PANEL_ROUTES.delegation],
+    'the second activation registered routes'
+  );
 
   // Ownership is released with the first activation, so a later one may mount.
   first();

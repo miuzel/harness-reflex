@@ -461,10 +461,15 @@ DSH 插件侧只注册 **6 个可开关的能力（默认 5 个）**——另外
 | 提示注入筛查 | `reflex_screen` | 工具 `reflex_screen` | `content`, 可选 `source`, `strict` | 建议暴露 |
 | 声明-证据门禁 | `reflex_gate` | 工具 `reflex_gate` | `assertions[{statement}]`, `evidence`, 可选 `strictness` | 建议暴露 |
 | 候选排序 | `reflex_route` | 工具 `reflex_route`（**默认不注册**） | `goal`, `candidates[]`, 可选 `topK` | 按需开启 |
-| 委派子代理 | `reflex_delegate` | 工具 `reflex_delegate`（**仅在宿主委派工具开放思考档位时注册**） | `prompt`, `description`, 可选 `provider`, `model`, `cwd` | 建议暴露 |
+| 委派子代理 | `reflex_delegate` | 工具 `reflex_delegate`（**需先在设置面板勾选「子代理委派」，且宿主委派工具随后开放思考档位时才注册**） | `prompt`, `description`, 可选 `provider`, `model`, `cwd` | 建议暴露 |
 | 长输出剪枝 | `reflex_prune` | 无工具：结果剪枝由 `tools/pre-execute` 等钩子按干预模式自动执行 | `rawOutput`, 可选 `intent`, `shadowMode` | — |
 | 停滞检测 | `reflex_detect_stagnation` | 无工具：停滞检测是自动干预的一部分 | 可选 `recentAction`, `goal`, `history[]` | — |
 | 账本审计 | `reflex_status_ledger` | 无工具：改用 `/reflex-ledger` 命令（无参数） | 可选 `includeEntries`（返回 `summary`，可附 `recentEntries`） | 人读 |
+
+勾选 **子代理委派** 是一次带副作用的明确同意：插件会把 `tool-subagent: { modelSelection: true }` **合并**进你的
+profile patch（`~/.dsh/profiles/<profile>/cordis.patch.yml`），其余内容逐字节保留，写入前先备份。宿主在启动时
+读取该开关，因此面板明说 **「已保存，重启 DSH 后生效」**，不假装即时生效。运行期该能力消失时，插件只告警、
+摘掉 `reflex_delegate` 并在面板显示原因——**绝不自动把你的配置改回去**。
 
 差异点：
 

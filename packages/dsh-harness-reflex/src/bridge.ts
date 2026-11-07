@@ -36,6 +36,7 @@ import type {
 import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { DelegatedEffortInheritance } from './effort-delegation.js';
+import type { DelegationHealth } from './delegation-health.js';
 import type { InterventionEngine } from './interventions.js';
 import { VirtualModelRouter } from './router.js';
 
@@ -182,6 +183,8 @@ export class ReflexRuntime {
 
   #disposed = false;
   #surface: readonly string[] = [];
+  /** Reads the live delegation capability; set by the plugin lifecycle. */
+  #delegationHealth?: () => DelegationHealth;
   #interventions?: InterventionEngine;
   /**
    * The config the Host resolved for this activation, kept as it was passed in.
@@ -219,12 +222,23 @@ export class ReflexRuntime {
    */
   #toolsConfig: ResolvedToolsConfig;
   #toolPrefix: string;
+  /**
+   * The delegation consent currently in force.
+   *
+   * A config-only save commits this without remounting the activation, and both
+   * the registry and the panel must follow it: reading the startup snapshot here
+   * would keep registering (or withholding) `reflex_delegate` after the user
+   * ticked the switch.
+   */
+  #delegationConfig: ResolvedReflexConfig['delegation'];
   /** Applies a freshly resolved intervention policy to the installed listeners. */
   #reconfigureInterventions?: (config: ResolvedInterventionsConfig, pruneThreshold: number) => void;
   /** Reads how many intervention listeners are currently attached. */
   #interventionListenerCount?: () => number;
   /** Reconciles the registered tool set with a freshly resolved config. */
   #reconfigureTools?: (config: ResolvedReflexConfig) => void;
+  /** Re-reads the Host delegation capability and reconciles the surface. */
+  #refreshDelegation?: () => void;
   /** Reads how many tools this activation currently has registered. */
   #toolRegistrationCount?: () => number;
   /** Reads how many `tools.register` calls this activation has made in total. */
@@ -295,6 +309,7 @@ export class ReflexRuntime {
     this.#pruneThreshold = config.pruneThreshold;
     this.#toolsConfig = config.tools;
     this.#toolPrefix = config.toolPrefix;
+    this.#delegationConfig = config.delegation;
     const initialMark = dependencies.configSource === undefined ? [] : volatileSnapshots(dependencies.configSource);
     this.#mark = initialMark;
     this.#watchable = initialMark.length > 0;
@@ -621,6 +636,31 @@ export class ReflexRuntime {
   }
 
   /**
+   * Attach the live delegation-capability read of this activation.
+   *
+   * Set by the plugin lifecycle right after the tool surface, so the panel can
+   * explain *why* `reflex_delegate` is absent instead of silently omitting it.
+   * The runtime does not own the registry: it only reports what the Host says.
+   * @param read - returns the current reading.
+   * @param refresh - re-checks the registry and reconciles the tool surface.
+   */
+  attachDelegationHealth(read?: () => DelegationHealth, refresh?: () => void): void {
+    this.#delegationHealth = read;
+    this.#refreshDelegation = refresh;
+  }
+
+  /** Re-check the Host delegation capability, withdrawing the tool if it broke. */
+  checkDelegationHealth(): DelegationHealth | undefined {
+    this.#refreshDelegation?.();
+    return this.#delegationHealth?.();
+  }
+
+  /** The current delegation-capability reading, when the lifecycle attached one. */
+  get delegationHealth(): DelegationHealth | undefined {
+    return this.#delegationHealth?.();
+  }
+
+  /**
    * Attach the delegated-agent effort inheritance of this activation.
    * @param inheritance - the installed listener, or undefined to detach.
    */
@@ -697,6 +737,10 @@ export class ReflexRuntime {
         ...(fallback === undefined ? {} : { fallback })
       },
       effort: { ...this.effort.policy },
+      // The delegation consent is a deployment switch, written by the panel and
+      // re-resolved on every commit; a cached activation value would keep showing
+      // "off" after the user ticked it.
+      delegation: this.#delegationConfig,
       interventions: this.#interventionsConfig,
       pruneThreshold: this.#pruneThreshold
     };
@@ -800,6 +844,7 @@ export class ReflexRuntime {
       // values rather than from the activation-time snapshot.
       this.#toolsConfig = resolved.tools;
       this.#toolPrefix = resolved.toolPrefix;
+      this.#delegationConfig = resolved.delegation;
       this.#reconfigureInterventions?.(resolved.interventions, resolved.pruneThreshold);
       this.#reconfigureTools?.(resolved);
       // Routing lifecycle last: enabling/disabling the route and renaming the

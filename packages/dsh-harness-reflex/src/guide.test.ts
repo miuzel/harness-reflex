@@ -297,6 +297,29 @@ test('the guide renders as elements, never as injected markup', () => {
   assert.equal(inline[2]?.props.href, 'https://example.test/g');
 });
 
+test('a pipe row with no header above it is text, and the parser still terminates', () => {
+  // Regression: a paragraph written into the middle of a table strands every
+  // pipe row after it. Those rows have no delimiter row beneath them, so none of
+  // the block branches claimed them, while `startsBlock` still reported them as
+  // block starts — which left the paragraph fallback unable to absorb them and
+  // the block loop unable to advance. The whole suite then hung with no output.
+  // The assertion that matters is that this call returns at all.
+  const { parseMarkdown } = loadRenderer();
+  const stranded = '| a | b |\n| --- | --- |\n| 1 | 2 |\n\nA paragraph interrupts the table.\n\n| 3 | 4 |\n';
+
+  const blocks = parseMarkdown(stranded);
+  assert.equal(blocks[0]?.kind, 'table', 'the intact table before the interruption still parses');
+  // The blocks come out of a vm sandbox, so their arrays carry the sandbox's
+  // `Array.prototype`; `deepStrictEqual` would reject them as different objects
+  // even when the contents match. Compare through a plain JSON round trip.
+  assert.equal(JSON.stringify(blocks[0]?.rows), JSON.stringify([['1', '2']]), 'the intact table keeps its one body row');
+  const texts = blocks.filter((block) => block.kind === 'paragraph').map((block) => block.text ?? '');
+  assert.ok(texts.includes('| 3 | 4 |'), 'the stranded row is kept as text rather than dropped or hung on');
+
+  // A document that opens with a pipe row is the same shape from the first line.
+  assert.doesNotThrow(() => parseMarkdown('| orphan | row |\n'));
+});
+
 //#endregion
 
 

@@ -1,12 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 
-import { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig, type ResolvedReflexConfig } from './config.js';
+import { Config, resolveConfig, resolveDelegationConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, type ReflexConfig, type ResolvedReflexConfig } from './config.js';
 import { createReflexRuntime, type ReflexRuntime } from './bridge.js';
 import { installModelRouting } from './routing.js';
-import { defineReflexTools, enabledReflexToolSuffixes, reflexToolNames, resolveReflexToolExecutables } from './tools.js';
+import { defineReflexTools, delegationExecutables, enabledReflexToolSuffixes, reflexToolNames, resolveReflexToolExecutables } from './tools.js';
 import type { ReflexDelegationSeam, ReflexToolSuffix } from './tools.js';
 import { createReflexDelegation, inspectDelegationTool } from './delegation-dispatch.js';
+import { readDelegationHealth, watchDelegationHealth } from './delegation-health.js';
 import { installLedgerCommand } from './command.js';
 import { mountReflexPanel } from './panel-mount.js';
 import { installInterventions } from './interventions.js';
@@ -55,8 +56,8 @@ export const name = 'dsh-reflex';
  */
 export const inject = ['tools', 'llm', 'commands'];
 
-export { Config, resolveConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
-export type { ReflexToolsConfig, ResolvedToolsConfig } from './config.js';
+export { Config, resolveConfig, resolveDelegationConfig, resolveEffortSetting, resolveApiKey, resolveSystemOneConfig, resolveToolsConfig, routingActive, volatileSnapshots, createReflexRuntime, defineReflexTools, enabledReflexToolSuffixes, reflexToolNames };
+export type { ReflexDelegationConfig, ReflexToolsConfig, ResolvedDelegationConfig, ResolvedToolsConfig } from './config.js';
 export {
   INTERVENTION_CAPABILITIES,
   INTERVENTION_MODES,
@@ -124,6 +125,26 @@ export { mountReflexPanel } from './panel-mount.js';
 export { createPanelSource, panelFacts, panelPools } from './panel-mount.js';
 export { ReflexRuntime } from './bridge.js';
 export { REFLEX_TOOL_SUFFIXES } from './tools.js';
+export { delegateServable, delegationExecutables } from './tools.js';
+export {
+  DELEGATION_BROKEN_WARNING,
+  DELEGATION_MODEL_SELECTION_OFF_REASON,
+  DELEGATION_TOOL_MISSING_REASON,
+  readDelegationHealth,
+  watchDelegationHealth
+} from './delegation-health.js';
+export type { DelegationHealth, DelegationHealthState, DelegationHealthWatch, DelegationHealthWatchOptions } from './delegation-health.js';
+export {
+  DELEGATION_ROW_ID,
+  MODEL_SELECTION_FIELD,
+  OWNERSHIP_MARKER,
+  PROFILE_PATCH_FILENAME,
+  enableHostModelSelection,
+  inspectHostModelSelection,
+  planModelSelectionEdit,
+  resolveProfilePatchPath
+} from './host-patch.js';
+export type { HostPatchOutcome, HostPatchResult, PatchEditResult, PatchPathResolution } from './host-patch.js';
 export { installModelRouting } from './routing.js';
 export {
   ADAPTIVE_EFFORT_LEVELS,
@@ -289,10 +310,10 @@ function installReflexToolSurface(ctx: Context, runtime: ReflexRuntime): ToolSur
   const executableSuffixes = (config: ResolvedReflexConfig): ReflexToolSuffix[] => {
     const target = inspectDelegationTool(ctx);
     const delegateTarget = target !== undefined && target.acceptsReasoningEffort ? target.toolName : undefined;
-    return resolveReflexToolExecutables(
-      enabledReflexToolSuffixes(config),
-      delegateTarget === undefined ? {} : { delegateTarget }
-    );
+    // "The user asked for it" and "this Host can serve it" are combined once, by
+    // the module that owns the predicate, so the registry and the published
+    // surface cannot drift apart.
+    return resolveReflexToolExecutables(enabledReflexToolSuffixes(config), delegationExecutables(config, delegateTarget));
   };
 
   const publish = (): void => {
@@ -404,6 +425,27 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     );
     tools.refresh(resolved);
 
+    // The Host capability the delegate needs is read from the live registry, so
+    // it can disappear under a running activation (a reload of `tool-subagent`,
+    // a patch edit, a Host that replaces the tool). This watch owns the one
+    // reaction the design allows: warn once, and let the reconciler withdraw the
+    // tool. It never writes a configuration file — a switch that went off might
+    // be a person's own decision, and turning it back on is theirs to make.
+    const delegationHealth = watchDelegationHealth({
+      read: () => readDelegationHealth(ctx),
+      warn: (message) => ctx.logger?.('dsh-reflex')?.warn(message),
+      onChange: () => {
+        if (runtime.disposed) return;
+        tools.refresh(runtime.effectiveConfig);
+      }
+    });
+    runtime.attachDelegationHealth(
+      () => delegationHealth.health,
+      () => {
+        tools.refresh(runtime.effectiveConfig);
+      }
+    );
+
     // A config-only settings save does not remount this plugin: the loader
     // commits the new values into the volatile references and dispatches this
     // event to the owning fiber. Re-resolving here makes the edited routing,
@@ -418,6 +460,10 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
     // every change instead of assumed static.
     const stopObserving = ctx.on('tools/change', () => {
       if (runtime.disposed) return;
+      // Re-read the delegation capability first: a registry change is exactly
+      // when `reasoning_effort` can appear or disappear, and the panel must show
+      // the reason with the surface it explains.
+      delegationHealth.check();
       tools.publish();
     });
 

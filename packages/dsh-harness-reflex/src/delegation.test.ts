@@ -79,6 +79,9 @@ async function hostWithDelegation(
   const host = await createReflexHostWithTools(
     {
       backend: 'mock',
+      // The capability is a deployment opt-in (off by default), so a test that
+      // exercises the tool states the consent the panel's checkbox would record.
+      delegation: { enabled: true },
       ...(options.toolPrefix === undefined ? {} : { toolPrefix: options.toolPrefix })
     },
     (ctx) => {
@@ -273,7 +276,7 @@ test('a Host whose delegation tool cannot carry a level gets no delegate at all'
   // *before* the plugin mounts. The context is not relaxed in any way, so a
   // broken gate here really does register a delegate.
   const bare = await createReflexHostWithTools(
-    { backend: 'mock' },
+    { backend: 'mock', delegation: { enabled: true } },
     (ctx) => {
       const existing = ctx.tools.get('subagent');
       assert.ok(existing, 'the pre-condition: the Host delegation tool is present');
@@ -286,7 +289,7 @@ test('a Host whose delegation tool cannot carry a level gets no delegate at all'
   );
   await bare.dispose();
 
-  const withDefault = await createReflexHost({ backend: 'mock' });
+  const withDefault = await createReflexHost({ backend: 'mock', delegation: { enabled: true } });
   try {
     assert.ok(
       withDefault.ctx.tools.get('reflex_delegate'),
@@ -298,7 +301,7 @@ test('a Host whose delegation tool cannot carry a level gets no delegate at all'
 
   // The Host tool without the parameter = model selection disabled.
   const disabled = await createReflexHostWithTools(
-    { backend: 'mock' },
+    { backend: 'mock', delegation: { enabled: true } },
     (ctx) => {
       ctx.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
     },
@@ -373,6 +376,7 @@ test('the registry and the published surface agree: registration is gated on the
     ctx.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
     const runtime = applyReflex(ctx, {
       backend: 'mock',
+      delegation: { enabled: true },
       tools: { enabled: { delegate: true } }
     });
     assert.equal(runtime.effectiveConfig.tools.enabled.delegate, true, 'the switch is on');
@@ -394,7 +398,7 @@ test('the registry and the published surface agree: registration is gated on the
 test('inspectDelegationTool distinguishes no tool, a level-carrying tool, and a bare one', async () => {
   // The bare tool (modelSelection off) is seeded before the plugin mounts.
   const bare = await createReflexHostWithTools(
-    { backend: 'mock' },
+    { backend: 'mock', delegation: { enabled: true } },
     (ctx) => {
       ctx.tools.register(delegationStandIn({ reasoningEffort: false }).definition);
     },
@@ -422,7 +426,7 @@ test('inspectDelegationTool distinguishes no tool, a level-carrying tool, and a 
     await capable.host.dispose();
   }
 
-  const none = await createReflexHostWithTools({ backend: 'mock' }, () => {}, { delegation: false });
+  const none = await createReflexHostWithTools({ backend: 'mock', delegation: { enabled: true } }, () => {}, { delegation: false });
   try {
     assert.equal(inspectDelegationTool(none.ctx), undefined, 'no Host delegation tool means nothing to wrap');
     assert.equal(none.ctx.tools.get('reflex_delegate'), undefined);
@@ -462,7 +466,7 @@ test('the delegation switch closes the tool like any other', async () => {
   const { host } = await hostWithDelegation({ toolPrefix: 'reflex_' });
   await host.dispose();
 
-  const closed = await createReflexHost({ backend: 'mock', tools: { enabled: { delegate: false } } });
+  const closed = await createReflexHost({ backend: 'mock', delegation: { enabled: true }, tools: { enabled: { delegate: false } } });
   try {
     assert.equal(
       reflexToolNames(resolveConfig({ backend: 'mock', tools: { enabled: { delegate: false } } })).includes('reflex_delegate'),

@@ -144,7 +144,16 @@ dsh plugin --profile web add ./packages/dsh-harness-reflex
 | `reflex_screen` | `content`, `source?`, `strict?` | 提示注入/指令劫持筛查，命中时附数据围栏 |
 | `reflex_gate` | `assertions[{statement,criteria?}]`, `evidence`, `strictness?` | 声明-证据核对门禁（Fail-Closed） |
 | `reflex_route`（默认关闭） | `goal`, `candidates[{name,description}]`, `topK?` | 候选工具/技能概率排序（只排序不卡阈值） |
-| `reflex_delegate` | `prompt`, `description`, `provider?`, `model?`, `cwd?` | 委派子代理，由 System One 判定思考档位；无档位参数，**仅在宿主 `modelSelection` 开启时注册** |
+| `reflex_delegate`（需先授权，默认关闭） | `prompt`, `description`, `provider?`, `model?`, `cwd?` | 委派子代理，由 System One 判定思考档位；无档位参数，**仅在设置面板勾选「子代理委派」且宿主 `modelSelection` 开启时注册** |
+
+### `reflex_delegate` 为什么要单独授权
+
+宿主的 `tool-subagent` 只有在配置 `modelSelection: true` 时才会发布 `reasoning_effort` 参数，没有这个参数，System One 判定的档位就传不进子代理。因此：
+
+1. 设置面板「工具开关」页有 **子代理委派** 开关，默认关闭；勾选＝明确同意开启宿主的 `modelSelection`。
+2. 勾选后插件把 `tool-subagent` 的 `modelSelection: true` **合并**进 profile patch（`~/.dsh/profiles/<profile>/cordis.patch.yml`）：只动这一处，注释、顺序、`!!js` 表达式与其它条目**逐字节保留**，写入前先备份 `.bak-dsh-reflex-*`。遇到同名多条、`disabled: true`、或无法确切读取的写法时**拒绝写入并说明原因**，不猜。
+3. 宿主的 `tool-subagent` 配置是启动时读的，所以面板明确提示 **「已保存，重启 DSH 后生效」**，不假装即时生效。
+4. 运行期若检测到 `reasoning_effort` 消失（宿主能力又关了），插件**输出 warning、自动摘掉 `reflex_delegate`、在面板显示原因**，但**绝不改写你的配置文件**——那可能是你自己刚关掉的。重新勾选才是新的同意与新的写入。
 
 另外三项能力**不在工具清单里**：
 

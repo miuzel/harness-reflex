@@ -532,7 +532,7 @@ test('a HEAD answer carries headers and no body', () => {
   assert.deepEqual(JSON.parse(get.body), buildPanelSnapshot(facts()));
 });
 
-test('the route family owns exactly its three exact paths', () => {
+test('the route family owns exactly its four exact paths', () => {
   const { source: panelSource } = source();
   const routes = makePanelRoutes(panelSource);
   assert.deepEqual(
@@ -540,10 +540,19 @@ test('the route family owns exactly its three exact paths', () => {
     [
       ['exact', PANEL_ROUTES.snapshot],
       ['exact', PANEL_ROUTES.health],
-      ['exact', PANEL_ROUTES.clearLedger]
+      ['exact', PANEL_ROUTES.clearLedger],
+      // The one route of the family that writes a file outside this plugin's
+      // settings section; it is listed here so adding a write route can never be
+      // done without updating this inventory.
+      ['exact', PANEL_ROUTES.delegation]
     ]
   );
-  assert.deepEqual([...PANEL_PATHS], [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger]);
+  assert.deepEqual([...PANEL_PATHS], [
+    PANEL_ROUTES.snapshot,
+    PANEL_ROUTES.health,
+    PANEL_ROUTES.clearLedger,
+    PANEL_ROUTES.delegation
+  ]);
   // Every path is under the one namespace, and every path is addressable.
   for (const path of PANEL_PATHS) assert.ok(path.startsWith('/dsh-reflex/api/'), path);
   assert.equal(new Set(PANEL_PATHS).size, PANEL_PATHS.length);

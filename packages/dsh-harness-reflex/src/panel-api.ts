@@ -31,6 +31,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import type { ResolvedReflexConfig } from './config.js';
 import { INTERVENTION_CAPABILITIES } from './config.js';
 import type { ReflexEffortStatus } from './effort.js';
+import type { DelegationHealthState } from './delegation-health.js';
 
 /** Version reported by the panel; kept in step with `package.json` by a test. */
 export const REFLEX_PLUGIN_VERSION = '0.3.0';
@@ -42,7 +43,14 @@ export const PANEL_BASE = '/dsh-reflex/api';
 export const PANEL_ROUTES = {
   snapshot: `${PANEL_BASE}/panel`,
   health: `${PANEL_BASE}/health`,
-  clearLedger: `${PANEL_BASE}/ledger/clear`
+  clearLedger: `${PANEL_BASE}/ledger/clear`,
+  /**
+   * Writes the host `modelSelection` switch into the profile patch.
+   *
+   * A route of its own, and a `POST`, because it is the only request in this
+   * family that changes a file outside this plugin's own settings section.
+   */
+  delegation: `${PANEL_BASE}/delegation`
 } as const;
 
 /** How many recent ledger entries one snapshot carries. Default 25, cap 200. */
@@ -109,6 +117,38 @@ export interface PanelInterventionsView {
   acting: boolean;
   /** Capability → effective mode, with `inherit` already resolved. */
   capabilities: Record<string, string>;
+}
+
+/**
+ * Delegation block of the snapshot.
+ *
+ * Deliberately not folded into {@link PanelToolsView}: those switches decide
+ * which tools *this plugin* registers, while this one decides whether the *Host*
+ * is asked for a capability (`modelSelection`). The panel shows them apart so the
+ * one switch that edits a file outside this plugin cannot look like the others.
+ */
+export interface PanelDelegationView {
+  /** The authored consent (`delegation.enabled`); off by default. */
+  enabled: boolean;
+  /** Whether `reflex_delegate` is registered in the live registry right now. */
+  registered: boolean;
+  /** What the live Host registry says, or `unknown` when no fact was supplied. */
+  state: DelegationHealthState | 'unknown';
+  /** The host profile patch this switch edits, when one could be resolved. */
+  patchPath?: string;
+  /** Which fact resolved {@link patchPath}. */
+  patchPathSource?: string;
+  /** Whether the host patch currently asks for the field (read from the file). */
+  patchEnabled: boolean;
+  /** Why the capability is not usable, or why the patch could not be read. */
+  reason?: string;
+  /**
+   * Whether a write has happened that only a restart can apply.
+   *
+   * Computed from facts, never guessed: the switch is on, the file asks for the
+   * field, and the host tool still does not declare `reasoning_effort`.
+   */
+  restartRequired: boolean;
 }
 
 /** Per-tool switch block of the snapshot. */
@@ -252,6 +292,7 @@ export interface PanelSnapshot {
   systemOne: PanelSystemOneView;
   interventions: PanelInterventionsView;
   tools: PanelToolsView;
+  delegation: PanelDelegationView;
   ledger: PanelLedgerView;
   modelCatalog?: PanelModelGroup[];
 }
@@ -299,6 +340,20 @@ export interface PanelRuntimeFacts {
   systemOneHealth?: PanelSystemOneHealth;
   /** Available physical model catalog from ctx.llm. */
   modelCatalog?: PanelModelGroup[];
+  /**
+   * The live delegation-capability reading.
+   *
+   * `undefined` when the caller could not read the registry at all, which the
+   * projection reports as `unknown` rather than inventing a state.
+   */
+  delegationHealth?: { state: DelegationHealthState; reason?: string };
+  /**
+   * The host profile patch, as read from disk by the caller.
+   *
+   * Supplied rather than read here so the projection stays pure: the mount layer
+   * owns the file access, and a test drives it with a scratch path.
+   */
+  hostPatch?: { path?: string; source?: string; enabled: boolean; reason?: string };
   /** Timestamp of the snapshot; defaults to now. */
   now?: number;
 }
@@ -438,6 +493,7 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       enabled: { ...config.tools.enabled },
       active: [...facts.toolSurface]
     },
+    delegation: projectDelegation(config, facts),
     systemOne: {
       backend: config.systemOne.backend,
       active: facts.backendName,
@@ -457,6 +513,40 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       clearable: true
     },
     ...(facts.modelCatalog === undefined ? {} : { modelCatalog: facts.modelCatalog })
+  };
+}
+
+/**
+ * Project the delegation switch, the host patch it edits, and the live capability.
+ *
+ * The two "not working" reasons are kept apart on purpose, because the fix
+ * differs: `model-selection-off` is a host tool that does not publish the level
+ * (tick the switch, restart), while `missing-tool` is a host without a
+ * delegation tool at all (nothing this plugin can do). `restartRequired` is the
+ * one fact that explains "I ticked it and nothing happened": the file now asks,
+ * but the running host still reports the old tool schema.
+ * @param config - the configuration in force.
+ * @param facts - gathered runtime facts.
+ * @returns the wire projection of the delegation block.
+ */
+export function projectDelegation(config: ResolvedReflexConfig, facts: PanelRuntimeFacts): PanelDelegationView {
+  const state = facts.delegationHealth?.state ?? 'unknown';
+  const enabled = config.delegation.enabled;
+  const registered = [...facts.toolSurface].some((name) => name.endsWith('delegate'));
+  const patchEnabled = facts.hostPatch?.enabled ?? false;
+  // The runtime's own reading wins over the file's: a stale file that asks for
+  // the field while the tool still refuses is precisely the restart case.
+  const broken = state === 'model-selection-off' || state === 'missing-tool';
+  const reason = enabled && broken ? facts.delegationHealth?.reason : facts.hostPatch?.reason;
+  return {
+    enabled,
+    registered,
+    state,
+    patchEnabled,
+    restartRequired: enabled && patchEnabled && state === 'model-selection-off',
+    ...(facts.hostPatch?.path === undefined ? {} : { patchPath: facts.hostPatch.path }),
+    ...(facts.hostPatch?.source === undefined ? {} : { patchPathSource: facts.hostPatch.source }),
+    ...(reason === undefined ? {} : { reason })
   };
 }
 
@@ -574,6 +664,35 @@ export interface PanelSource {
   clearLedger(): number;
   /** Whether the loopback/pairing fence admitted this request. */
   allows(request: IncomingMessage): boolean;
+  /**
+   * Turn the host `modelSelection` switch on in the profile patch.
+   *
+   * Omitted by a host that cannot write the file; the route then answers 501
+   * rather than pretending, which is what tells the panel to say "do it by hand".
+   * @returns the outcome the panel renders.
+   */
+  enableDelegation?: () => PanelDelegationWrite;
+}
+
+/** The answer of one delegation write. */
+export interface PanelDelegationWrite {
+  /** What happened, in the vocabulary {@link HostPatchResult} uses. */
+  outcome: string;
+  /** Absolute path edited, when one was. */
+  path?: string;
+  /** Which fact resolved that path. */
+  source?: string;
+  /** Why nothing was written, when nothing was. */
+  reason?: string;
+  /** Backup written before the edit, when one was. */
+  backupPath?: string;
+  /**
+   * Whether the change needs a DSH restart to take effect.
+   *
+   * Always `true` for an actual write: the host reads `tool-subagent`'s config
+   * at boot, and only this plugin's own fiber hot-updates.
+   */
+  restartRequired: boolean;
 }
 
 /** JSON headers every panel answer carries. */
@@ -605,6 +724,28 @@ export function answerPanelRequest(source: PanelSource, request: IncomingMessage
     case PANEL_ROUTES.health:
       if (method !== 'GET' && method !== 'HEAD') return methodNotAllowed('GET, HEAD');
       return { status: 200, body: { ok: true, name: 'dsh-reflex', version: REFLEX_PLUGIN_VERSION } };
+    case PANEL_ROUTES.delegation:
+      if (method !== 'POST') return methodNotAllowed('POST');
+      // The write edits a file the user owns, outside this plugin's settings
+      // section. Same fence as the ledger clear: an accidental or cross-site
+      // GET/POST must not be enough, so the caller has to name the intent.
+      if (readQuery(request.url, 'confirm') !== 'delegation') {
+        return {
+          status: 400,
+          body: {
+            ok: false,
+            error: 'confirmation-required',
+            detail: 'this writes tool-subagent.modelSelection into the profile patch; repeat the POST with ?confirm=delegation'
+          }
+        };
+      }
+      if (source.enableDelegation === undefined) {
+        return {
+          status: 501,
+          body: { ok: false, error: 'not-writable', detail: 'this host cannot write the profile patch; add the row by hand' }
+        };
+      }
+      return { status: 200, body: { ok: true, ...source.enableDelegation() } };
     case PANEL_ROUTES.clearLedger:
       if (method !== 'POST') return methodNotAllowed('POST');
       // Clearing deletes the owned JSONL sink as well as the in-memory entries,
@@ -671,7 +812,8 @@ export function makePanelRoutes(source: PanelSource): WebRoute[] {
   return [
     { kind: 'exact', path: PANEL_ROUTES.snapshot, handler },
     { kind: 'exact', path: PANEL_ROUTES.health, handler },
-    { kind: 'exact', path: PANEL_ROUTES.clearLedger, handler }
+    { kind: 'exact', path: PANEL_ROUTES.clearLedger, handler },
+    { kind: 'exact', path: PANEL_ROUTES.delegation, handler }
   ];
 }
 

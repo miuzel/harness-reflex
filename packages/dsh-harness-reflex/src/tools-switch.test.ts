@@ -27,6 +27,20 @@ import { applyReflex, type ReflexRuntime } from './index.js';
  * @module dsh-reflex/tools-switch.test
  */
 
+/**
+ * Deployment config for a case about tool switches.
+ *
+ * The delegation capability is a separate opt-in (default off), and these cases
+ * are about `tools.enabled`. Consenting here keeps the surface expectation equal
+ * to "every suffix except the ones this case closes", which is what the cases
+ * assert; the consent gate has its own coverage in `delegation.test.ts`.
+ * @param config - the case's own config.
+ * @returns the config with the delegation consent recorded.
+ */
+function consented(config: ReflexConfig): ReflexConfig {
+  return { ...config, delegation: { enabled: true } };
+}
+
 /** Every suffix mapped to one value. */
 function all(value: boolean): Record<string, boolean> {
   return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, value]));
@@ -154,7 +168,7 @@ test('an unknown or malformed switch is refused instead of silently ignored', ()
 test('a closed tool is unregistered while its siblings stay registered', async () => {
   // One switch in each direction: gate (on by default) closed, route (off by
   // default) opened.
-  const host = await createReflexHost({ backend: 'mock', tools: { enabled: { gate: false, route: true } } });
+  const host = await createReflexHost(consented({ backend: 'mock', tools: { enabled: { gate: false, route: true } } }));
   try {
     assert.deepEqual(
       [...host.runtime.toolSurface],
@@ -181,7 +195,7 @@ test('a closed tool is unregistered while its siblings stay registered', async (
 });
 
 test('the switch survives a toolPrefix rename because it is keyed by suffix', async () => {
-  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rx_', tools: { enabled: { score: false } } });
+  const host = await createReflexHost(consented({ backend: 'mock', toolPrefix: 'rx_', tools: { enabled: { score: false } } }));
   try {
     assert.deepEqual(
       [...host.runtime.toolSurface],
@@ -198,7 +212,7 @@ test('the switch survives a toolPrefix rename because it is keyed by suffix', as
 });
 
 test('closing every tool registers nothing and leaves an empty surface', async () => {
-  const host = await createReflexHost({ backend: 'mock', tools: { enabled: all(false) } });
+  const host = await createReflexHost(consented({ backend: 'mock', tools: { enabled: all(false) } }));
   try {
     assert.deepEqual([...host.runtime.toolSurface], []);
     for (const suffix of REFLEX_TOOL_SUFFIXES) {
@@ -216,7 +230,7 @@ test('closing every tool registers nothing and leaves an empty surface', async (
 test('the published surface keeps tracking the registry after a tools/change', async () => {
   const ctx = await createToolContext();
   try {
-    const runtime = applyReflex(ctx, { backend: 'mock', tools: { enabled: { score: false } } });
+    const runtime = applyReflex(ctx, consented({ backend: 'mock', tools: { enabled: { score: false } } }));
     const expected = REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'score' && suffix !== 'route').map(
       (suffix) => `reflex_${suffix}`
     );
@@ -235,7 +249,7 @@ test('the published surface keeps tracking the registry after a tools/change', a
 test('closing, unloading, and reopening a tool leaves no duplicate registration', async () => {
   const ctx = await createToolContext();
   try {
-    const first = await loadReflex(ctx, { backend: 'mock', tools: { enabled: { gate: false } } });
+    const first = await loadReflex(ctx, consented({ backend: 'mock', tools: { enabled: { gate: false } } }));
     assert.equal(ctx.tools.get('reflex_gate'), undefined);
     assert.deepEqual(
       [...first.runtime.toolSurface],
@@ -248,7 +262,7 @@ test('closing, unloading, and reopening a tool leaves no duplicate registration'
       assert.equal(ctx.tools.get(`reflex_${suffix}`), undefined, `${suffix} was released on unload`);
     }
 
-    const second = await loadReflex(ctx, { backend: 'mock', tools: { enabled: { route: true } } });
+    const second = await loadReflex(ctx, consented({ backend: 'mock', tools: { enabled: { route: true } } }));
     assert.deepEqual(
       [...second.runtime.toolSurface],
       REFLEX_TOOL_SUFFIXES.map((suffix) => `reflex_${suffix}`),

@@ -6,6 +6,7 @@ import {
   plainConfig,
   resolveApiKey,
   resolveConfig,
+  resolveDelegationConfig,
   resolveEffortSetting,
   resolveSystemOneConfig,
   type ReflexConfig
@@ -72,6 +73,7 @@ test('resolveConfig validates and fills every field', () => {
   assert.deepEqual(Object.keys(resolved).sort(), [
     'backend',
     'calibrationPath',
+    'delegation',
     'effort',
     'interventions',
     'ledgerPath',
@@ -103,6 +105,33 @@ test('resolveConfig validates and fills every field', () => {
   );
   assert.equal(resolved.tools.enabled.route, false, 'route is opt-in');
   assert.equal(resolved.tools.enabled.choice, true, 'the other four stay on');
+  // The delegation capability is a *host* switch, off until a person consents:
+  // turning it on is also an agreement to edit the host profile patch, so it can
+  // never be a default.
+  assert.deepEqual(resolved.delegation, { enabled: false }, 'delegation is off by default');
+  // Pin the resolver *directly*, with no schema in front: the schema also
+  // defaults to false, so a resolver that defaulted to true would be masked here
+  // and only show up in a deployment that bypasses the loader (a programmatic
+  // `applyReflex(ctx, {})`).
+  assert.deepEqual(resolveDelegationConfig(undefined), { enabled: false }, 'the programmatic seam defaults to off too');
+  assert.deepEqual(resolveDelegationConfig({}), { enabled: false });
+  assert.deepEqual(resolveDelegationConfig({ enabled: true }), { enabled: true }, 'an explicit consent is honoured');
+  // The schema refuses the type before the resolver's own check can run, so the
+  // message is schemastery's; both name the same field path, which is what the
+  // assertion holds on to.
+  assert.throws(
+    () => resolveConfig({ delegation: { enabled: 'yes' } } as unknown as ReflexConfig),
+    /delegation\.enabled/
+  );
+  assert.throws(
+    () => resolveDelegationConfig({ enabled: 'yes' } as unknown as Record<string, never>),
+    /delegation\.enabled must be a boolean/,
+    'the programmatic seam keeps its own explicit message'
+  );
+  assert.throws(
+    () => resolveConfig({ delegation: { enable: true } } as unknown as ReflexConfig),
+    /delegation has unknown key "enable"/
+  );
 });
 
 test('Config accepts only the reflex/auto marker for adaptive effort', () => {
@@ -185,15 +214,23 @@ test('apply registers every enabled tool with a model-visible description', asyn
   const host = await createReflexHost({ backend: 'mock' });
   try {
     const names = reflexToolNames(resolveConfig({ backend: 'mock' }));
-    assert.equal(names.length, 5, 'only the default-on tools are registered');
-    assert.deepEqual([...host.runtime.toolSurface], names);
+    assert.equal(names.length, 5, 'only the default-on tools are configured');
+    // The delegation capability is an opt-in (default off), so a default
+    // deployment registers four of those five: `reflex_delegate` is absent until
+    // the user consents *and* the Host publishes the level. Asserting both sides
+    // — the names the config enables and the surface that is really registered —
+    // is what proves the registry and the surface agree about the absence rather
+    // than one of them merely lagging.
+    const registered = names.filter((name) => name !== 'reflex_delegate');
+    assert.equal(host.ctx.tools.get('reflex_delegate'), undefined, 'the delegation capability is off until it is consented to');
+    assert.deepEqual([...host.runtime.toolSurface], registered);
     assert.equal(host.ctx.tools.get('reflex_route'), undefined, 'route is not registered by default');
     assert.equal(host.ctx.tools.get('reflex_prune'), undefined, 'prune is no longer a tool at all');
     assert.equal(host.ctx.tools.get('reflex_detect_stagnation'), undefined);
     assert.equal(host.ctx.tools.get('reflex_status_ledger'), undefined);
     assert.equal(host.runtime.ledger.getLogPath(), null, 'the ledger stays in memory unless a path is configured');
 
-    for (const name of names) {
+    for (const name of registered) {
       const definition = host.ctx.tools.get(name);
       assert.ok(definition, `${name} should be registered`);
       assert.ok(definition.description.length > 60, `${name} needs a usable description`);
@@ -207,7 +244,14 @@ test('apply registers every enabled tool with a model-visible description', asyn
 });
 
 test('a custom prefix renames the surface and leaves the defaults unregistered', async () => {
-  const host = await createReflexHost({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } });
+  // Every suffix, delegate included: the case is about the prefix decorating
+  // *the whole vocabulary*, so the delegation consent is stated explicitly.
+  const host = await createReflexHost({
+    backend: 'mock',
+    delegation: { enabled: true },
+    toolPrefix: 'rv_',
+    tools: { enabled: { route: true } }
+  });
   try {
     for (const suffix of REFLEX_TOOL_SUFFIXES) {
       assert.ok(host.ctx.tools.get(`rv_${suffix}`), `rv_${suffix} should be registered`);

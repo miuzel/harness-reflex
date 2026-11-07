@@ -257,6 +257,27 @@ export interface ReflexToolsConfig {
   enabled?: Partial<Record<ReflexToolSuffix, boolean>>;
 }
 
+/**
+ * Authored switch of the *host capability* the delegation tool needs.
+ *
+ * Deliberately not part of {@link ReflexToolsConfig}: `tools.enabled.<suffix>`
+ * decides whether this plugin registers a tool it can serve on its own, while
+ * this flag decides whether the Host is asked to publish the model-selection
+ * surface `reflex_delegate` needs. Ticking it is a consent to edit the host
+ * profile patch (`tool-subagent.config.modelSelection: true`) — a file this
+ * plugin otherwise never touches, and whose change only applies after a DSH
+ * restart.
+ */
+export interface ReflexDelegationConfig {
+  /**
+   * Whether the delegation capability is asked for. Default `false`: the tool
+   * does not work until the Host's `tool-subagent` publishes `reasoning_effort`,
+   * so the switch starts off rather than advertising a tool that cannot carry a
+   * level. `true` means "I want it, and I agree to the host switch it needs".
+   */
+  enabled?: boolean;
+}
+
 /** Deployment configuration for the reflex tool bundle. */
 export interface ReflexConfig {
   /**
@@ -285,6 +306,8 @@ export interface ReflexConfig {
   effort?: ReflexEffortConfig;
   /** Per-tool switches of the eight reflex tools. */
   tools?: ReflexToolsConfig;
+  /** The host capability `reflex_delegate` depends on. */
+  delegation?: ReflexDelegationConfig;
   /** Automatic interventions on the Host's tool and agent lifecycle hooks. */
   interventions?: ReflexInterventionsConfig;
 }
@@ -333,6 +356,15 @@ export interface ResolvedToolsConfig {
   enabled: Record<ReflexToolSuffix, boolean>;
 }
 
+/** Delegation switch after defaults have been applied. */
+export interface ResolvedDelegationConfig {
+  /**
+   * Whether the user has consented to the host `modelSelection` switch this
+   * activation's `reflex_delegate` needs. Default `false`.
+   */
+  enabled: boolean;
+}
+
 /** Configuration after defaults and validation have been applied. */
 export interface ResolvedReflexConfig {
   backend: 'auto' | 'mock' | 'jev' | 'vllm';
@@ -344,6 +376,7 @@ export interface ResolvedReflexConfig {
   routing: ResolvedRoutingConfig;
   effort: ResolvedEffortConfig;
   tools: ResolvedToolsConfig;
+  delegation: ResolvedDelegationConfig;
   interventions: ResolvedInterventionsConfig;
 }
 
@@ -461,6 +494,25 @@ const ToolsSchema = z
   .volatile();
 
 /**
+ * Schemastery schema for the delegation block.
+ *
+ * One boolean, defaulting to `false`. It is authored, never written by the
+ * plugin: the panel's toggle writes this field, the runtime detector refuses to
+ * write it, and the only other file this plugin edits is the host patch the
+ * consent box names explicitly.
+ */
+const DelegationSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .default(false)
+      .description(
+        'Consent to the host capability reflex_delegate needs: on = the host tool-subagent publishes reasoning_effort (modelSelection: true), which is written into the profile patch and applies after a DSH restart. Default false.'
+      )
+  })
+  .volatile();
+
+/**
  * Schemastery schema the Cordis loader validates the deployment config with.
  *
  * The explicit `Schemastery<ReflexConfig>` annotation is deliberate: the
@@ -481,6 +533,7 @@ export const Config: Schemastery<any> = z.object({
   routing: RoutingSchema.default({}),
   effort: EffortSchema.default({}),
   tools: ToolsSchema.default({}),
+  delegation: DelegationSchema.default({}),
   interventions: InterventionsSchema.default({})
 });
 
@@ -833,6 +886,7 @@ export function resolveConfig(config?: ReflexConfig): ResolvedReflexConfig {
       minConfidence
     },
     tools: resolveToolsConfig(validated.tools),
+    delegation: resolveDelegationConfig(validated.delegation),
     interventions: resolveInterventionsConfig(validated.interventions, validated.pruneThreshold ?? 500)
   };
 }
@@ -892,6 +946,35 @@ export function resolveToolsConfig(authored: ReflexToolsConfig | undefined): Res
     enabled[suffix] = value ?? REFLEX_TOOL_DEFAULT_ENABLED[suffix];
   }
   return { enabled };
+}
+
+/**
+ * Validate the delegation block and fill in its default.
+ *
+ * The default is `false` and it is load-bearing: with the switch on, the tool
+ * is offered; with it off, `reflex_delegate` is not registered at all, because a
+ * wrapper whose level cannot be delivered would be a capability that only looks
+ * like one. A non-boolean is refused rather than coerced, for the same reason
+ * every other block refuses one.
+ * @param authored - the authored `delegation` block.
+ * @returns the resolved switch.
+ * @throws Error when the value is present but not a boolean.
+ */
+export function resolveDelegationConfig(authored: ReflexDelegationConfig | undefined): ResolvedDelegationConfig {
+  if (authored !== undefined && (authored === null || typeof authored !== 'object' || Array.isArray(authored))) {
+    throw new Error(`delegation must be an object (got "${String(authored)}")`);
+  }
+  const block = authored ?? {};
+  const extraKeys = Object.keys(block).filter((key) => key !== 'enabled');
+  if (extraKeys.length > 0) {
+    const rendered = extraKeys.map((key) => JSON.stringify(key)).join(', ');
+    throw new Error(`delegation has unknown key${extraKeys.length === 1 ? '' : 's'} ${rendered}; only "enabled" is supported`);
+  }
+  const value = block.enabled;
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`delegation.enabled must be a boolean (got "${String(value)}")`);
+  }
+  return { enabled: value ?? false };
 }
 
 /**

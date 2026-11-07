@@ -128,6 +128,20 @@ export interface PanelState {
   noticeValues: Record<string, string> | null;
   /** Whether the next clear request is the confirming one. */
   confirmingClear: boolean;
+  /** Outcome of the last host-patch write, as the host reported it. */
+  delegationWrite: DelegationWriteState | null;
+}
+
+/** What the last host-profile-patch write returned. */
+export interface DelegationWriteState {
+  /** The host's outcome vocabulary (`added-field`, `already-enabled`, …). */
+  outcome: string;
+  /** Whether a DSH restart is needed for it to take effect. */
+  restartRequired: boolean;
+  /** Path edited, when the host reports one. */
+  path?: string;
+  /** Why nothing was written, when nothing was. */
+  reason?: string;
 }
 
 /** Route of the live snapshot, relative to {@link PanelStoreOptions.basePath}. */
@@ -135,6 +149,15 @@ export const SNAPSHOT_PATH = '/dsh-reflex/api/panel';
 
 /** Route that clears the ledger. */
 export const CLEAR_PATH = '/dsh-reflex/api/ledger/clear?confirm=clear';
+
+/**
+ * Route that writes the host `modelSelection` switch.
+ *
+ * The `confirm=delegation` query is the host's own requirement: this is the only
+ * request of the page that edits a file outside the plugin's settings section,
+ * so it may not be fired by an accidental GET.
+ */
+export const DELEGATION_PATH = '/dsh-reflex/api/delegation?confirm=delegation';
 
 /** Default poll period, in milliseconds. */
 export const DEFAULT_POLL_MS = 4000;
@@ -207,7 +230,8 @@ export class PanelStore {
       saving: false,
       notice: null,
       noticeValues: null,
-      confirmingClear: false
+      confirmingClear: false,
+      delegationWrite: null
     };
   }
 
@@ -424,6 +448,57 @@ export class PanelStore {
     } catch (error) {
       if (this.#disposed) return false;
       this.#set({ error: messageOf(error), notice: null, noticeValues: null });
+      return false;
+    }
+  }
+
+  /**
+   * Write the host `modelSelection` switch, then refresh the live facts.
+   *
+   * Called by the toggle *after* the settings save that records the consent, so
+   * the two writes are separate: the settings document says "the user agreed",
+   * and this request edits the profile patch. A failure here leaves the consent
+   * recorded and reports the host's reason, rather than silently un-ticking a
+   * box the user did press.
+   * @returns whether the host accepted the write.
+   */
+  async enableDelegation(): Promise<boolean> {
+    this.#set({ delegationWrite: null, errors: [] });
+    try {
+      const response = await this.#options.fetch(`${this.#basePath}${DELEGATION_PATH}`, { method: 'POST' });
+      const body = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        outcome?: string;
+        restartRequired?: boolean;
+        path?: string;
+        reason?: string;
+        error?: string;
+        detail?: string;
+      };
+      if (this.#disposed) return false;
+      if (!response.ok || body.ok !== true) {
+        this.#set({
+          delegationWrite: {
+            outcome: 'refused',
+            restartRequired: false,
+            ...(body.detail === undefined ? {} : { reason: body.detail })
+          }
+        });
+        return false;
+      }
+      this.#set({
+        delegationWrite: {
+          outcome: String(body.outcome ?? 'unknown'),
+          restartRequired: body.restartRequired === true,
+          ...(body.path === undefined ? {} : { path: body.path }),
+          ...(body.reason === undefined ? {} : { reason: body.reason })
+        }
+      });
+      await this.refresh();
+      return true;
+    } catch (error) {
+      if (this.#disposed) return false;
+      this.#set({ delegationWrite: { outcome: 'refused', restartRequired: false, reason: messageOf(error) } });
       return false;
     }
   }

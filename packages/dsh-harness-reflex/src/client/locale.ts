@@ -41,6 +41,41 @@ export const zh = {
   groupRuntime: '运行时',
   groupInterventions: '自动干预（三态与预算）',
   groupTools: '工具单项开关',
+  groupDelegation: '子代理委派（宿主能力）',
+  delegationIntro:
+    '`reflex_delegate` 不是本插件自给自足的工具：它把任务交给宿主的 `subagent` 工具，并把 System One 判定的思考档位一起传过去。宿主只有在 `tool-subagent` 的 `modelSelection` 开启时才会发布 `reasoning_effort` 参数，所以这个开关默认关闭——不是忘了开，而是它需要先动一个不属于本插件的文件。',
+  // Deliberately without the exact token `reflex_delegate`: the tools page labels
+  // its switches by registered name, and two fields whose labels both contain
+  // that name would be ambiguous to anyone (and to the page test) looking a
+  // switch up by label.
+  labelDelegationEnabled: '启用子代理委派（宿主能力开关）',
+  helpDelegationEnabled:
+    '用途：允许 reflex_delegate 注册，并同意把宿主的 modelSelection 开关写进 profile patch；格式：布尔开关；默认：关闭；范围：勾选＝明确同意开启宿主 modelSelection（否则思考档位传不进子代理），取消勾选＝停止委派，运行时不会自动帮你改回来。',
+  delegationConsent:
+    '勾选即明确同意：本插件会把 `tool-subagent` 的 `modelSelection: true` 写入宿主的 profile patch（`~/.dsh/profiles/<profile>/cordis.patch.yml`）。只新增这一项，你原有的 patch 内容（模型、密钥、注释、`!!js` 表达式）逐字节保留，写入前会先备份一份 `.bak-dsh-reflex-*`。',
+  delegationRowState: '宿主当前状态',
+  delegationRowPatch: '宿主的 patch 文件',
+  delegationRowPatchState: 'patch 中是否已要求开启',
+  delegationRowRegistered: 'reflex_delegate 是否已注册',
+  delegationStateReady: '已开启，档位可以传进子代理',
+  delegationStateOff: '未开启：宿主委派工具没有 reasoning_effort 参数',
+  delegationStateNoTool: '当前宿主没有委派工具，无从包装',
+  // Distinct from `effectiveUnknown` on purpose: both mean "not read yet", but
+  // they sit on different cards, and a sentence shared by two cards cannot be
+  // used to assert that *this* card read its fact.
+  delegationStateUnknown: '宿主能力状态尚未读取',
+  delegationPatchUnknown: '未解析到 profile patch 路径',
+  delegationPatchOn: '已要求开启',
+  delegationPatchOff: '尚未要求开启',
+  delegationOn: '已注册',
+  delegationOff: '未注册',
+  delegationRestartRequired:
+    '已保存，重启 DSH 后生效：宿主的 `tool-subagent` 配置是启动时读取的，热更新只对本插件自己的 fiber 有效。在你重启之前，reflex_delegate 会保持未注册。文件：',
+  delegationSavedRestart: '已保存，重启 DSH 后生效。',
+  delegationSavedNoRestart: 'patch 已是所需状态，无需再写入。',
+  delegationWriteRefused: '同意已记录，但宿主 patch 未写入成功：',
+  delegationRevokeHint:
+    '想撤销：取消勾选这个开关即可停止委派；若要连宿主开关一起去掉，删掉 patch 里 `tool-subagent` 下那行 `modelSelection: true`（或本插件新增的那一整条）。本插件不会替你改回来。',
   labelEnabled: '启用虚拟 Provider',
   labelVirtualProvider: '虚拟 Provider 名称',
   labelFallback: '兜底目标（provider:model）',
@@ -374,6 +409,36 @@ export const en: Record<keyof typeof zh, string> = {
   groupRuntime: 'Runtime',
   groupInterventions: 'Automatic interventions (three-state and budgets)',
   groupTools: 'Per-tool switches',
+  groupDelegation: 'Subagent delegation (host capability)',
+  delegationIntro:
+    '`reflex_delegate` is not self-contained: it hands the task to the host `subagent` tool together with the reasoning level System One decided. The host publishes a `reasoning_effort` argument only when `tool-subagent` has `modelSelection` on, so this switch starts off — not because it was forgotten, but because it needs a file outside this plugin.',
+  // See the Chinese copy: no exact `reflex_delegate` token, so the tool switch
+  // labelled by its registered name stays unambiguous.
+  labelDelegationEnabled: 'Enable subagent delegation (host capability switch)',
+  helpDelegationEnabled:
+    'Use: allow reflex_delegate to register, and agree to write the host modelSelection switch into the profile patch; Format: boolean switch; Default: off; Range: ticking it is explicit consent to turn host modelSelection on (otherwise no level can reach the child); unticking stops delegation, and the runtime never turns it back on by itself.',
+  delegationConsent:
+    'Ticking this is explicit consent: the plugin writes `tool-subagent` `modelSelection: true` into the host profile patch (`~/.dsh/profiles/<profile>/cordis.patch.yml`). Only that one field is added — your existing patch content (models, keys, comments, `!!js` expressions) is preserved byte for byte, and a `.bak-dsh-reflex-*` backup is written first.',
+  delegationRowState: 'Host state',
+  delegationRowPatch: 'Host patch file',
+  delegationRowPatchState: 'Patch asks for it',
+  delegationRowRegistered: 'reflex_delegate registered',
+  delegationStateReady: 'On — a decided level reaches the child',
+  delegationStateOff: 'Off — the host delegation tool has no reasoning_effort argument',
+  delegationStateNoTool: 'This host exposes no delegation tool to wrap',
+  delegationStateUnknown: 'Host capability state not read yet',
+  delegationPatchUnknown: 'Profile patch path not resolved',
+  delegationPatchOn: 'Asked for',
+  delegationPatchOff: 'Not asked for',
+  delegationOn: 'Registered',
+  delegationOff: 'Not registered',
+  delegationRestartRequired:
+    'Saved — takes effect after you restart DSH: the host reads `tool-subagent` configuration at start-up, and hot updates only reach this plugin\'s own fiber. Until then reflex_delegate stays unregistered. File:',
+  delegationSavedRestart: 'Saved — takes effect after you restart DSH.',
+  delegationSavedNoRestart: 'The patch already has what it needs; nothing was written.',
+  delegationWriteRefused: 'Consent recorded, but the host patch was not written:',
+  delegationRevokeHint:
+    'To undo: untick this switch to stop delegating; to remove the host switch too, delete the `modelSelection: true` line under `tool-subagent` (or the whole row this plugin added). The plugin will not set it back for you.',
   labelEnabled: 'Install the virtual provider',
   labelVirtualProvider: 'Virtual provider name',
   labelFallback: 'Fallback target (provider:model)',

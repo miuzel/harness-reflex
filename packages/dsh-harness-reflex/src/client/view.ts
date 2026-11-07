@@ -1238,6 +1238,7 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
   return h(
     'div',
     { style: S.root },
+    DelegationCard(props),
     Card({
       title: t('groupTools'),
       children: h(
@@ -1308,6 +1309,114 @@ function ToolsTab(props: { t: Translate; state: PanelState; store: PanelStore })
             : h('div', { style: S.mono }, ...active.map((toolName) => h('div', { key: toolName }, toolName)))
     })
   );
+}
+
+/**
+ * The host-capability switch behind `reflex_delegate`.
+ *
+ * Three facts are shown together because they answer the three questions a
+ * person actually has: *is it on in my settings* (the checkbox), *is the host
+ * asked for it* (the patch line), and *is it working right now* (the live state).
+ * The consent text names the host switch explicitly, because ticking this box
+ * also edits a file outside this plugin — that is the point of the notice, and
+ * hiding it behind a tooltip would be the dishonesty the goal forbids.
+ */
+function DelegationCard(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
+  const { t, state, store } = props;
+  const delegation = state.snapshot?.delegation;
+  const checked = state.draft.delegation.enabled;
+  const disabled = !state.writable;
+  const write = state.delegationWrite;
+
+  // Ticking is a two-step action, in this order: record the consent, then ask
+  // the host to write the patch. Only the first is a settings edit, and only when
+  // it lands does the second run — so the file is never written by a box whose
+  // consent was never saved.
+  const onToggle = (next: boolean): void => {
+    void (async () => {
+      store.edit((current) => ({ ...current, delegation: { enabled: next } }));
+      const saved = await store.save();
+      if (saved && next) await store.enableDelegation();
+    })();
+  };
+
+  const stateCopy = ((): string => {
+    if (delegation === undefined) return t('delegationStateUnknown');
+    switch (delegation.state) {
+      case 'ready':
+        return t('delegationStateReady');
+      case 'model-selection-off':
+        return t('delegationStateOff');
+      case 'missing-tool':
+        return t('delegationStateNoTool');
+      default:
+        return t('delegationStateUnknown');
+    }
+  })();
+
+  return Card({
+    title: t('groupDelegation'),
+    children: h(
+      'div',
+      { style: S.field },
+      h('div', { style: S.hint }, t('delegationIntro')),
+      GuidedField({
+        t,
+        path: 'delegation.enabled',
+        label: t('labelDelegationEnabled'),
+        help: t('helpDelegationEnabled'),
+        checkbox: { checked, disabled, onChange: onToggle }
+      }),
+      // The host switch this box writes, named plainly and unconditionally: it is
+      // part of what ticking means, not a conditional consequence.
+      h('div', { style: S.hint }, t('delegationConsent')),
+      h(
+        'table',
+        { style: S.table },
+        h(
+          'tbody',
+          null,
+          ...[
+            [t('delegationRowState'), stateCopy],
+            [t('delegationRowPatch'), delegation?.patchPath ?? t('delegationPatchUnknown')],
+            [
+              t('delegationRowPatchState'),
+              delegation === undefined
+                ? t('delegationStateUnknown')
+                : delegation.patchEnabled
+                  ? t('delegationPatchOn')
+                  : t('delegationPatchOff')
+            ],
+            [t('delegationRowRegistered'), delegation?.registered === true ? t('delegationOn') : t('delegationOff')]
+          ].map(([label, value]) =>
+            h('tr', { key: label }, h('td', { style: { ...S.td, ...S.label, width: '180px' } }, label), h('td', { style: S.td }, value))
+          )
+        )
+      ),
+      // The reason, verbatim from the host: a state with no explanation is the
+      // "the tool just is not there" experience this switch exists to replace.
+      delegation?.reason === undefined ? null : h('div', { style: S.banner }, delegation.reason),
+      // "Saved, applies after a restart" — stated as the fact it is, never as
+      // "done". Only shown when the file asks for the field and the live host
+      // still refuses it, which is exactly the pending-restart window.
+      delegation?.restartRequired === true
+        ? h('div', { style: S.banner }, t('delegationRestartRequired'), ' ', h('span', { style: S.mono }, delegation.patchPath ?? ''))
+        : null,
+      write === null
+        ? null
+        : write.outcome === 'refused'
+          ? // A refused write leaves the consent recorded but the host file
+            // untouched. Saying "saved" here would be the exact dishonesty this
+            // switch exists to avoid, so the reason is shown instead.
+            h('div', { style: S.banner }, t('delegationWriteRefused'), ...(write.reason === undefined ? [] : [' ', write.reason]))
+          : h(
+              'div',
+              { style: write.restartRequired ? S.banner : S.hint },
+              t(write.restartRequired ? 'delegationSavedRestart' : 'delegationSavedNoRestart')
+            ),
+      h('div', { style: S.hint }, t('delegationRevokeHint'))
+    )
+  });
 }
 
 /** Page body. */

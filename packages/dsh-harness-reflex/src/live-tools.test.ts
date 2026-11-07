@@ -117,9 +117,19 @@ function all(value: boolean): Record<string, boolean> {
   return Object.fromEntries(REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, value]));
 }
 
+/**
+ * The deployment every case here starts from.
+ *
+ * `delegation.enabled: true` is part of it because the Host tool this harness
+ * mounts can carry a reasoning level, and the capability is an opt-in: a test
+ * about *tool switches* should not also be re-litigating the consent switch. The
+ * consent gate has its own cases in `delegation.test.ts`.
+ */
+const BASE: ReflexConfig = { backend: 'mock', delegation: { enabled: true } };
+
 /** The names a config enables, in vocabulary order. */
 function namesOf(authored: ReflexConfig): string[] {
-  return reflexToolNames(resolveConfig({ backend: 'mock', ...authored }));
+  return reflexToolNames(resolveConfig({ ...BASE, ...authored }));
 }
 
 /**
@@ -142,23 +152,23 @@ function assertSurface(host: LiveHost, expected: readonly string[]): void {
 }
 
 test('closing and reopening one tool changes the registry on the very next query', async () => {
-  const host = await bootLoader({ backend: 'mock' });
+  const host = await bootLoader({ ...BASE });
   try {
-    const defaultNames = namesOf({ backend: 'mock' });
+    const defaultNames = namesOf({});
     assert.deepEqual([...host.runtime.toolSurface], defaultNames);
     assert.ok(host.ctx.tools.get('reflex_choice'), 'the positive control: choice starts registered');
 
     // Save `tools.enabled.choice: false` — no remount.
-    host.commit({ backend: 'mock', tools: { enabled: { choice: false } } });
+    host.commit({ ...BASE, tools: { enabled: { choice: false } } });
     assert.equal(loaderApplies, 1, 'the plugin fiber never restarts');
     assert.equal(host.ctx.tools.get('reflex_choice'), undefined, 'the closed tool is gone from the registry');
     assert.ok(host.ctx.tools.get('reflex_score'), 'its siblings survive');
-    assertSurface(host, namesOf({ backend: 'mock', tools: { enabled: { choice: false } } }));
+    assertSurface(host, namesOf({ tools: { enabled: { choice: false } } }));
     const closed = await callTool(host.ctx, 'reflex_choice', { question: 'Pick', options: ['a', 'b'] });
     assert.equal(closed.isError, true, 'a call by the old name is an unknown tool, not a stale body');
 
     // Save it back on: the same registration comes back, with its schema intact.
-    host.commit({ backend: 'mock', tools: { enabled: { choice: true } } });
+    host.commit({ ...BASE, tools: { enabled: { choice: true } } });
     assert.equal(loaderApplies, 1, 'still no remount');
     const reopened = host.ctx.tools.get('reflex_choice');
     assert.ok(reopened, 'the reopened tool is registered again');
@@ -174,11 +184,11 @@ test('closing and reopening one tool changes the registry on the very next query
 });
 
 test('the off-by-default route tool appears and disappears with its switch', async () => {
-  const host = await bootLoader({ backend: 'mock' });
+  const host = await bootLoader({ ...BASE });
   try {
     assert.equal(host.ctx.tools.get('reflex_route'), undefined, 'route starts off');
 
-    host.commit({ backend: 'mock', tools: { enabled: { route: true } } });
+    host.commit({ ...BASE, tools: { enabled: { route: true } } });
     assert.equal(loaderApplies, 1, 'the tool switch is live, not a remount');
     assert.ok(host.ctx.tools.get('reflex_route'), 'turning the opt-in tool on registers it');
     const routed = await callTool(host.ctx, 'reflex_route', {
@@ -186,25 +196,25 @@ test('the off-by-default route tool appears and disappears with its switch', asy
       candidates: [{ name: 'one', description: 'first candidate' }]
     });
     assert.equal(routed.isError, false, 'the newly registered tool runs');
-    assertSurface(host, namesOf({ backend: 'mock', tools: { enabled: { route: true } } }));
+    assertSurface(host, namesOf({ tools: { enabled: { route: true } } }));
 
-    host.commit({ backend: 'mock', tools: { enabled: { route: false } } });
+    host.commit({ ...BASE, tools: { enabled: { route: false } } });
     assert.equal(host.ctx.tools.get('reflex_route'), undefined, 'turning it off unregisters it again');
-    assertSurface(host, namesOf({ backend: 'mock' }));
+    assertSurface(host, namesOf({}));
   } finally {
     await host.dispose();
   }
 });
 
 test('a toolPrefix edit replaces the whole surface without leaving a mixed or orphaned state', async () => {
-  const host = await bootLoader({ backend: 'mock' });
+  const host = await bootLoader({ ...BASE });
   try {
-    const before = namesOf({ backend: 'mock' });
+    const before = namesOf({});
     assertSurface(host, before);
 
-    host.commit({ backend: 'mock', toolPrefix: 'rx_' });
+    host.commit({ ...BASE, toolPrefix: 'rx_' });
     assert.equal(loaderApplies, 1, 'a prefix edit is live too');
-    const after = namesOf({ backend: 'mock', toolPrefix: 'rx_' });
+    const after = namesOf({ toolPrefix: 'rx_' });
     assertSurface(host, after);
     assert.deepEqual(
       after.map((name) => name.replace(/^rx_/, '')),
@@ -236,7 +246,7 @@ test('a toolPrefix edit replaces the whole surface without leaving a mixed or or
     assert.ok(host.runtime.interventions, 'the intervention engine is installed');
     assert.deepEqual([...host.runtime.interventions!.ownTools].sort(), [...after].sort(), 'own tools follow the rename');
 
-    host.commit({ backend: 'mock', toolPrefix: 'reflex_' });
+    host.commit({ ...BASE, toolPrefix: 'reflex_' });
     assertSurface(host, before);
     assert.deepEqual([...host.runtime.interventions!.ownTools].sort(), [...before].sort(), 'and follow it back');
   } finally {
@@ -245,7 +255,7 @@ test('a toolPrefix edit replaces the whole surface without leaving a mixed or or
 });
 
 test('every tool off registers nothing, and disposing leaves no residue', async () => {
-  const host = await bootLoader({ backend: 'mock', tools: { enabled: all(false) } });
+  const host = await bootLoader({ ...BASE, tools: { enabled: all(false) } });
   const tools = host.ctx.tools;
   try {
     assert.deepEqual([...host.runtime.toolSurface], [], 'an all-off deployment publishes an empty surface');
@@ -256,15 +266,15 @@ test('every tool off registers nothing, and disposing leaves no residue', async 
     }
 
     // Turn one back on: exactly one registration, then all off again empties it.
-    host.commit({ backend: 'mock', tools: { enabled: { ...all(false), choice: true } } });
+    host.commit({ ...BASE, tools: { enabled: { ...all(false), choice: true } } });
     assert.equal(host.runtime.toolRegistrationEvents, 1, 'opening one tool is one registration');
     assert.equal(host.runtime.toolRegistrationCount, 1);
-    host.commit({ backend: 'mock', tools: { enabled: all(false) } });
+    host.commit({ ...BASE, tools: { enabled: all(false) } });
     assert.equal(host.runtime.toolRegistrationCount, 0, 'closing it unregisters it');
     assert.equal(host.runtime.toolRegistrationEvents, 1, 'closing never registers');
     assert.deepEqual([...host.runtime.toolSurface], []);
 
-    host.commit({ backend: 'mock', tools: { enabled: { ...all(false), choice: true, route: true } } });
+    host.commit({ ...BASE, tools: { enabled: { ...all(false), choice: true, route: true } } });
     assert.equal(host.runtime.toolRegistrationCount, 2);
   } finally {
     await host.dispose();
@@ -276,7 +286,7 @@ test('every tool off registers nothing, and disposing leaves no residue', async 
 });
 
 test('committing the same tool config twice does not re-register anything', async () => {
-  const host = await bootLoader({ backend: 'mock' });
+  const host = await bootLoader({ ...BASE });
   try {
     const names = [...host.runtime.toolSurface];
     const events = host.runtime.toolRegistrationEvents;
@@ -284,7 +294,9 @@ test('committing the same tool config twice does not re-register anything', asyn
     assert.equal(events, names.length, 'the initial surface is one registration per tool');
     assert.equal(count, names.length);
 
-    const same: ReflexConfig = { backend: 'mock', tools: { enabled: { choice: true, route: false } } };
+    // `BASE` keeps the delegation consent: committing without it would be a real
+    // change (the delegate would be withdrawn), which is not what this case tests.
+    const same: ReflexConfig = { ...BASE, tools: { enabled: { choice: true, route: false } } };
     host.commit(same);
     host.commit(same);
     host.commit(same);
@@ -295,7 +307,7 @@ test('committing the same tool config twice does not re-register anything', asyn
 
     // A real change still applies: closing `choice` only removes, opening
     // `route` adds exactly one registration.
-    host.commit({ backend: 'mock', tools: { enabled: { choice: false, route: true } } });
+    host.commit({ ...BASE, tools: { enabled: { choice: false, route: true } } });
     assert.equal(host.runtime.toolRegistrationEvents, events + 1, 'one removal and one addition, no churn');
     assert.equal(host.runtime.toolRegistrationCount, names.length, 'the surface size stays the same');
     assert.equal(host.ctx.tools.get('reflex_choice'), undefined);
@@ -306,7 +318,7 @@ test('committing the same tool config twice does not re-register anything', asyn
 });
 
 test('the unchanged step hot path compares snapshots and never re-registers tools', async (t) => {
-  const host = await bootLoader({ backend: 'mock', tools: { enabled: { route: true } } });
+  const host = await bootLoader({ ...BASE, tools: { enabled: { route: true } } });
   try {
     const events = host.runtime.toolRegistrationEvents;
     const resolves = host.runtime.configResolveCount;
@@ -320,7 +332,7 @@ test('the unchanged step hot path compares snapshots and never re-registers tool
     assert.equal(host.runtime.configResolveCount, resolves, 'and the schema does not run again');
     assert.deepEqual(
       [...host.runtime.toolSurface],
-      namesOf({ backend: 'mock', tools: { enabled: { route: true } } }),
+      namesOf({ tools: { enabled: { route: true } } }),
       'the surface is unchanged'
     );
     t.diagnostic(`refreshIfChanged with the tool surface attached: ${checkUs.toFixed(3)} µs/call; registrations: ${events}`);
@@ -331,29 +343,29 @@ test('the unchanged step hot path compares snapshots and never re-registers tool
 });
 
 test('the panel snapshot shows the tool switches and names currently in force', async () => {
-  const host = await bootLoader({ backend: 'mock' });
+  const host = await bootLoader({ ...BASE });
   try {
     const before = buildPanelSnapshot(panelFacts(host.runtime, {}));
     assert.equal(before.plugin.toolPrefix, 'reflex_');
     assert.equal(before.tools.enabled.choice, true);
     assert.equal(before.tools.enabled.route, false);
-    assert.deepEqual([...before.tools.active], namesOf({ backend: 'mock' }));
+    assert.deepEqual([...before.tools.active], namesOf({}));
 
-    host.commit({ backend: 'mock', tools: { enabled: { choice: false, route: true } } });
+    host.commit({ ...BASE, tools: { enabled: { choice: false, route: true } } });
     // No request and no page reload between the save and the read.
     const after = buildPanelSnapshot(panelFacts(host.runtime, {}));
     assert.equal(after.tools.enabled.choice, false, 'the panel reports the saved switch');
     assert.equal(after.tools.enabled.route, true);
     assert.deepEqual(
       [...after.tools.active],
-      namesOf({ backend: 'mock', tools: { enabled: { choice: false, route: true } } }),
+      namesOf({ tools: { enabled: { choice: false, route: true } } }),
       'the panel lists exactly the registered names'
     );
 
-    host.commit({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } });
+    host.commit({ ...BASE, toolPrefix: 'rv_', tools: { enabled: { route: true } } });
     const renamed = buildPanelSnapshot(panelFacts(host.runtime, {}));
     assert.equal(renamed.plugin.toolPrefix, 'rv_', 'the prefix field follows the edit');
-    assert.deepEqual([...renamed.tools.active], namesOf({ backend: 'mock', toolPrefix: 'rv_', tools: { enabled: { route: true } } }));
+    assert.deepEqual([...renamed.tools.active], namesOf({ toolPrefix: 'rv_', tools: { enabled: { route: true } } }));
     assert.equal(renamed.tools.active.some((name) => name.startsWith('reflex_')), false, 'no stale name is shown');
   } finally {
     await host.dispose();

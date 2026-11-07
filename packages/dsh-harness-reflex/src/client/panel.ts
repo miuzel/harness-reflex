@@ -210,6 +210,20 @@ export interface ToolsDraft {
   enabled: Record<string, boolean>;
 }
 
+/**
+ * Editable draft of the delegation block.
+ *
+ * One checkbox, and deliberately its own group rather than another entry in
+ * `tools.enabled`: the tool switches decide what this plugin registers, while
+ * this one decides whether the *host* is asked for a capability, and consenting
+ * to it edits a file outside this plugin. Keeping them apart keeps the one
+ * switch with a side effect outside this plugin from looking like the others.
+ */
+export interface DelegationDraft {
+  /** Whether the user consents to the host `modelSelection` switch. */
+  enabled: boolean;
+}
+
 /** Editable draft of the System One connection block. */
 export interface BackendDraft {
   backend: string;
@@ -235,6 +249,7 @@ export interface PanelDraft {
   runtime: RuntimeDraft;
   interventions: InterventionsDraft;
   tools: ToolsDraft;
+  delegation: DelegationDraft;
 }
 
 /** Group names, in the order the page presents them. */
@@ -244,7 +259,8 @@ export const DRAFT_GROUPS: readonly (keyof PanelDraft)[] = [
   'backend',
   'runtime',
   'interventions',
-  'tools'
+  'tools',
+  'delegation'
 ];
 
 /** Every tool suffix at its documented default, which is what an omitted block means. */
@@ -283,7 +299,11 @@ export const EMPTY_DRAFT: PanelDraft = {
     closingEvidenceChars: '',
     intent: ''
   },
-  tools: { enabled: defaultToolSwitches() }
+  tools: { enabled: defaultToolSwitches() },
+  // Off, and it stays off unless a person ticks it: the tool cannot work until
+  // the host publishes the level, and opting in also edits a file outside this
+  // plugin, so the default is "do not".
+  delegation: { enabled: false }
 };
 
 /** Read a plain object field. */
@@ -510,7 +530,10 @@ export function draftFromConfig(value: unknown): PanelDraft {
       enabled: Object.fromEntries(
         REFLEX_TOOL_SUFFIXES.map((suffix) => [suffix, asBoolean(authoredTools[suffix], TOOL_DEFAULT_ENABLED[suffix])])
       )
-    }
+    },
+    // Named `delegation` (not another `tools.enabled` key) because it is a
+    // different decision: a host capability, default off.
+    delegation: { enabled: asBoolean(asRecord(section.delegation).enabled, EMPTY_DRAFT.delegation.enabled) }
   };
 }
 
@@ -784,6 +807,12 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
       };
       return [{ path: [group], value: section }];
     }
+    case 'delegation':
+      // Always authored explicitly, in both directions. `true` is the user's
+      // consent (and what makes the panel write the host patch); `false` is a
+      // decision the runtime must be able to *see*, so the detector never
+      // mistakes a deliberate off for a broken on.
+      return [{ path: [group], value: { enabled: draft.delegation.enabled } }];
     case 'tools': {
       // Only departures from the documented default are authored, in either
       // direction: `route` starts off, so switching it on stores `true`, while
@@ -1132,6 +1161,17 @@ export interface PanelSnapshotLike {
     active?: string[];
     /** Suffix → authored switch; every suffix is answered. */
     enabled?: Record<string, boolean>;
+  };
+  /** The host capability `reflex_delegate` needs, and the patch it edits. */
+  delegation?: {
+    enabled?: boolean;
+    registered?: boolean;
+    state?: string;
+    patchPath?: string;
+    patchPathSource?: string;
+    patchEnabled?: boolean;
+    reason?: string;
+    restartRequired?: boolean;
   };
   ledger?: {
     summary?: {

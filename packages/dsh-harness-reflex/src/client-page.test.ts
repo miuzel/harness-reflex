@@ -371,8 +371,17 @@ function facts(apiKeyPresent: boolean): PanelRuntimeFacts {
     pools: [{ model: 'reflex-pro', entries: [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] }],
     routingActive: true,
     // AUTHORED authors no tools block, so the Host registers the documented
-    // default: the four recommended tools, with route left for opt-in.
-    toolSurface: REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `reflex_${suffix}`),
+    // default: the four recommended tools, with route left for opt-in. The
+    // delegation capability is off (it is an opt-in), so `reflex_delegate` is
+    // not part of the default surface.
+    toolSurface: REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route' && suffix !== 'delegate').map(
+      (suffix) => `reflex_${suffix}`
+    ),
+    // A host that *can* serve the wrapper: the switch is off because nobody
+    // consented, not because the Host is broken. A fixture that left this out
+    // would make the panel say "state unknown", which is a different screen.
+    delegationHealth: { state: 'ready' },
+    hostPatch: { path: '/home/user/.dsh/profiles/web/cordis.patch.yml', source: 'DSH_PROFILE_DIR', enabled: false },
     ledger: {
       getSummary: () => LEDGER_SUMMARY,
       getEntries: () => LEDGER_ENTRIES,
@@ -1142,8 +1151,10 @@ test('the tools page closes one tool and writes exactly that switch', async () =
       .map((element) => element.children[0] as string);
   assert.deepEqual(
     registeredRows(tree),
-    REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route').map((suffix) => `reflex_${suffix}`),
-    'the effective card must list exactly the four tools the default registers'
+    REFLEX_TOOL_SUFFIXES.filter((suffix) => suffix !== 'route' && suffix !== 'delegate').map(
+      (suffix) => `reflex_${suffix}`
+    ),
+    'the effective card must list exactly the four tools a default (unconsented) deployment registers'
   );
 
   fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } });
@@ -1718,7 +1729,14 @@ test('every path the panel writes is a path the Host declares volatile', async (
     { tab: '自动干预', edit: (tree) => fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } }) },
     // Closing a tool that is on by default is a real departure, so this page
     // still reaches the document even though its recommendation matches the default.
-    { tab: '工具开关', edit: (tree) => fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } }) }
+    { tab: '工具开关', edit: (tree) => fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } }) },
+    // The host-capability consent, on its own page section: ticking it must write
+    // `delegation.enabled` (a volatile path the Host accepts), and must not
+    // depend on any tool switch.
+    {
+      tab: '工具开关',
+      edit: (tree) => fire(checkboxOf(tree, '启用子代理委派（宿主能力开关）'), 'onChange', { target: { checked: true } })
+    }
   ];
   const paths = new Set<string>();
   for (const perturb of perturbs) {
@@ -1741,7 +1759,7 @@ test('every path the panel writes is a path the Host declares volatile', async (
   }
   assert.deepEqual(
     [...paths].sort(),
-    ['backend', 'calibrationPath', 'effort', 'interventions', 'ledgerPath', 'pruneThreshold', 'routing', 'systemOne', 'toolPrefix', 'tools'],
+    ['backend', 'calibrationPath', 'delegation', 'effort', 'interventions', 'ledgerPath', 'pruneThreshold', 'routing', 'systemOne', 'toolPrefix', 'tools'],
     'the pages stopped covering every writable field, so this fence is no longer checking them all'
   );
 });
@@ -1941,6 +1959,9 @@ function tabOfPath(path: string): string {
   if (path.startsWith('effort.')) return 'effort';
   if (path.startsWith('interventions.')) return 'interventions';
   if (path.startsWith('tools.')) return 'tools';
+  // The delegation consent is rendered on the tools tab (it is about the
+  // delegate tool), even though it owns a group of its own in the document.
+  if (path.startsWith('delegation.')) return 'tools';
   return 'backend';
 }
 

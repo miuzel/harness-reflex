@@ -33,11 +33,15 @@ export type ReflexToolSuffix = (typeof REFLEX_TOOL_SUFFIXES)[number];
  * `tools.enabled.route: true` turns it on, and the panel shows it as the one
  * switch that starts off.
  *
- * `delegate` is on by default but is additionally *conditional on the Host*: it
- * wraps the DSH `subagent` tool, so an activation whose Host never mounted that
- * tool registers nothing and says so, rather than advertising a tool that could
- * only fail when called. That condition lives in the executable registry (see
- * {@link resolveReflexToolExecutables}), not in this default.
+ * `delegate` is on here but is *not* on by default in a deployment: the wrapper
+ * needs a host capability (`delegation.enabled`, off by default) **and** a Host
+ * that can serve it. It has no work of its own — it wraps the DSH `subagent`
+ * tool and hands it a System One level — so an activation whose Host does not
+ * publish `reasoning_effort`, or whose user never ticked the consent switch,
+ * registers nothing and says so. Those two conditions live in the executable
+ * registry (see {@link resolveReflexToolExecutables}), not in this default:
+ * this table answers "would the switch be on if the capability could be
+ * served?", which is what keeps a missing Host from reading as "off".
  */
 export const REFLEX_TOOL_DEFAULT_ENABLED: Record<ReflexToolSuffix, boolean> = {
   choice: true,
@@ -98,6 +102,39 @@ export function resolveReflexToolExecutables(
   return REFLEX_TOOL_SUFFIXES.filter(
     (suffix) => suffixes.includes(suffix) && (suffix !== 'delegate' || executables.delegateTarget !== undefined)
   );
+}
+
+/**
+ * Whether the delegation capability is both consented to and servable.
+ *
+ * Two independent facts, and both have to hold: the user ticked
+ * `delegation.enabled` (a consent to the host switch), and the live Host
+ * delegation tool declares `reasoning_effort`. Either one missing withdraws the
+ * tool.
+ * @param config - resolved plugin configuration.
+ * @param executables - what the live Host can actually dispatch.
+ * @returns whether `reflex_delegate` may be registered.
+ */
+export function delegateServable(config: ResolvedReflexConfig, executables: ReflexToolExecutables): boolean {
+  return config.delegation.enabled && executables.delegateTarget !== undefined;
+}
+
+/**
+ * The `executables` fact a config justifies.
+ *
+ * The single place the consent switch and the Host's capability are combined into
+ * the one input {@link resolveReflexToolExecutables} reads, so no caller can
+ * register the delegate by handing that function a target while the user never
+ * consented — the drift this seam exists to prevent.
+ * @param config - resolved plugin configuration.
+ * @param delegateTarget - the Host tool's name when it declares `reasoning_effort`.
+ * @returns the executables fact, with the target withheld unless both conditions hold.
+ */
+export function delegationExecutables(
+  config: ResolvedReflexConfig,
+  delegateTarget: string | undefined
+): ReflexToolExecutables {
+  return config.delegation.enabled && delegateTarget !== undefined ? { delegateTarget } : {};
 }
 
 /**
@@ -357,7 +394,8 @@ export function defineReflexTools(
           'Delegate a self-contained task to a subagent (a separate agent that works in its own context), letting System One choose how deeply the child should think. Use it instead of the raw delegation tool when the right reasoning depth is not obvious.\n\n' +
           'This tool has NO reasoning-depth parameter on purpose: a `reasoning_effort` field, or a "think hard / 请用 high 思考" line inside the prompt, does not set the child\'s level — the level is decided from the task itself. ' +
           `To pin an exact level, call \`${target}\` directly. ` +
-          'Provider/model selection and every permission, preset, and recursion limit are enforced by the host delegation tool this wraps; this tool adds no rule of its own.',
+          'Provider/model selection and every permission, preset, and recursion limit are enforced by the host delegation tool this wraps; this tool adds no rule of its own. ' +
+          'It exists only because the deployment ticked Reflex settings → Delegation, which also asks the host to publish the model-selection surface (\`tool-subagent.modelSelection: true\`); the host reads that switch at start-up, so it takes effect after a DSH restart.',
         parameters: {
           prompt: { type: 'string', required: true, description: 'The complete, self-contained task for the child agent.' },
           description: { type: 'string', required: true, description: 'A short (3-5 word) description of the delegated task, for display.' },

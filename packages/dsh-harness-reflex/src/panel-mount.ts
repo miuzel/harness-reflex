@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage } from 'node:http';
 
 import { resolveApiKey, routingActive } from './config.js';
+import { enableHostModelSelection, inspectHostModelSelection, type HostPatchOptions } from './host-patch.js';
 import { formatTargetName } from './router.js';
 import type { ReflexRuntime } from './bridge.js';
 import {
@@ -30,6 +31,7 @@ import {
   type PanelRuntimeFacts,
   type PanelSource
 } from './panel-api.js';
+import type { DelegationHealthState } from './delegation-health.js';
 
 /** Contexts that already mounted a panel; released when the activation disposes. */
 const mounted = new WeakSet<object>();
@@ -67,7 +69,8 @@ const catalogCache = new Map<object, PanelRuntimeFacts['modelCatalog']>();
 export function panelFacts(
   runtime: ReflexRuntime,
   env: Record<string, string | undefined> = process.env,
-  ctx?: Context
+  ctx?: Context,
+  hostPatch?: HostPatchOptions
 ): PanelRuntimeFacts {
   const cached = ctx ? catalogCache.get(ctx) : undefined;
   if (ctx && (!cached || cached.length === 0 || cached.every(g => g.models.length === 0))) {
@@ -133,9 +136,30 @@ export function panelFacts(
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
     apiKeyPresent: resolveApiKey(effective.systemOne, env) !== undefined,
+    // Both are read on every poll: the registry can change under a running host,
+    // and the patch file can be edited by a person while the panel is open. A
+    // cached copy of either would be exactly the stale fact the panel must not
+    // show.
+    delegationHealth: delegationHealthOf(runtime),
+    hostPatch: inspectHostModelSelection(hostPatch ?? { env }),
     ...(systemOneHealth === undefined ? {} : { systemOneHealth }),
     ...(modelCatalog === undefined ? {} : { modelCatalog })
   };
+}
+
+/**
+ * The live delegation reading, reduced to what the projection carries.
+ *
+ * `undefined` — not a fabricated `missing-tool` — when this activation has no
+ * reading attached: a runtime built without the plugin lifecycle (a test, an
+ * embedder) must not be reported as a broken deployment.
+ * @param runtime - the activation's runtime.
+ * @returns the state and its reason, when one is known.
+ */
+function delegationHealthOf(runtime: ReflexRuntime): { state: DelegationHealthState; reason?: string } | undefined {
+  const health = runtime.delegationHealth;
+  if (health === undefined) return undefined;
+  return { state: health.state, ...(health.reason === undefined ? {} : { reason: health.reason }) };
 }
 
 /** Shape of the optional pairing service, as far as this plugin depends on it. */
@@ -172,7 +196,8 @@ function pairingOf(ctx: Context): PairingService | undefined {
 export function createPanelSource(
   ctx: Context,
   runtime: ReflexRuntime,
-  env: Record<string, string | undefined> = process.env
+  env: Record<string, string | undefined> = process.env,
+  hostPatch?: HostPatchOptions
 ): PanelSource {
   const pairing = pairingOf(ctx);
   return {
@@ -180,11 +205,27 @@ export function createPanelSource(
       isPanelRequestAllowed(request, {
         isPaired: pairing === undefined ? undefined : (candidate) => pairing.isPairedDevice(candidate)
       }),
-    snapshot: (limit) => buildPanelSnapshot(panelFacts(runtime, env, ctx), limit),
+    snapshot: (limit) => buildPanelSnapshot(panelFacts(runtime, env, ctx, hostPatch), limit),
     clearLedger: () => {
       const cleared = runtime.ledger.getEntries().length;
       runtime.ledger.clear();
       return cleared;
+    },
+    // The one write outside this plugin's settings section. It is *not* a
+    // reaction to a broken capability — it is the user's explicit consent, sent
+    // from the toggle — and it never retries or repairs on its own.
+    enableDelegation: () => {
+      const result = enableHostModelSelection(hostPatch ?? { env });
+      const wrote = result.outcome === 'added-field' || result.outcome === 'added-row' || result.outcome === 'added-field-after-name';
+      return {
+        outcome: result.outcome,
+        ...(result.path === undefined ? {} : { path: result.path }),
+        ...(result.source === undefined ? {} : { source: result.source }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
+        ...(result.backupPath === undefined ? {} : { backupPath: result.backupPath }),
+        // Only a real edit needs a restart; "already enabled" needs nothing.
+        restartRequired: wrote
+      };
     }
   };
 }
@@ -196,7 +237,11 @@ export function createPanelSource(
  * @param runtime - the activation's runtime.
  * @returns a disposer that releases this activation's panel ownership.
  */
-export function mountReflexPanel(ctx: Context, runtime: ReflexRuntime): () => void {
+export function mountReflexPanel(
+  ctx: Context,
+  runtime: ReflexRuntime,
+  options: { hostPatch?: HostPatchOptions } = {}
+): () => void {
   const inject = (ctx as { inject?: unknown }).inject;
   if (typeof inject !== 'function') return () => {};
   if (mounted.has(ctx)) {
@@ -207,7 +252,7 @@ export function mountReflexPanel(ctx: Context, runtime: ReflexRuntime): () => vo
 
   ctx.inject(['webServer'], (scope: any) => {
     scope.effect(() => {
-      const source = createPanelSource(scope, runtime);
+      const source = createPanelSource(scope, runtime, process.env, options.hostPatch);
       const disposers = makePanelRoutes(source).map((route) => scope.webServer.register(route));
       return () => {
         for (const dispose of disposers) dispose();

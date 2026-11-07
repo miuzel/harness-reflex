@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 471;
+const EXPECTED_TESTS = 535;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -732,6 +732,87 @@ const MUTATIONS = [
     to: ''
   },
   {
+    // The consent switch is what stands between "the tool works" and "a wrapper
+    // that silently drops the level". Defaulting it on is the tempting mistake.
+    name: 'delegation-default-on',
+    area: 'the delegation capability is opt-in, off by default',
+    file: 'src/config.ts',
+    from: '  return { enabled: value ?? false };',
+    to: '  return { enabled: value ?? true };'
+  },
+  {
+    // Registration must require consent *and* a capable host. Dropping the consent
+    // half makes every deployment advertise a tool whose level cannot arrive.
+    name: 'delegation-consent-ignored',
+    area: 'the delegation capability is opt-in, off by default',
+    file: 'src/tools.ts',
+    from: '  return config.delegation.enabled && delegateTarget !== undefined ? { delegateTarget } : {};',
+    to: '  return delegateTarget !== undefined ? { delegateTarget } : {};'
+  },
+  {
+    // The self-heal's boundary: a broken capability is reported, never repaired.
+    // A "helpful" rewrite of the patch is the one thing the design forbids.
+    name: 'self-heal-writes-config',
+    area: 'a broken capability is withdrawn and reported, never silently repaired',
+    file: 'src/delegation-health.ts',
+    from: '    } else if (wasAvailable && !reported && next.state === \'model-selection-off\') {',
+    to: '    } else if (wasAvailable && !reported && next.state === \'model-selection-off\') {\n      enableHostModelSelection();'
+  },
+  {
+    // A capability that never worked must not warn: warning there is noise about a
+    // state the user never had, and it would train people to ignore the line.
+    name: 'self-heal-warns-without-a-break',
+    area: 'a broken capability is withdrawn and reported, never silently repaired',
+    file: 'src/delegation-health.ts',
+    from: '    } else if (wasAvailable && !reported && next.state === \'model-selection-off\') {',
+    to: '    } else if (!reported \u0026\u0026 next.state === \'model-selection-off\') {'
+  },
+  {
+    // The patch edit must merge, not rewrite. Appending a second row when one
+    // exists would shadow the user's own (`provider`, `toolName`, …).
+    name: 'patch-edit-always-appends',
+    area: 'the profile patch is merged, never rewritten',
+    file: 'src/host-patch.ts',
+    from: '  if (located.spans.length === 0) {',
+    to: '  if (true) {'
+  },
+  {
+    // The whole safety argument for the text editor: refuse what cannot be read
+    // exactly. Accepting two same-id rows would silently pick one by loader
+    // precedence this module does not implement.
+    name: 'patch-edit-accepts-ambiguous-row',
+    area: 'the profile patch is merged, never rewritten',
+    file: 'src/host-patch.ts',
+    from: '  if (located.spans.length > 1) {',
+    to: '  if (located.spans.length > 999) {'
+  },
+  {
+    // A row that disables the entry cannot be enabled from underneath it.
+    name: 'patch-edit-enables-disabled-row',
+    area: 'the profile patch is merged, never rewritten',
+    file: 'src/host-patch.ts',
+    from: '  if (disabled) {',
+    to: '  if (false) {'
+  },
+  {
+    // "Saved" must never read as "in effect": the restart window is the honest
+    // answer while the host still refuses the field.
+    name: 'panel-claims-no-restart-needed',
+    area: 'the panel says a restart applies the write, and never claims otherwise',
+    file: 'src/panel-api.ts',
+    from: '    restartRequired: enabled && patchEnabled && state === \'model-selection-off\',',
+    to: '    restartRequired: false,'
+  },
+  {
+    // The write route must not be reachable by an accidental GET or an unconfirmed
+    // POST: it edits a file outside this plugin's settings section.
+    name: 'panel-write-route-unguarded',
+    area: 'the profile patch is written only on an explicit, confirmed request',
+    file: 'src/panel-api.ts',
+    from: "      if (readQuery(request.url, 'confirm') !== 'delegation') {",
+    to: '      if (false) {'
+  },
+  {
     name: 'rename-route-frozen',
     area: 'renaming the virtual provider withdraws the old name',
     file: 'src/routing.ts',
@@ -741,18 +822,48 @@ const MUTATIONS = [
 ];
 
 /**
+ * How long a single child command may run before it is killed.
+ *
+ * Without this bound a fault that sends the suite into a loop hangs the whole
+ * negative control with no output at all: `execFileSync` blocks the parent, so
+ * nothing is ever flushed and the run looks identical to a slow one. A timed-out
+ * command is reported as a failure whose cause names the timeout, which makes the
+ * offending mutation visible instead of mysterious.
+ */
+const COMMAND_TIMEOUT_MS = Number(process.env.REFLEX_MUTATION_TIMEOUT_MS ?? 180_000);
+
+/**
  * Run one command in the scratch copy.
  * @param {string} command - executable.
  * @param {string[]} args - arguments.
- * @returns {{ ok: boolean, output: string }} the outcome and its combined output.
+ * @returns {{ ok: boolean, output: string, timedOut?: boolean }} the outcome, its combined
+ *   output, and whether the command had to be killed for exceeding the time bound.
  */
 function run(command, args) {
+  const started = Date.now();
   try {
-    const output = execFileSync(command, args, { cwd: workDir, encoding: 'utf8', stdio: 'pipe' });
+    const output = execFileSync(command, args, {
+      cwd: workDir,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: COMMAND_TIMEOUT_MS,
+      killSignal: 'SIGKILL'
+    });
     return { ok: true, output };
   } catch (error) {
     const stdout = typeof error.stdout === 'string' ? error.stdout : '';
     const stderr = typeof error.stderr === 'string' ? error.stderr : String(error.message ?? error);
+    const elapsed = ((Date.now() - started) / 1000).toFixed(0);
+    // A killed child and a failing child both land here; only the signal tells
+    // them apart, and the difference decides whether the mutation was caught or
+    // the harness gave up.
+    if (error.signal === 'SIGKILL' || error.code === 'ETIMEDOUT') {
+      return {
+        ok: false,
+        timedOut: true,
+        output: `${stdout}${stderr}\n[timeout] ${command} ${args.join(' ')} exceeded ${COMMAND_TIMEOUT_MS}ms after ${elapsed}s`
+      };
+    }
     return { ok: false, output: `${stdout}${stderr}` };
   }
 }
@@ -825,8 +936,23 @@ if (!existsSync(path.join(workDir, 'node_modules'))) {
   symlinkSync(path.join(packageDir, 'node_modules'), path.join(workDir, 'node_modules'), 'dir');
 }
 
+/**
+ * Print one progress line for a step that is about to run.
+ *
+ * The whole run is a chain of blocking `execFileSync` calls, so without this the
+ * process emits nothing between start and finish and a stall is indistinguishable
+ * from a slow suite. Writing straight to stderr keeps the lines visible even when
+ * stdout is redirected into a file.
+ * @param {string} label - what is starting.
+ */
+function announce(label) {
+  process.stderr.write(`[${new Date().toISOString().slice(11, 19)}] ${label}\n`);
+}
+
 resetSources();
+announce('baseline: building the unmutated copy');
 const baselineBuild = build();
+announce(`baseline: build ${baselineBuild ? 'ok' : 'FAILED'}, running the suite`);
 const baselineTest = baselineBuild ? test() : { ok: false, output: 'build failed', executed: 0 };
 const baselineGreen = baselineBuild && baselineTest.ok && baselineTest.executed >= EXPECTED_TESTS;
 results.push({ name: '(unmutated copy)', area: 'baseline', ok: baselineGreen });
@@ -837,14 +963,22 @@ if (!baselineGreen) {
   );
   console.error(baselineTest.output.split('\n').slice(-15).join('\n'));
 } else {
+  announce(`baseline: GREEN (${baselineTest.executed} tests); injecting ${MUTATIONS.length} faults`);
+  let index = 0;
   for (const mutation of MUTATIONS) {
+    index += 1;
+    announce(`[${index}/${MUTATIONS.length}] ${mutation.name}: building`);
     resetSources();
     mutate(mutation);
     const built = build();
+    if (built) announce(`[${index}/${MUTATIONS.length}] ${mutation.name}: build ok, running the suite`);
     const outcome = built ? test() : { ok: false };
     // A fault is caught either by the compiler or by the suite; both count, and
     // the report keeps them apart so the split stays visible.
     const stage = !built ? 'build' : !outcome.ok ? 'tests' : undefined;
+    if (built && outcome.timedOut) {
+      announce(`[${index}/${MUTATIONS.length}] ${mutation.name}: the suite TIMED OUT after ${COMMAND_TIMEOUT_MS}ms`);
+    }
     results.push({ name: mutation.name, area: mutation.area, stage, ok: stage !== undefined });
     if (!stage) failed = true;
   }

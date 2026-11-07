@@ -47,7 +47,7 @@ test('every top-level configuration field is writable by the settings panel', ()
   const keys = Object.keys(root.dict ?? {});
   assert.deepEqual(
     keys,
-    ['backend', 'toolPrefix', 'ledgerPath', 'pruneThreshold', 'calibrationPath', 'systemOne', 'routing', 'effort', 'tools', 'interventions'],
+    ['backend', 'toolPrefix', 'ledgerPath', 'pruneThreshold', 'calibrationPath', 'systemOne', 'routing', 'effort', 'tools', 'delegation', 'interventions'],
     'the settings surface changed shape; the panel pages must be revisited'
   );
   for (const key of keys) {
@@ -73,6 +73,8 @@ test('the System 1 backend block is writable field by field', () => {
     ['tools'],
     ['tools', 'enabled'],
     ...REFLEX_TOOL_SUFFIXES.map((suffix) => ['tools', 'enabled', suffix]),
+    ['delegation'],
+    ['delegation', 'enabled'],
     ['interventions'],
     ['interventions', 'capabilities'],
     ...INTERVENTION_CAPABILITIES.map((capability) => ['interventions', 'capabilities', capability])

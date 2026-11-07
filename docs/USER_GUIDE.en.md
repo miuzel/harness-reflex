@@ -551,10 +551,17 @@ model's tool list.
 | Prompt-injection screen | `reflex_screen` | tool `reflex_screen` | `content`, optional `source`, `strict` | Suggested for the agent |
 | Claim/evidence gate | `reflex_gate` | tool `reflex_gate` | `assertions[{statement}]`, `evidence`, optional `strictness` | Suggested for the agent |
 | Candidate ranking | `reflex_route` | tool `reflex_route` (**not registered by default**) | `goal`, `candidates[]`, optional `topK` | Opt-in |
-| Subagent delegation | `reflex_delegate` | tool `reflex_delegate` (**only registered when the host delegation tool declares a reasoning level, i.e. `modelSelection` is enabled**) | `prompt`, `description`, optional `provider`, `model`, `cwd` | Suggested for the agent |
+| Subagent delegation | `reflex_delegate` | tool `reflex_delegate` (**only registered after you tick Delegation in the settings panel, and the host delegation tool then declares a reasoning level, i.e. `modelSelection` is on**) | `prompt`, `description`, optional `provider`, `model`, `cwd` | Suggested for the agent |
 | Long-output pruning | `reflex_prune` | no tool: result pruning runs automatically from hooks such as `tools/pre-execute`, following the intervention mode | `rawOutput`, optional `intent`, `shadowMode` | — |
 | Stagnation detection | `reflex_detect_stagnation` | no tool: stagnation detection is part of the automatic intervention layer | optional `recentAction`, `goal`, `history[]` | — |
 | Ledger audit | `reflex_status_ledger` | no tool: use the `/reflex-ledger` command (no arguments) | optional `includeEntries` (returns `summary`, optionally `recentEntries`) | For humans |
+
+Ticking **Delegation** is an explicit consent with a side effect outside this plugin: it merges
+`tool-subagent: { modelSelection: true }` into your profile patch (`~/.dsh/profiles/<profile>/cordis.patch.yml`),
+preserving every other byte of it and backing it up first. The host reads that switch at start-up, so the
+panel says **"saved — takes effect after you restart DSH"** rather than pretending it is live. If the capability
+disappears at runtime, the plugin warns, withdraws `reflex_delegate`, and shows the reason — it never writes your
+configuration back on its own.
 
 Differences:
 

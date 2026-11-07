@@ -123,6 +123,15 @@ export function parseMarkdown(text: string): MarkdownBlock[] {
         blocks.push({ kind: 'table', headers, rows });
         continue;
       }
+      // A pipe row with no delimiter row beneath it is not a table: it is a
+      // stray row (the usual cause is a paragraph written into the middle of a
+      // table, which strands every row after it). It still has to be consumed —
+      // `startsBlock` reports pipe rows as block starts, so the paragraph
+      // fallback below refuses to absorb it, and leaving the index where it is
+      // would spin this loop forever.
+      blocks.push({ kind: 'paragraph', text: trimmed });
+      index += 1;
+      continue;
     }
 
     if (line.trimStart().startsWith('>')) {
@@ -164,7 +173,17 @@ export function parseMarkdown(text: string): MarkdownBlock[] {
       paragraph.push((lines[index] as string).trim());
       index += 1;
     }
-    if (paragraph.length > 0) blocks.push({ kind: 'paragraph', text: paragraph.join(' ') });
+    if (paragraph.length > 0) {
+      blocks.push({ kind: 'paragraph', text: paragraph.join(' ') });
+    } else {
+      // Belt and braces for the same failure class: every branch above must
+      // either consume the line or fall through to here. If a line is reported
+      // as a block start by `startsBlock` but no branch claims it, the paragraph
+      // loop cannot absorb it and this loop would never advance — so consume it
+      // as plain text instead of hanging.
+      blocks.push({ kind: 'paragraph', text: trimmed });
+      index += 1;
+    }
   }
 
   return blocks;
