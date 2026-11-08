@@ -164,20 +164,46 @@ export function panelFacts(
  * fresh session would be composed from). `undefined` when the host exposes
  * neither — the reading is then `unknown`, which is honest, rather than a global
  * view that a preset-hosted tool can never appear in.
+ *
+ * ## Why the whole read sits inside one `try` (and why `get` comes first)
+ *
+ * On a real cordis context a missing `inject` entry does not read as
+ * `undefined`: the context proxy *throws* `cannot get property "agents" without
+ * inject`. This plugin deliberately does not inject `agents` (a host without
+ * that service must still activate the panel), so `ctx.agents` is precisely the
+ * read that throws here — and a `try` wrapped around only the *calls* leaves the
+ * failing read outside it. Optional chaining is no defence either: it guards
+ * against `null`/`undefined`, not against a getter that throws.
+ *
+ * `ctx.get(name)` is the reflection form: it reads the service store without the
+ * inject requirement and answers `undefined` when the service is absent. The
+ * property form stays as a fallback for hosts that expose no `get` (and for the
+ * plain-object contexts tests build) — inside the same `try`, because on cordis
+ * it is the throwing form.
+ *
  * @param ctx - any context carrying the agent registry, when the host has one.
  * @returns a readable scope, or `undefined` when nothing can be read as.
  */
 function delegationScopeOf(ctx: Context | undefined): Agent | undefined {
-  const registry = (ctx as { agents?: { list?: () => Agent[]; roots?: () => Agent[] } } | undefined)?.agents;
-  if (registry === undefined) return undefined;
   try {
-    const live = registry.list?.() ?? [];
-    if (live.length > 0) return live[0];
-    const roots = registry.roots?.() ?? [];
-    if (roots.length > 0) return roots[0];
+    const holder = ctx as { get?: (name: string) => unknown; agents?: unknown } | undefined;
+    if (holder === undefined || holder === null) return undefined;
+    // `get` first: it cannot throw for an uninjected service. `??` then falls
+    // back to the property form for hosts that do not expose `get` — that read
+    // is the throwing one, which is why it stays inside this `try`.
+    const registry = (holder.get?.('agents') ?? holder.agents) as
+      | { list?: () => Agent[]; roots?: () => Agent[] }
+      | undefined;
+    if (registry === undefined || registry === null) return undefined;
+    const live = typeof registry.list === 'function' ? registry.list() : [];
+    if (Array.isArray(live) && live.length > 0) return live[0];
+    const roots = typeof registry.roots === 'function' ? registry.roots() : [];
+    if (Array.isArray(roots) && roots.length > 0) return roots[0];
   } catch {
-    // A closing registry is not a capability fault: report nothing rather than
-    // pretend the host turned the capability off.
+    // Either the service is not injected (cordis throws on the property read) or
+    // the registry is closing mid-read. Neither is a capability fault: report no
+    // scope, which the panel shows as `unknown`, rather than pretend the host
+    // turned the capability off.
     return undefined;
   }
   return undefined;

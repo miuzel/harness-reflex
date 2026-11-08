@@ -815,12 +815,34 @@ export function sendPanelAnswer(request: IncomingMessage, response: PanelRespons
  * One handler owns every path in the family, so the method/path decision lives
  * in {@link answerPanelRequest} and cannot drift between routes; the
  * `kind: 'exact'` paths mean the server never routes an unrelated URL here.
+ *
+ * ## Why the handler catches
+ *
+ * The Host maps a throw out of a route handler onto a bare `400` with an empty
+ * body, which erases the stack — the one thing needed to diagnose it. A panel
+ * route that fails must therefore answer for itself: `500` plus the real detail.
+ * This is not a substitute for handling a known failure where it happens (a
+ * missing service is read defensively, not caught here); it guarantees that an
+ * *unknown* one is still visible instead of silently becoming "bad request".
  * @param source - the live facts.
  * @returns the routes to register.
  */
 export function makePanelRoutes(source: PanelSource): WebRoute[] {
   const handler = (request: IncomingMessage, response: ServerResponse): void => {
-    sendPanelAnswer(request, response, answerPanelRequest(source, request));
+    try {
+      sendPanelAnswer(request, response, answerPanelRequest(source, request));
+    } catch (error) {
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      try {
+        response.writeHead(500, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store'
+        });
+        response.end(JSON.stringify({ ok: false, error: 'panel-handler-threw', detail }));
+      } catch {
+        // The socket is already gone: there is nobody left to report to.
+      }
+    }
   };
   return [
     { kind: 'exact', path: PANEL_ROUTES.snapshot, handler },

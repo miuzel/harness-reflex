@@ -565,4 +565,76 @@ test('a 204 answer has no body even for GET', () => {
   assert.equal(written.body, '');
 });
 
+test('a handler that throws answers 500 with the real detail, not an empty 400', () => {
+  // The Host turns a throw out of a route handler into a bare 400 — the shape
+  // that made the "cannot get property "agents" without inject" panel outage
+  // undiagnosable. The handler must answer for itself instead.
+  const broken: PanelSource = {
+    snapshot: () => {
+      throw new Error('cannot get property "agents" without inject');
+    },
+    clearLedger: () => 0,
+    allows: () => true
+  };
+  const routes = makePanelRoutes(broken);
+  const snapshotRoute = routes.find((route) => route.path === PANEL_ROUTES.snapshot);
+  assert.ok(snapshotRoute !== undefined);
+
+  const written = response();
+  assert.doesNotThrow(() => snapshotRoute.handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never));
+  assert.equal(written.status, 500);
+  assert.equal(written.headers['content-type'], 'application/json; charset=utf-8');
+  assert.equal(written.headers['cache-control'], 'no-store');
+
+  const body = JSON.parse(written.body) as { ok: boolean; error: string; detail: string };
+  assert.equal(body.ok, false);
+  assert.equal(body.error, 'panel-handler-threw');
+  // The detail must be the stack, not a generic sentence: the stack is the whole
+  // point of the fallback.
+  assert.match(body.detail, /cannot get property "agents" without inject/);
+  assert.match(body.detail, /\n\s+at /, 'the detail must carry a stack');
+});
+
+test('a non-Error throw is still reported as a 500', () => {
+  const broken: PanelSource = {
+    snapshot: () => {
+      throw 'string failure';
+    },
+    clearLedger: () => 0,
+    allows: () => true
+  };
+  const routes = makePanelRoutes(broken);
+  const written = response();
+  routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never);
+  assert.equal(written.status, 500);
+  assert.equal((JSON.parse(written.body) as { detail: string }).detail, 'string failure');
+});
+
+test('a dead socket during the fallback is not a second throw', () => {
+  const broken: PanelSource = {
+    snapshot: () => {
+      throw new Error('boom');
+    },
+    clearLedger: () => 0,
+    allows: () => true
+  };
+  const routes = makePanelRoutes(broken);
+  const dead = {
+    writeHead: () => {
+      throw new Error('headers already sent');
+    },
+    end: () => undefined
+  };
+  assert.doesNotThrow(() => routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, dead as never));
+});
+
+test('a healthy handler still answers its own status, unchanged', () => {
+  const { source: panelSource } = source();
+  const routes = makePanelRoutes(panelSource);
+  const written = response();
+  routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never);
+  assert.equal(written.status, 200);
+  assert.ok(!written.body.includes('panel-handler-threw'));
+});
+
 //#endregion

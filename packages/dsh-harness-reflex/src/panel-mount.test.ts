@@ -5,7 +5,7 @@ import type { IncomingMessage } from 'node:http';
 
 import { ReflexRuntime } from './bridge.js';
 import { resolveConfig, type ReflexConfig } from './config.js';
-import { PANEL_ROUTES, type PanelSource } from './panel-api.js';
+import { PANEL_ROUTES, buildPanelSnapshot, type PanelSource } from './panel-api.js';
 import { createPanelSource, mountReflexPanel, panelFacts, panelPools } from './panel-mount.js';
 
 /**
@@ -321,6 +321,147 @@ test('one activation owns the panel and a second is reported and ignored', () =>
   const third = mountReflexPanel(context.ctx, runtimeOf());
   assert.equal(context.injections.length, 2);
   third();
+});
+
+//#endregion
+
+//#region cordis-like contexts (missing-inject reads throw)
+
+/**
+ * A context that behaves the way a **real** cordis context does on a service the
+ * plugin does not `inject`.
+ *
+ * This is the regression this suite existed to miss. Every other fake context in
+ * this file is a plain object, where `ctx.agents` answers `undefined` and nothing
+ * can fail. Cordis' context proxy instead *throws* `cannot get property "agents"
+ * without inject` for an uninjected service — so `?.` and any `try` that wraps
+ * only the *calls* leave the failing read unguarded. The panel then threw inside
+ * `snapshot`, the Host mapped it onto an empty `400`, and the panel was
+ * unopenable on the machine it shipped to.
+ *
+ * The trap is deliberately faithful: symbols and `_`-prefixed names are the ones
+ * cordis itself treats as special (see `isSpecialProperty`), and everything else
+ * is a service read that must be declared.
+ */
+function cordisLikeContext(services: Record<string, unknown> = {}): Context {
+  const own = {
+    // The reflection form reads the service store without the inject
+    // requirement — this is what makes an optional service readable at all.
+    get: (name: string): unknown => services[name]
+  };
+  return new Proxy(own, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'symbol') return Reflect.get(target, prop, receiver);
+      if (Reflect.has(target, prop)) return Reflect.get(target, prop, receiver);
+      if (prop.startsWith('_')) return undefined;
+      throw new Error(`cannot get property "${prop}" without inject`);
+    }
+  }) as unknown as Context;
+}
+
+test('a context that throws on an uninjected `agents` read still yields facts', () => {
+  const runtime = runtimeOf();
+  const context = cordisLikeContext();
+
+  // The premise: the read this function used to perform really does throw here.
+  assert.throws(
+    () => (context as unknown as { agents?: unknown }).agents,
+    /cannot get property "agents" without inject/
+  );
+
+  // And the panel path must survive it end to end.
+  const facts = panelFacts(runtime, {}, context);
+  assert.equal(facts.delegationHealth, undefined, 'no reading is attached to this runtime');
+  const snapshot = buildPanelSnapshot(facts);
+  assert.equal(snapshot.delegation.state, 'unknown', 'a missing agents service must read as unknown, not as a fault');
+  assert.notEqual(snapshot.delegation.state, 'missing-tool');
+  assert.notEqual(snapshot.delegation.state, 'model-selection-off');
+});
+
+test('the throwing context does not merely fail soft: the same snapshot is served', () => {
+  // Guards against a fix that swallows the read but also loses the rest of the
+  // payload — the panel is worthless if it answers 200 with half a body.
+  const runtime = runtimeOf();
+  const plain = buildPanelSnapshot(panelFacts(runtimeOf(), {}));
+  const snapshot = buildPanelSnapshot(panelFacts(runtime, {}, cordisLikeContext()));
+  assert.equal(snapshot.routing.candidates, 3);
+  assert.equal(snapshot.routing.pools.length, plain.routing.pools.length);
+  assert.equal(snapshot.delegation.enabled, false);
+  assert.equal(typeof snapshot.delegation.registered, 'boolean');
+});
+
+test('the scope is read through ctx.get when the host exposes it', () => {
+  const runtime = runtimeOf();
+  const agent = { id: 'live-agent' } as never;
+  const services = {
+    agents: {
+      list: () => [agent],
+      roots: () => {
+        throw new Error('roots must not be consulted while a live agent exists');
+      }
+    }
+  };
+  // A cordis-like context whose `agents` property would throw: only `get` may
+  // be used, so a working read here proves the reflection form is preferred.
+  const context = cordisLikeContext(services);
+  const notes: unknown[] = [];
+  runtime.attachDelegationScope((scope) => {
+    notes.push(scope);
+  });
+
+  panelFacts(runtime, {}, context);
+  assert.deepEqual(notes, [agent], 'the live agent from ctx.get was not used as the delegation scope');
+});
+
+test('the scope falls back to the property read when the context has no get', () => {
+  const runtime = runtimeOf();
+  const agent = { id: 'via-property' } as never;
+  // A plain-object host: no reflection layer, the service on the property path.
+  const context = { agents: { list: () => [agent] } } as unknown as Context;
+  const notes: unknown[] = [];
+  runtime.attachDelegationScope((scope) => {
+    notes.push(scope);
+  });
+
+  panelFacts(runtime, {}, context);
+  assert.deepEqual(notes, [agent], 'the property fallback must still find the registry');
+});
+
+test('the scope falls back to root agents when no live agent exists', () => {
+  const runtime = runtimeOf();
+  const root = { id: 'root-agent' } as never;
+  const context = { agents: { list: () => [], roots: () => [root] } } as unknown as Context;
+  const notes: unknown[] = [];
+  runtime.attachDelegationScope((scope) => {
+    notes.push(scope);
+  });
+
+  panelFacts(runtime, {}, context);
+  assert.deepEqual(notes, [root]);
+});
+
+test('an unreadable registry is reported as no scope, never as a throw', () => {
+  const runtime = runtimeOf();
+  const poisoned = [
+    { agents: { list: () => { throw new Error('registry closing'); } } },
+    { agents: { list: () => [], roots: () => { throw new Error('registry closing'); } } },
+    // A host whose `get` itself throws must not take the panel with it.
+    { get: () => { throw new Error('service tree unavailable'); } }
+  ] as unknown as Context[];
+  for (const context of poisoned) {
+    const notes: unknown[] = [];
+    runtime.attachDelegationScope((scope) => {
+      notes.push(scope);
+    });
+    assert.doesNotThrow(() => panelFacts(runtime, {}, context));
+    assert.deepEqual(notes, [], 'an unreadable registry must not be mistaken for a live scope');
+  }
+
+  // A registry whose callbacks are not functions, and a null service, are both
+  // "no scope" rather than crashes.
+  for (const context of [{ agents: {} }, { agents: null }, { get: () => null }] as unknown as Context[]) {
+    assert.doesNotThrow(() => panelFacts(runtimeOf(), {}, context));
+  }
 });
 
 //#endregion
