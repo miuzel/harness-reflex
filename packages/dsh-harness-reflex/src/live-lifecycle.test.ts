@@ -15,7 +15,7 @@ import { Config, type ReflexConfig } from './config.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import { dispatchAgentRequest, fakeAgent, registerPhysicalAdapter, userMessage, nativeExecutorPlugin, loaderEventReceiver } from './testing.js';
+import { dispatchAgentRequest, fakeAgent, loaderEventReceiver, mountHostServices, nativeExecutorPlugin, registerPhysicalAdapter, userMessage } from './testing.js';
 
 /**
  * Live lifecycle: backend, ledger sink, prune threshold and the virtual-provider
@@ -75,7 +75,7 @@ interface LiveHost {
 async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
   resetLoaderProbe();
   const ctx = new Context();
-  await ctx.plugin(SystemPrompt);
+  await mountHostServices(ctx);
   await ctx.plugin(ToolRuntime);
   // dsh-tools >= 0.2.2 ships no executor; the Host mounts the native one.
   await ctx.plugin(nativeExecutorPlugin);
@@ -326,7 +326,7 @@ test('routing.enabled false withdraws the virtual provider, true restores it, an
 
     const agent = fakeAgent({ id: 'enabled-session', provider: 'reflex', model: 'reflex-1' });
     const request = { provider: 'reflex', model: 'reflex-1' } as const;
-    assert.deepEqual(await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 1, config: request }), {
+    assert.deepEqual(await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 1, selection: request }), {
       provider: 'physical',
       model: 'm'
     });
@@ -336,12 +336,12 @@ test('routing.enabled false withdraws the virtual provider, true restores it, an
       routing: { enabled: false, models: { 'reflex-1': [{ provider: 'physical', model: 'm' }] } }
     });
     assert.equal(providerIds(host.ctx).includes('reflex'), false, 'the provider is withdrawn');
-    const untouched = await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 2, config: request });
+    const untouched = await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 2, selection: request });
     assert.deepEqual(untouched, request, 'a disabled route does not rewrite the request');
 
     host.commit(authored);
     assert.equal(providerIds(host.ctx).includes('reflex'), true, 'the provider is registered again');
-    assert.deepEqual(await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 3, config: request }), {
+    assert.deepEqual(await dispatchAgentRequest(host.ctx, agent, { task: 'route', turn: 3, selection: request }), {
       provider: 'physical',
       model: 'm'
     });
@@ -384,7 +384,7 @@ test('renaming the virtual provider unregisters the old name and leaves exactly 
 
     const agent = fakeAgent({ id: 'rename-session', provider: 'rx', model: 'reflex-1' });
     assert.deepEqual(
-      await dispatchAgentRequest(host.ctx, agent, { task: 'route on the new name', turn: 1, config: { provider: 'rx', model: 'reflex-1' } }),
+      await dispatchAgentRequest(host.ctx, agent, { task: 'route on the new name', turn: 1, selection: { provider: 'rx', model: 'reflex-1' } }),
       { provider: 'physical', model: 'm' }
     );
 
@@ -445,7 +445,7 @@ test('a rename is consistent across activations sharing the route and the owner 
     assert.deepEqual(providerIds(host.ctx).filter((id) => id === 'reflex' || id === 'rx'), ['rx']);
     const agent = fakeAgent({ id: 'shared-rename', provider: 'rx', model: 'reflex-1' });
     assert.deepEqual(
-      await dispatchAgentRequest(host.ctx, agent, { task: 'route after rename', turn: 1, config: { provider: 'rx', model: 'reflex-1' } }),
+      await dispatchAgentRequest(host.ctx, agent, { task: 'route after rename', turn: 1, selection: { provider: 'rx', model: 'reflex-1' } }),
       { provider: 'physical', model: 'm' }
     );
 
@@ -486,7 +486,7 @@ test('a maxTaskChars save changes the task text captured on the very next step',
     await dispatchAgentRequest(host.ctx, agent, {
       task: firstTask,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-1' }
+      selection: { provider: 'reflex', model: 'reflex-1' }
     });
     assert.equal(goals[0]?.length, 400, 'the 400-char budget truncates the captured task');
 
@@ -500,7 +500,7 @@ test('a maxTaskChars save changes the task text captured on the very next step',
     await dispatchAgentRequest(host.ctx, agent, {
       task: secondTask,
       turn: 2,
-      config: { provider: 'reflex', model: 'reflex-1' }
+      selection: { provider: 'reflex', model: 'reflex-1' }
     });
     assert.equal(goals[1], secondTask, 'the next step captures up to the new 4000-char budget');
 

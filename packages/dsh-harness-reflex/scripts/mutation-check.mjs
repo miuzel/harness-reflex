@@ -39,7 +39,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * size, so losing any test at all fails the negative control before it judges a
  * single fault.
  */
-const EXPECTED_TESTS = 535;
+const EXPECTED_TESTS = 577;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -158,15 +158,19 @@ const MUTATIONS = [
     name: 'route-foreign-provider',
     area: 'virtual route ownership',
     file: 'src/routing.ts',
-    from: 'if (routes && router.owns(config.provider)) {',
-    to: "if (config.provider !== '') {"
+    // g-056: the gate is now `onVirtualRoute`, computed once per step from the
+    // caller's intent and the step's own selection.
+    from: "  const onVirtualRoute = routes && ((intent !== undefined && router.owns(intent)) || stepOwnsRoute);",
+    to: "  const onVirtualRoute = routes;"
   },
   {
     name: 'route-cancelled-request',
     area: 'cancellation is respected',
     file: 'src/routing.ts',
-    from: 'if (!rawConfig || payload.signal?.aborted) return rawConfig;',
-    to: 'if (!rawConfig) return rawConfig;'
+    // g-056: the request waterfall no longer decides anything, so the guard that
+    // matters is the one in front of the step's decision.
+    from: '  if (signal?.aborted) return undefined;',
+    to: '  if (false) return undefined;'
   },
   {
     name: 'unlabelled-route-audit',
@@ -207,9 +211,8 @@ const MUTATIONS = [
     name: 'rewrite-drops-decision',
     area: 'the marker becomes the decided effort',
     file: 'src/routing.ts',
-    from:
-      '      const effort = resolution.changed ? resolution.effort : requested;',
-    to: '      const effort = requested;'
+    from: '  const decidedEffort = resolution.changed ? resolution.effort : requested;',
+    to: '  const decidedEffort = requested;'
   },
   {
     name: 'effort-overrides-caller-pin',
@@ -353,15 +356,15 @@ const MUTATIONS = [
     name: 'routing-forgets-routed-model',
     area: 'session stickiness is remembered across turns',
     file: 'src/routing.ts',
-    from: '      rememberTarget(facts, payload.agent, decision.target);',
-    to: '      if (false) rememberTarget(facts, payload.agent, decision.target);'
+    from: '    rememberTarget(facts, agent, decision.target);',
+    to: '    if (false) rememberTarget(facts, agent, decision.target);'
   },
   {
     name: 'routing-reports-no-context',
     area: 'the context a session accumulated reaches the decision',
     file: 'src/routing.ts',
-    from: '          contextTokens: estimateContextTokens(remembered?.contextChars ?? 0)',
-    to: '          contextTokens: 0'
+    from: '      contextTokens: estimateContextTokens(remembered?.contextChars ?? 0)',
+    to: '      contextTokens: 0'
   },
   {
     name: 'panel-drops-switched-flag',
@@ -836,6 +839,83 @@ const MUTATIONS = [
     file: 'src/routing.ts',
     from: '    if (router.virtualProvider !== policy.virtualProvider) renameRoute(policy.virtualProvider);',
     to: '    if (false) renameRoute(policy.virtualProvider);'
+  },
+  // ── g-056: the decision lives in `agent/pre-step` ──────────────────────────
+  {
+    // The whole point of the move: a selection the step fixed must be the
+    // selection the step is requested with. Dropping the write leaves the marker
+    // in place, so the guards compare two different values.
+    name: 'pre-step-drops-selection-write',
+    area: 'the step decision reaches payload.modelSelection',
+    file: 'src/routing.ts',
+    from: '        applyPlan(selection, settled);',
+    to: '        void [selection, settled];'
+  },
+  {
+    // `next()` inside the try swallows a rejection: a refused step would be
+    // admitted instead of failing.
+    name: 'next-rejection-swallowed',
+    area: 'a rejected step stays rejected',
+    file: 'src/routing.ts',
+    from: [
+      '      // Outside the try: a rejection here must reach the loop unchanged.',
+      '      const decision = await next();'
+    ].join('\n'),
+    to: [
+      '      const decision = await next().catch(() => ({ kind: "enter" as const, messages: [] }));'
+    ].join('\n')
+  },
+  {
+    // A decision that never returns must not hold the step open.
+    name: 'step-decision-unguarded',
+    area: 'a hung decision cannot stall a turn',
+    file: 'src/routing.ts',
+    from: '        const settled = await withBudget(attempt, budget);',
+    to: '        const settled = await attempt;'
+  },
+  {
+    // Freezing must degrade, not throw out of the listener.
+    name: 'pre-step-write-unguarded',
+    area: 'a read-only selection degrades instead of failing the step',
+    file: 'src/routing.ts',
+    from: '        applyPlan(selection, settled);',
+    to: '        (selection as { provider: string }).provider = settled.provider ?? selection.provider;'
+  },
+  {
+    // Later steps of one turn must replay the turn's plan, or System 1 runs
+    // once per tool call.
+    name: 'followup-step-redispatches',
+    area: 'one decision per turn',
+    file: 'src/routing.ts',
+    from: '  if (remembered?.decided && isFollowupStep && sameVirtualModel && onVirtualRoute) {',
+    to: '  if (remembered?.decided !== undefined && isFollowupStep && !sameVirtualModel) {'
+  },
+  {
+    // The non-adaptive alignment moved here too; without the write it is lost.
+    name: 'alignment-not-written',
+    area: 'a concrete level is aligned before the request',
+    file: 'src/routing.ts',
+    from: '    return settle(aligned, aligned !== requested);',
+    to: '    return settle(requested, false);'
+  },
+  {
+    // The ledger/status must be fed from the decision site, not the request.
+    name: 'pre-step-audit-silenced',
+    area: 'the decision is audited where it is made',
+    file: 'src/routing.ts',
+    from: '  if (resolution.status) reportEffort(ctx, agent, resolution.status);',
+    to: '  if (resolution.status && resolution.status.latencyMs < 0) reportEffort(ctx, agent, resolution.status);'
+  },
+  {
+    // The intent probe is what keeps routing alive after the first step wrote a
+    // physical provider into the selection.
+    // The caller's durable intent is what keeps a later turn on the virtual
+    // route once a step's selection has been rewritten to the physical target.
+    name: 'routing-stops-after-first-step',
+    area: 'routing survives its own write',
+    file: 'src/routing.ts',
+    from: '  const config = resolveAdaptiveIntent(ctx, agent, base, (provider) => router.owns(provider));',
+    to: '  const config: LlmCallConfig = base;'
   }
 ];
 

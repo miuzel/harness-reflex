@@ -13,16 +13,7 @@ import { Config, type ReflexConfig } from './config.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import {
-  createToolContext,
-  dispatchAgentRequest,
-  fakeAgent,
-  nativeExecutorPlugin,
-  registerPhysicalAdapter,
-  userMessage,
-  type FakePhysicalAdapter,
-  loaderEventReceiver
-} from './testing.js';
+import { createToolContext, dispatchAgentRequest, fakeAgent, loaderEventReceiver, mountHostServices, nativeExecutorPlugin, registerPhysicalAdapter, type FakePhysicalAdapter, userMessage } from './testing.js';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 
 /**
@@ -161,7 +152,7 @@ test('the real loader commits a config-only save without remounting and the next
   resetLoaderProbe();
   const ctx = new Context();
   try {
-    await ctx.plugin(SystemPrompt);
+    await mountHostServices(ctx);
     await ctx.plugin(ToolRuntime);
     // dsh-tools >= 0.2.2 ships no executor; the Host mounts the native one.
     await ctx.plugin(nativeExecutorPlugin);
@@ -191,7 +182,7 @@ test('the real loader commits a config-only save without remounting and the next
     const runtime = loaderProbe().runtime!;
     const agent = fakeAgent({ id: 'live-session', provider: 'reflex', model: 'reflex-1' });
     const request = { provider: 'reflex', model: 'reflex-1' };
-    const before = await dispatchAgentRequest(ctx, agent, { task: 'route this request', turn: 1, config: request });
+    const before = await dispatchAgentRequest(ctx, agent, { task: 'route this request', turn: 1, selection: request });
     assert.deepEqual([before.provider, before.model], ['physical-old', 'old-model']);
     await virtualStream(ctx, 'reflex-1');
     assert.equal(oldAdapter.calls.length, 1, 'the old member serves the request');
@@ -209,7 +200,7 @@ test('the real loader commits a config-only save without remounting and the next
     assert.deepEqual(transitions, [], 'the plugin fiber never restarts');
     assert.equal(loaderProbe().volatileEvents, 1, 'the activation receives the commit event');
 
-    const after = await dispatchAgentRequest(ctx, agent, { task: 'route this request', turn: 2, config: request });
+    const after = await dispatchAgentRequest(ctx, agent, { task: 'route this request', turn: 2, selection: request });
     assert.deepEqual([after.provider, after.model], ['physical-new', 'new-model'], 'the next request routes on the new member');
 
     await virtualStream(ctx, 'reflex-1');
@@ -235,7 +226,7 @@ test('a committed fallback change is the fallback the very next request degrades
     const agent = fakeAgent({ id: 'fallback-session', provider: 'reflex', model: 'reflex-dead' });
 
     const request = { provider: 'reflex', model: 'reflex-dead' };
-    const before = await dispatchAgentRequest(host.ctx, agent, { task: 'fall back', turn: 1, config: request });
+    const before = await dispatchAgentRequest(host.ctx, agent, { task: 'fall back', turn: 1, selection: request });
     assert.deepEqual([before.provider, before.model], ['backup-old', 'old-model']);
 
     host.commit({
@@ -246,7 +237,7 @@ test('a committed fallback change is the fallback the very next request degrades
       }
     });
 
-    const after = await dispatchAgentRequest(host.ctx, agent, { task: 'fall back', turn: 2, config: request });
+    const after = await dispatchAgentRequest(host.ctx, agent, { task: 'fall back', turn: 2, selection: request });
     assert.deepEqual([after.provider, after.model], ['backup-new', 'new-model'], 'the old fallback is not used again');
     const degraded = host.runtime.ledger
       .getEntries()
@@ -347,7 +338,7 @@ test('a reload that creates the new activation before releasing the old one stil
     assert.equal(providerIds(ctx).filter((id) => id === 'reflex').length, 1, 'one process-wide route');
     const agent = fakeAgent({ id: 'reload-session', provider: 'reflex', model: 'reflex-1' });
     const request = { provider: 'reflex', model: 'reflex-1' };
-    assert.deepEqual(await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 1, config: request }), {
+    assert.deepEqual(await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 1, selection: request }), {
       provider: 'physical-b',
       model: 'b-model'
     }, 'the newest activation drives its own pools');
@@ -357,7 +348,7 @@ test('a reload that creates the new activation before releasing the old one stil
 
     await first.dispose();
     assert.equal(providerIds(ctx).filter((id) => id === 'reflex').length, 1, 'releasing the old owner keeps the shared route');
-    assert.deepEqual(await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 2, config: request }), {
+    assert.deepEqual(await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 2, selection: request }), {
       provider: 'physical-b',
       model: 'b-model'
     });
@@ -373,7 +364,7 @@ test('a reload that creates the new activation before releasing the old one stil
     for (let reload = 0; reload < 3; reload++) {
       const fiber = await load(configB);
       assert.equal(providerIds(ctx).filter((id) => id === 'reflex').length, 1, `reload ${reload}: one provider route`);
-      const dispatched = await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 3 + reload, config: { provider: 'reflex', model: 'reflex-1' } });
+      const dispatched = await dispatchAgentRequest(ctx, agent, { task: 'route', turn: 3 + reload, selection: { provider: 'reflex', model: 'reflex-1' } });
       assert.deepEqual([dispatched.provider, dispatched.model], ['physical-b', 'b-model'], `reload ${reload}: routes normally`);
       await fiber.dispose();
       assert.equal(providerIds(ctx).includes('reflex'), false, `reload ${reload}: route released`);

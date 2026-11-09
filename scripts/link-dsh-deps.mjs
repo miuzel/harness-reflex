@@ -45,6 +45,10 @@ const HOST_MODULES = [
   // scoped registry and a preset-hosted tool is only visible through one.
   '@deepseek-ai/dsh-scope',
   '@deepseek-ai/dsh-session',
+  // The agent runtime injects `sessionProjections` as a required service, so the
+  // real Host always carries it; the test harness mounts it to keep the
+  // selection projection the routing layer reads identical to production.
+  '@deepseek-ai/dsh-session-projection',
   // dsh-tools ≥ 0.2.2 ships no executor of its own: the Host mounts the native
   // one, and the test harness mounts it too so `tools.execute()` can dispatch.
   '@deepseek-ai/dsh-tool-executor-native',

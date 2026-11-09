@@ -33,7 +33,7 @@ test('routing after host model selection and after reload applies final physical
   ctx.on('reflex/effort', () => { events++; });
   try {
     for (let turn = 1; turn <= 2; turn++) {
-      const config = await dispatchAgentRequest(ctx, agent, { turn, task: 'design migration protocol', config: selection });
+      const config = await dispatchAgentRequest(ctx, agent, { turn, task: 'design migration protocol', selection: selection });
       assert.equal(config.provider, 'physical');
       assert.equal(config.model, 'sol');
       assert.notEqual(config.reasoningEffort, 'reflex');
@@ -42,14 +42,19 @@ test('routing after host model selection and after reload applies final physical
       installation = installModelRouting(ctx, { llm: ctx.llm, router: runtime.modelRouter, effort: runtime.effort, maxTaskChars: 10000 });
     }
     assert.equal(effortRecordsOf(session.ownEvents()).length, 2);
+    // The user switches the selector to a physical model: DSH records that as a
+    // `model/selection`, which is what retires the virtual intent left pending by
+    // the turns above. Without the record the projection still holds `reflex`
+    // and (correctly) keeps preferring it.
     selection = { provider: 'physical', model: 'sol', reasoningEffort: 'medium' as any };
+    session.append('model/selection', selection as never);
     const before = runtime.ledger.getEntries().length;
-    const pinned = await dispatchAgentRequest(ctx, agent, { turn: 3, task: 'design migration protocol', config: selection });
+    const pinned = await dispatchAgentRequest(ctx, agent, { turn: 3, task: 'design migration protocol', selection: selection });
     assert.deepEqual(pinned, selection);
     assert.equal(events, 2, 'fixed physical effort emits no current Reflex decision');
     assert.equal(runtime.ledger.getEntries().length, before, 'fixed physical effort does not run either decision');
     selection = { ...selection, reasoningEffort: 'reflex' as any };
-    await dispatchAgentRequest(ctx, agent, { turn: 4, task: 'design migration protocol', config: selection });
+    await dispatchAgentRequest(ctx, agent, { turn: 4, task: 'design migration protocol', selection: selection });
     assert.equal(events, 3, 'explicit adaptive effort on physical route retains the feature');
   } finally {
     installation.dispose();

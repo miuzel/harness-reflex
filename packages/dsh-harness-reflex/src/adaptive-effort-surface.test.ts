@@ -72,7 +72,15 @@ function select(
   session: Session,
   data: { provider: string; model: string; reasoningEffort?: string }
 ): void {
-  host.ctx.emit('session/event', session, { type: 'model/selection', data } as unknown as SessionEvent);
+  // Recorded on the session itself, so the event carries the seq the projector
+  // and the surface both read — a bare `emit` would have none. The key is
+  // dropped rather than set to `undefined`: the log only accepts JSON values.
+  const payload = {
+    provider: data.provider,
+    model: data.model,
+    ...(data.reasoningEffort === undefined ? {} : { reasoningEffort: data.reasoningEffort })
+  };
+  session.append('model/selection', payload as never);
 }
 
 /** A real session, so the typed `session/event` contract is satisfied. */

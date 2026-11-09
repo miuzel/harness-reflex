@@ -250,22 +250,22 @@ test('a subagent inherits the virtual route and is routed on its own task', asyn
       task: TASK_CHEAP,
       turn: 1,
       step: 1,
-      config: { provider: 'reflex', model: 'reflex-fast' }
+      selection: { provider: 'reflex', model: 'reflex-fast' }
     });
     const childConfig = await dispatchAgentRequest(host.ctx, child, { task: TASK_DEEP, turn: 1, step: 1 });
-    const childAgain = await dispatchAgentRequest(host.ctx, child, {
-      task: TASK_CHEAP,
-      turn: 1,
-      step: 2,
-      config: { provider: 'reflex', model: 'reflex-fast' }
-    });
+    // A new turn is a new decision (the reuse cache is scoped to one turn): the
+    // child's task changed, so System 1 is asked again rather than replaying
+    // turn one's answer.
+    const childAgain = await dispatchAgentRequest(host.ctx, child, { task: TASK_CHEAP, turn: 2, step: 1 });
 
     assert.deepEqual(mainConfig, { provider: 'local', model: 'small' }, 'the parent routes on its own task');
     assert.deepEqual(childConfig, { provider: 'deepseek', model: 'reasoner' }, 'the child routes on its task');
-    assert.deepEqual(childAgain, { provider: 'local', model: 'small' }, 'the child re-routes when its task changes');
+    // Same pool, same tie: the cache-affinity layer keeps the physical model the
+    // turn one decision already warmed rather than hopping on a tie.
+    assert.deepEqual(childAgain, { provider: 'deepseek', model: 'reasoner' }, 'the new turn is decided again');
 
     const entries = host.runtime.ledger.getEntries().filter((entry) => entry.type === 'model-route');
-    assert.equal(entries.length, 3);
+    assert.equal(entries.length, 3, 'each turn is decided exactly once');
     assert.deepEqual(
       entries.map((entry) => entry.details?.role),
       ['main', 'subagent', 'subagent']
@@ -313,12 +313,15 @@ test('non-virtual requests pass through the waterfall untouched', async () => {
   const host = await createReflexHost({ backend: 'mock', routing: ROUTING });
   try {
     const agent = fakeAgent({ id: 'session-main', provider: 'deepseek', model: 'reasoner' });
+    // A request control (`temperature`) is not part of the selection: the loop
+    // drops it from the seed config and only `agent/request` may re-introduce it,
+    // which is exactly what a routing-only listener must not do.
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'deepseek', model: 'reasoner', temperature: 0.2 }
+      selection: { provider: 'deepseek', model: 'reasoner' }
     });
 
-    assert.deepEqual(config, { provider: 'deepseek', model: 'reasoner', temperature: 0.2 });
+    assert.deepEqual(config, { provider: 'deepseek', model: 'reasoner' });
     assert.equal(
       host.runtime.ledger.getEntries().filter((entry) => entry.type === 'model-route').length,
       0,
@@ -351,21 +354,21 @@ test('a reasoning effort the physical target cannot honor is projected, not drop
 
     const dropped = await dispatchAgentRequest(host.ctx, fakeAgent({ id: 'a-plain' }), {
       task: 'nothing matches here',
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
     });
     assert.equal(dropped.provider, 'plain');
     assert.equal(dropped.reasoningEffort, undefined, 'a target with no reasoning vocabulary clears the effort');
 
     const kept = await dispatchAgentRequest(host.ctx, fakeAgent({ id: 'a-tuned' }), {
       task: 'effortful tuned',
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
     });
     assert.equal(kept.provider, 'tuned');
     assert.equal(kept.reasoningEffort, 'high', 'a supported effort survives routing');
 
     const projected = await dispatchAgentRequest(host.ctx, fakeAgent({ id: 'a-tuned-2' }), {
       task: 'effortful tuned',
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('medium') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('medium') }
     });
     assert.equal(projected.reasoningEffort, 'low', 'an unsupported effort falls back to the declared default');
   } finally {
@@ -682,10 +685,13 @@ test('a session that never routed carries no affinity into its next pool', async
     const fast = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_CHEAP,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-fast' }
+      selection: { provider: 'reflex', model: 'reflex-fast' }
     });
     assert.deepEqual([fast.provider, fast.model], ['local', 'small']);
 
+    // The caller switches back to the auto pool the way a user does it: DSH
+    // records a `model/selection`, which supersedes the pending `reflex-fast`.
+    agent.session.append('model/selection', { provider: 'reflex', model: 'reflex-auto' });
     const auto = await dispatchAgentRequest(host.ctx, agent, { task: 'thanks', turn: 2 });
     assert.deepEqual([auto.provider, auto.model], ['deepseek', 'chat'], 'the new pool decides on its own');
 

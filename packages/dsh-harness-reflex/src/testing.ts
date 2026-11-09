@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis';
-import { agentEvents, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent';
+import { agentEvents, modelSelectionProjectionDefinition, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent';
 import { createScope, type Scope } from '@deepseek-ai/dsh-scope';
 import LlmRuntime, {
   LlmAdapter,
@@ -15,6 +15,8 @@ import LlmRuntime, {
 import ToolRuntime, { defineTool, type ToolBatchResult, type ToolDefinition, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import CommandRuntime from '@deepseek-ai/dsh-commands';
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection';
+import { Session, type SessionId } from '@deepseek-ai/dsh-session';
 import * as nativeExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import { apply, applyReflex, Config, inject, name as pluginName } from './index.js';
 import type { ReflexRuntime } from './bridge.js';
@@ -179,13 +181,41 @@ export async function createToolContext(options: { record?: Array<Record<string,
 }
 
 /**
+ * Mount the Host services every harness needs, including the two the plugin
+ * reads a session selection from.
+ *
+ * The agent runtime injects `sessionProjections` as a *required* service, and it
+ * registers `modelSelectionProjectionDefinition` before it drives any step. A
+ * harness without either is not a quieter Host, it is a different one:
+ * `resolveAdaptiveIntent` would fall back to "no projection", `stateOf` would
+ * answer `undefined`, and a selection read that is wrong only in production
+ * would look green here. Mounting both keeps the decision path identical.
+ *
+ * @param ctx - the context to mount onto.
+ */
+export async function mountHostServices(ctx: Context): Promise<void> {
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(SessionProjectionRegistry);
+  await ctx.plugin({
+    name: 'test-model-selection-projection',
+    inject: ['sessionProjections'],
+    apply: (scope: Context) => {
+      const service = scope as unknown as {
+        sessionProjections: { register(definition: unknown): Promise<unknown> };
+      };
+      void service.sessionProjections.register(modelSelectionProjectionDefinition);
+    }
+  });
+}
+
+/**
  * Boot Cordis with every service the plugin depends on, but **no** delegation
  * tool — the one deployment shape in which `reflex_delegate` must not register.
  * @returns the root context.
  */
 export async function createToolContextWithoutDelegation(): Promise<Context> {
   const ctx = new Context();
-  await ctx.plugin(SystemPrompt);
+  await mountHostServices(ctx);
   await ctx.plugin(ToolRuntime);
   // dsh-tools >= 0.2.2 owns dispatch but ships no executor: execution moved
   // into a separately mounted executor plugin, and `tools.execute()` throws
@@ -534,25 +564,64 @@ export interface FakeAgentSeed {
 }
 
 /**
- * Build the minimal agent shape the routing listeners read.
+ * Build the agent shape the routing listeners read.
+ *
+ * The session is a real {@link Session}, not a `{ header }` stand-in: the
+ * selection projection folds a session's committed events (`snapshotEvents`),
+ * and `resolveAdaptiveIntent` reads it. A plain object would make that read
+ * throw and silently downgrade every test to "no projection" — i.e. the harness
+ * would not reproduce the Host at all.
+ *
  * @param seed - identity and lineage facts.
  * @returns an object usable as the `agent` payload field.
  */
 export function fakeAgent(seed: FakeAgentSeed): Agent {
+  const session = Session.create(seed.id as unknown as SessionId, undefined, {
+    version: 4,
+    id: seed.id,
+    createdAt: 0,
+    isSeeded: false,
+    // Absent, not `undefined`: the header must survive a JSON round trip.
+    ...(seed.origin === undefined ? {} : { origin: seed.origin }),
+    ...(seed.delegationDepth === undefined ? {} : { delegationDepth: seed.delegationDepth })
+  } as unknown as Parameters<typeof Session.create>[2]);
   return {
     id: seed.id,
     options: { provider: seed.provider, model: seed.model },
-    session: { header: { origin: seed.origin, delegationDepth: seed.delegationDepth } }
+    session
   } as unknown as Agent;
 }
 
 /**
+ * Reproduce `dsh-agent-loop`'s canonical request config for one step.
+ *
+ * The loop deep-freezes `structuredClone({ ...selection })` and hands it to the
+ * `agent/request` waterfall. Reproducing the freeze matters: a listener that
+ * still rewrote a field there would throw instead of quietly disagreeing with
+ * the guards below.
+ * @param selection - the step's fixed selection.
+ * @returns the frozen config the loop would propose.
+ */
+function seedRequestConfig(selection: Readonly<ModelSelection>): LlmCallConfig {
+  return Object.freeze(structuredClone({ ...selection })) as unknown as LlmCallConfig;
+}
+
+/**
  * Dispatch one `agent/pre-step` and then one `agent/request` for an agent, the
- * way the loop does, and return the configuration the waterfall produced.
+ * way `dsh-agent-loop` does, and return the configuration the loop would use.
+ *
+ * The order is the loop's own (g-056), not a convenience: the step's selection
+ * is captured first (`this.model.current()`), passed through the `agent/pre-step`
+ * waterfall, and only then compared against what `agent/request` proposes. The
+ * two guards are the loop's two guards, message for message, so a decision that
+ * wrote the wrong place fails here instead of in a real session.
+ *
  * @param ctx - context the plugin was loaded on.
  * @param agent - the requesting agent.
- * @param options - step identity and the config the loop would use.
+ * @param options - step identity and the selection the loop fixes for the step.
  * @returns the rewritten call configuration.
+ * @throws Error when the waterfall proposed a provider, model or effort the step
+ *   preparation had already fixed — exactly what the Host throws.
  */
 export async function dispatchAgentRequest(
   ctx: Context,
@@ -561,29 +630,85 @@ export async function dispatchAgentRequest(
     turn?: number;
     step?: number;
     task?: string;
-    config?: LlmCallConfig;
+    /**
+     * The selection the loop fixed for this step (`this.model.current()`).
+     *
+     * Defaults to the agent's own composition, which is what the earlier
+     * harness called `config`; the field is named for the *loop's* concept so a
+     * test cannot mistake it for the request config, which is derived from it.
+     */
+    selection?: Readonly<ModelSelection>;
     /** Cancellation state the loop would carry into the request. */
     signal?: AbortSignal;
   } = {}
 ): Promise<LlmCallConfig> {
   const events = agentEvents(ctx, agent);
-  const fallback: LlmCallConfig = options.config ?? { provider: 'reflex', model: 'reflex-auto' };
+  // Captured before the waterfall, exactly like `preStep`'s `const selection`.
+  // A fresh object per step, exactly like `AgentModel.current()`, which returns
+  // `{ ...recorded }` / a new record rather than the stored one. Without the
+  // copy the plugin's write would land in the caller's fixture and every step
+  // would silently start from the previous step's routed selection.
+  const selection: Readonly<ModelSelection> = { ...(options.selection ?? stepSelection(agent)) };
   const signal = options.signal ?? new AbortController().signal;
 
   const messages = options.task !== undefined ? [userMessage(options.task)] : [];
-  // The step's selection is the config the loop is about to request with, which
-  // is what the Host's model-selection listener compares against its header.
   await events.waterfall(
     'agent/pre-step',
-    preStepPayload(agent, options.turn ?? 1, options.step ?? 1, messages, signal, fallback),
+    preStepPayload(agent, options.turn ?? 1, options.step ?? 1, messages, signal, selection),
     async () => ({ kind: 'enter' as const, messages })
   );
 
-  return events.waterfall(
+  const proposed = await events.waterfall(
     'agent/request',
     { turn: options.turn ?? 1, step: options.step ?? 1, signal },
-    async () => fallback
+    async () => seedRequestConfig(selection)
   );
+
+  if (proposed.provider !== selection.provider || proposed.model !== selection.model) {
+    throw new Error(
+      `agent "${agent.id}": agent/request proposed "${proposed.provider}/${proposed.model}" after step preparation fixed "${selection.provider}/${selection.model}"; use agent.model.select() before step preparation`
+    );
+  }
+  if (proposed.reasoningEffort !== selection.reasoningEffort) {
+    throw new Error(
+      `agent "${agent.id}": agent/request proposed reasoning effort "${String(proposed.reasoningEffort ?? 'adapter default')}" after step preparation fixed "${String(selection.reasoningEffort ?? 'adapter default')}"; use agent.model.select() before step preparation`
+    );
+  }
+  // The loop records the admitted request, which retires a matching `pending`
+  // selection into `lastUsed`. It happens *after* the guards, exactly as the
+  // loop does (it logs the header when it builds the request).
+  recordRequestHeader(agent, proposed);
+  return proposed;
+}
+
+/**
+ * Commit the `request/header` the loop logs once a request is admitted.
+ *
+ * The loop records the config it really dispatched, and the selection projection
+ * folds that event: a recorded selection equal to the header retires `pending`
+ * into `lastUsed`. Skipping it (as an earlier harness did) is not neutral — it
+ * leaves `pending` set forever, so `resolveAdaptiveIntent` would read a stale
+ * intent on every later step. Sessions without `append` are left alone.
+ *
+ * @param agent - the agent whose request was admitted.
+ * @param config - the configuration the loop would have dispatched.
+ */
+function recordRequestHeader(agent: Agent, config: LlmCallConfig): void {
+  const session = (agent as { session?: { append?: unknown } }).session;
+  if (!session || typeof session.append !== 'function') return;
+  const data = {
+    provider: config.provider,
+    model: config.model,
+    ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort })
+  };
+  try {
+    (session.append as (type: string, value: unknown) => unknown).call(session, 'request/header', {
+      header: { config: data },
+      reason: 'initial'
+    });
+  } catch {
+    // A synthetic session without a log simply keeps no header history.
+  }
 }
 
 /**

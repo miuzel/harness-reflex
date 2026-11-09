@@ -14,37 +14,42 @@ import { ReflexVirtualAdapter } from './virtual-adapter.js';
  * Install the virtual provider route and the interception layers that route its
  * requests through System 1.
  *
- * Layer 1 — `agent/request` (waterfall): the loop hands out the *frozen call
- * configuration* it would use and accepts a replacement. This is the only
- * place a loop request can be re-routed, because the request object the loop
- * later builds is deep-frozen and marked as loop-owned. Rewriting the config
- * here means the logged header, the prepared call and the dispatched request
- * all name the physical route, so the routing decision is auditable from the
- * session log alone.
+ * Layer 1 — `agent/pre-step` (waterfall): the loop fixes the step's route and
+ * reasoning effort from `this.model.current()` *before* it dispatches anything,
+ * and `agent/request` may no longer propose a different one (DSH 0.2.2 rejects
+ * it: "a replacement may adjust controls but must keep the provider, model, and
+ * reasoning effort selection"). So the decision is taken here instead, and
+ * written into `payload.modelSelection` — the same object `dsh-agent-loop`
+ * keeps as its local `selection`, which is what `prepareRequest` compares the
+ * request against. See {@link installModelRouting} for why that write is safe.
  *
- * Layer 2 — the same waterfall decides the turn's reasoning effort. A request
+ * Layer 2 — the same decision chooses the turn's reasoning effort. A selection
  * carrying the `reflex`/`auto` marker (or a deployment that configured the
  * marker) has no physical effort id yet; {@link EffortInterceptor} turns it into
  * one, projects it onto the routed model's vocabulary, audits it in the session
- * log, and publishes it to the status feed. A request that named a concrete
- * effort is passed through untouched.
+ * log, and publishes it to the status feed. A selection that named a concrete
+ * effort is only re-worded to fit the routed model — never adapted.
  *
  * Layer 3 — the virtual adapter's `stream()`: anything that does not pass
  * through layer 1 (hand-built one-shot calls, `prepareCall()` consumers) is
  * routed at dispatch time and delegated to the physical adapter through
  * `ctx.llm.stream`.
  *
- * The task text each decision reasons about comes from `agent/pre-step`, which
- * carries the user messages admitted to the step: a subagent's first step
- * carries its delegated task, so a delegated agent routes on its *own* task
- * rather than inheriting its parent's decision. That is also the input the
- * effort decision reads, because the request waterfall only sees a frozen config.
+ * The task text each decision reasons about is the step's own user messages: a
+ * subagent's first step carries its delegated task, so a delegated agent routes
+ * on *its own* task rather than inheriting its parent's decision.
  *
- * The same listener accumulates each agent's *session size* (characters of step
- * input seen so far), and every routed request remembers the physical model it
+ * The listener also accumulates each agent's *session size* (characters of step
+ * input seen so far), and every routed step remembers the physical model it
  * landed on. Both ride into the next decision as cache-affinity facts, so a
  * session that already holds a warm prompt prefix is not moved onto another
  * physical model for a marginal score difference.
+ *
+ * `agent/request` is still listened to, but strictly read-only: it awaits the
+ * rest of the waterfall and hands the configuration back untouched. It is kept
+ * because the listener is the only place that can *observe* the configuration
+ * the loop really uses, and a future audit may want it — it must never write a
+ * field again.
  *
  * @module dsh-reflex/routing
  */
@@ -156,9 +161,9 @@ const NOOP = (): void => {};
  * entirely once the old activation disposes.
  *
  * There is deliberately one shared {@link ReflexVirtualAdapter} whose router all
- * owners route through: two `agent/request` listeners wrapping the same
- * waterfall cannot hold two different policies, because the outer listener sees
- * an already-rewritten config and must agree with the inner one.
+ * owners route through: two `agent/pre-step` listeners each deciding a step's
+ * route cannot hold two different policies, because the outer one runs after the
+ * inner one already wrote its decision into the same selection object.
  */
 interface OwnedRoute {
   /** Provider route this entry is registered under. */
@@ -249,6 +254,14 @@ interface TurnDecision {
   turn: number;
   provider: string;
   model: string;
+  /**
+   * Virtual model the decision was taken for.
+   *
+   * A later step of the same turn reuses the decision only when it names the
+   * same virtual model: a caller that selects a different model mid-turn asked
+   * for a different pool, and replaying the old target would ignore that.
+   */
+  virtualModel?: string;
   /** Effort the rewritten request carried; `undefined` when the key was cleared. */
   effort?: string;
   /** The published status of that decision. */
@@ -496,8 +509,8 @@ export function installAdaptiveEffortSurface(
     }
     // Last gate before dispatch: the marker is an intent, never an effort any
     // physical adapter can accept, so it is resolved here for the paths that
-    // bypass the `agent/request` interception (hand-built one-shot calls,
-    // `prepareCall` consumers). With the switch off there is no policy to
+    // never went through the `agent/pre-step` decision (hand-built one-shot
+    // calls, `prepareCall` consumers). With the switch off there is no policy to
     // resolve it *to*, so it is deleted and the provider default applies.
     if (!policy.enabled) {
       const cleared = { ...config } as LlmCallConfig;
@@ -616,6 +629,408 @@ export function filterVirtualSwitchNotices<T extends { messages?: readonly unkno
   const kept = messages.filter((message) => !isVirtualModelSwitchNotice(message, virtualProvider, virtualModels));
   if (kept.length === messages.length) return decision;
   return { ...decision, messages: kept };
+}
+
+/**
+ * How long one step's route/effort decision may take before the step is
+ * admitted with its selection untouched.
+ *
+ * The decision costs a System 1 round trip (routing) plus, adaptively, a second
+ * one (effort). Real backends answer in tens of milliseconds; this bound only
+ * exists so a hung or unreachable backend cannot stall a turn before its first
+ * token. Timing out is a *degradation*, not an error: the step runs on the
+ * adapter's own defaults, exactly like a deployment that never configured the
+ * layer, and the next step tries again.
+ */
+const STEP_DECISION_TIMEOUT_MS = 4000;
+
+/**
+ * The budget one step's decision actually gets.
+ *
+ * `REFLEX_STEP_DECISION_TIMEOUT_MS` overrides the default so a test can prove
+ * the timeout path without waiting four seconds; an unset or unparseable value
+ * keeps {@link STEP_DECISION_TIMEOUT_MS}.
+ *
+ * @returns the budget in milliseconds.
+ */
+function stepDecisionBudget(): number {
+  const raw = Number(process.env.REFLEX_STEP_DECISION_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : STEP_DECISION_TIMEOUT_MS;
+}
+
+/** What {@link planStep} decided for one step. */
+interface StepPlan {
+  /** Physical provider route to write into the step's selection. */
+  provider?: string;
+  /** Physical model id to write into the step's selection. */
+  model?: string;
+  /**
+   * Effort to write into the step's selection.
+   *
+   * An own-property `undefined` is a deliberate *clear* (the decision removed an
+   * effort the selection carried); an absent key means the decision had nothing
+   * to say about the effort, so the selection keeps its own.
+   */
+  reasoningEffort?: string | undefined;
+}
+
+/**
+ * Run a decision but let nothing it does escape an enclosing `try`.
+ *
+ * Everything the decision needs from its payload is read by {@link planStep}
+ * before the first `await`, so the attempt can safely be abandoned: a decision
+ * that loses the timeout race keeps running detached, and a rejection it meets
+ * afterwards lands in a no-op handler instead of becoming an unhandled rejection
+ * that would take the Host down.
+ *
+ * @param run - the decision to start.
+ * @returns a promise that settles exactly once and never rejects.
+ */
+function startDecision(run: () => Promise<StepPlan | undefined>): Promise<StepPlan | undefined> {
+  const attempt = Promise.resolve().then(run);
+  attempt.catch(NOOP);
+  return attempt;
+}
+
+/**
+ * Race one decision against a deadline.
+ *
+ * The timer is unref'd and cleared on every path, so neither a settled decision
+ * nor an abandoned one keeps the process alive or leaks a handle.
+ *
+ * @param attempt - the decision, already started.
+ * @param ms - budget in milliseconds.
+ * @returns the decision, or `undefined` when the budget ran out first.
+ */
+function withBudget<T>(attempt: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve) => {
+    let settled = false;
+    const finish = (value: T | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(undefined), ms);
+    // Node keeps the process alive for a pending timer; a decision that never
+    // answers must not turn into a hung host.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    attempt.then(finish, () => finish(undefined));
+  });
+}
+
+/**
+ * Write one plan into the step's selection object.
+ *
+ * `payload.modelSelection` is `Readonly<ModelSelection>` in the contract, but
+ * that is a compile-time marker only: DSH 0.2.2 does not freeze the object at
+ * runtime, and mutating it here mutates `dsh-agent-loop`'s own local `selection`,
+ * which is what its `prepareRequest` guards compare against. That is the whole
+ * point of {@link installModelRouting}'s pre-step decision, and there is no
+ * other seam — `agent.model.select()` records a selection that only the *next*
+ * `current()` reads, and `current()` for this step has already been called.
+ * The write therefore goes through a mutable view of the same object, and a
+ * payload frozen by an embedder raises `TypeError`, which the caller catches.
+ *
+ * @param selection - the step's selection (the loop's `selection` object).
+ * @param plan - the decided route and effort.
+ */
+function applyPlan(
+  selection: Readonly<{ provider: string; model: string; reasoningEffort?: unknown }>,
+  plan: StepPlan
+): void {
+  const target = selection as { provider: string; model: string; reasoningEffort?: unknown };
+  if (plan.provider !== undefined) target.provider = plan.provider;
+  if (plan.model !== undefined) target.model = plan.model;
+  if (!('reasoningEffort' in plan)) return;
+  if (plan.reasoningEffort === undefined) delete target.reasoningEffort;
+  else target.reasoningEffort = plan.reasoningEffort;
+}
+
+/**
+ * The provider route the caller composed this agent with.
+ *
+ * `agent.options` is the durable intent: it is what the model selector was set
+ * to, and unlike the step's selection it is never overwritten by a physical
+ * route this layer chose for one step.
+ *
+ * @param agent - the stepping agent.
+ * @returns the composed provider id, or `undefined` when it carries none.
+ */
+function intendedProvider(agent: Agent): string | undefined {
+  try {
+    const provider = (agent as { options?: { provider?: unknown } })?.options?.provider;
+    return typeof provider === 'string' && provider.length > 0 ? provider : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The virtual model the caller composed this agent with.
+ * @param agent - the stepping agent.
+ * @returns the composed model id, or `undefined` when it carries none.
+ */
+function intentModel(agent: Agent): string | undefined {
+  try {
+    const model = (agent as { options?: { model?: unknown } })?.options?.model;
+    return typeof model === 'string' && model.length > 0 ? model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether one agent is a delegated subagent.
+ *
+ * `effort-delegation.ts` treats a positive `delegationDepth` as authoritative and
+ * falls back to `origin: 'subagent'`; this check has to agree with it, or a
+ * child whose depth was recorded but whose origin was not would have its effort
+ * decided here *and* inherited there.
+ *
+ * @param agent - the stepping agent.
+ * @returns whether the agent was delegated.
+ */
+function isDelegatedAgent(agent: Agent): boolean {
+  try {
+    const header = (agent as { session?: { header?: { origin?: string; delegationDepth?: number } } })?.session?.header;
+    if (typeof header?.delegationDepth === 'number') return header.delegationDepth > 0;
+    return header?.origin === 'subagent';
+  } catch {
+    return false;
+  }
+}
+
+/** Everything {@link planStep} reads from the installation. */
+interface StepPlanInput {
+  /** Plugin context (the status emitter and the projection reader). */
+  ctx: Context;
+  /** The stepping agent. */
+  agent: Agent;
+  /** Turn the step belongs to. */
+  turn: number | undefined;
+  /** Step number in that turn. */
+  step: number | undefined;
+  /** The turn's cancellation signal. */
+  signal?: AbortSignal;
+  /** The selection the loop fixed for this step. */
+  selection: Readonly<{ provider: string; model: string; reasoningEffort?: unknown }>;
+  /** Router currently in force. */
+  router: VirtualModelRouter;
+  /** Live effort policy. */
+  effort: EffortInterceptor;
+  /** Whether these listeners may re-route at all. */
+  routes: boolean;
+  /** Per-installation memory. */
+  facts: Map<string, AgentRoutingFacts>;
+  /** Reasoning-vocabulary lookup of a physical route. */
+  probe: ReasoningProbe;
+}
+
+/**
+ * Decide one step's route and reasoning effort.
+ *
+ * This is the body the `agent/request` waterfall used to run (g-056). It
+ * resolves the caller's durable intent, routes a virtual request through System
+ * 1, then either adapts the effort (marker present) or aligns it onto the routed
+ * model's vocabulary (concrete level). The order is preserved exactly —
+ * intent → route → effort — because the effort is projected onto the model the
+ * route actually chose.
+ *
+ * Reuse is part of the contract, not an optimisation: `agent/pre-step` runs once
+ * per *step*, while a decision costs up to two System 1 round trips. A later step
+ * of the same turn reuses the turn's plan, which is also why a turn can no longer
+ * change its physical model mid-way.
+ *
+ * @param input - the step, its selection, and the installation's live seams.
+ * @returns the plan to write, or `undefined` when the step needs no change.
+ */
+async function planStep(input: StepPlanInput): Promise<StepPlan | undefined> {
+  const { ctx, agent, router, effort, routes, signal, selection, facts, probe } = input;
+
+  // Everything below this line is read synchronously, before the first `await`,
+  // so an abandoned (timed-out) attempt cannot observe a payload that moved on.
+  if (signal?.aborted) return undefined;
+
+  // The selection is the step's starting configuration; `resolveAdaptiveIntent`
+  // may replace the virtual route and effort with the caller's durable intent.
+  const base: LlmCallConfig = {
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: selection.reasoningEffort as LlmCallConfig['reasoningEffort'] })
+  };
+  const config = resolveAdaptiveIntent(ctx, agent, base, (provider) => router.owns(provider));
+
+  const remembered = recallFacts(facts, agent);
+  const requested = config.reasoningEffort as unknown as string | undefined;
+  const task = remembered?.task;
+
+  // With `effort.enabled` off this layer manages no effort at all: it still
+  // routes, but the only edit it is allowed to make to `reasoningEffort` is
+  // removing its own marker. That keeps a concrete level byte-identical on its
+  // way to the adapter, and it means no decision, no audit entry and no status
+  // can be produced for a deployment that switched the layer off.
+  const effortOff = effort.enabled === false;
+
+  // Reflex only automatically adapts reasoning effort when the effort was
+  // explicitly chosen as reflex/auto, or when an unpinned request names the
+  // virtual provider (which defaults to adaptive effort). If the user selected
+  // High, Low, Medium, Off, or Provider Default, reflex does not touch effort.
+  // A delegated agent's effort was already settled by `effort-delegation.ts` on
+  // its own selection, so this layer must not adapt it here either.
+  const delegated = isDelegatedAgent(agent);
+
+  const isAdaptive =
+    !effortOff &&
+    !delegated &&
+    (isAdaptiveMarker(requested) ||
+      (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(effort.setting)));
+
+  // Same-turn follow-up steps (step > 1 without new user text) reuse the turn's
+  // decision: no second System 1 call, no second effort event, 0ms latency.
+  const isFollowupStep =
+    (input.step ?? 1) > 1 &&
+    remembered?.decided !== undefined &&
+    remembered.decided.turn === input.turn &&
+    remembered.stepHasText !== true &&
+    // A config-only save may replace the policy mid-turn; a decision taken
+    // under the previous policy is not this turn's answer any more.
+    remembered.decided.generation === effort.generation;
+
+  // Whether this step belongs on the virtual route. It cannot be read off the
+  // step's *selection*: this layer writes the physical target into that object,
+  // and the loop records it as the session's latest selection (the request header
+  // retires the pending choice), so every later step starts from a physical
+  // provider this router does not own. Asking the selection would make routing
+  // stop after the first step, which is why the question is asked of the
+  // caller's durable intent — the agent's composed options — and of the intent
+  // `resolveAdaptiveIntent` just recovered from the selection projection.
+  const intent = intendedProvider(agent);
+  const stepOwnsRoute = router.owns(config.provider);
+  const onVirtualRoute = routes && ((intent !== undefined && router.owns(intent)) || stepOwnsRoute);
+  // The route name to hand `routeModel`: the step's own when it still names the
+  // virtual provider, otherwise the router's current name (the intent path).
+  const virtualProviderForStep = stepOwnsRoute ? config.provider : router.virtualProvider;
+
+  const plan: StepPlan = {};
+
+  // Reuse only applies while the step is still *on the virtual route*: a caller
+  // that has switched the session onto a physical model (or pinned a concrete
+  // effort on one) must never have that decision replayed over its own choice.
+  const sameVirtualModel = remembered?.decided?.virtualModel === undefined || remembered.decided.virtualModel === config.model;
+  if (remembered?.decided && isFollowupStep && sameVirtualModel && onVirtualRoute) {
+    // The turn's route and effort, replayed exactly: re-routing a later step
+    // would move a warm session between physical models mid-turn.
+    const reuse = remembered.decided;
+    if (onVirtualRoute) {
+      plan.provider = reuse.provider;
+      plan.model = reuse.model;
+    }
+    if (reuse.effort !== undefined) plan.reasoningEffort = reuse.effort;
+    return plan;
+  }
+
+  let routed = config;
+  let switched: boolean | undefined;
+  let heldForCache: boolean | undefined;
+  if (onVirtualRoute) {
+    // The virtual *model* to route is the one the caller's durable intent names,
+    // which `resolveAdaptiveIntent` has already folded into `config` (it
+    // prefers the session's pending selection over the step's own). Using
+    // `selection.model` here would instead route on whatever this layer wrote
+    // into the previous step, i.e. on a physical id it cannot route at all.
+    const virtualModel = config.model;
+    const decision = await router.routeModel({
+      provider: virtualProviderForStep,
+      model: virtualModel,
+      task,
+      ...describeAgent(agent),
+      turn: input.turn,
+      step: input.step,
+      // Cache-affinity facts: the model this session already holds and how
+      // much context it is defending.
+      ...(remembered?.currentModel ? { currentModel: remembered.currentModel } : {}),
+      ...(remembered === undefined ? {} : { contextChars: remembered.contextChars }),
+      contextTokens: estimateContextTokens(remembered?.contextChars ?? 0)
+    });
+    routed = { ...config, provider: decision.target.provider, model: decision.target.model };
+    switched = decision.switched;
+    heldForCache = decision.reason === 'sticky-affinity';
+    plan.provider = decision.target.provider;
+    plan.model = decision.target.model;
+    rememberTarget(facts, agent, decision.target);
+  }
+
+  // A routed turn is recorded even when no effort was decided: its later steps
+  // must reuse the physical target instead of asking System 1 again, or a turn
+  // could migrate between models on every tool call.
+  const settle = (effortToWrite: string | undefined, changed: boolean): StepPlan | undefined => {
+    if (plan.provider !== undefined) {
+      rememberDecision(
+        facts,
+        agent,
+        input.turn,
+        routed,
+        { changed, ...(effortToWrite === undefined ? {} : { effort: effortToWrite }), outcome: 'passthrough' },
+        effort.generation,
+        config.model
+      );
+    }
+    if (changed) plan.reasoningEffort = effortToWrite;
+    return Object.keys(plan).length === 0 ? undefined : plan;
+  };
+
+  if (!isAdaptive) {
+    if (effortOff) {
+      // Transparent pass-through: the selection keeps the caller's own level
+      // (never aligned, never snapped onto the routed model's vocabulary), and
+      // the plugin's marker is dropped instead of being translated — the
+      // adapter then applies the provider default, which is the only safe
+      // reading of "reflex" once the adaptive layer is switched off.
+      return settle(undefined, isAdaptiveMarker(requested));
+    }
+    // A delegated selection keeps exactly the effort it fixed: not aligned, not
+    // snapped. The selection layer has already made sure this value is a
+    // concrete level the adapter accepts.
+    if (delegated || requested === undefined) return settle(requested, false);
+    // Concrete effort (high, low, off...): align if needed, never adapt! This is
+    // the *non-adaptive* branch, and it moves here for the same reason the
+    // adaptive one does — alignment is still a rewrite of the fixed value, which
+    // `agent/request` may no longer make.
+    const aligned = await alignReasoningEffort(requested, { provider: routed.provider, model: routed.model }, probe);
+    return settle(aligned, aligned !== requested);
+  }
+
+  const resolution = await effort.resolve({
+    requested,
+    target: { provider: routed.provider, model: routed.model },
+    probe,
+    task,
+    // Earlier turns of this agent, for the continuation path only: the
+    // effort layer consults them when the turn adds no task of its own.
+    ...(remembered?.turns?.length ? { history: remembered.turns.map((entry) => ({ text: entry.text })) } : {}),
+    agent: describeAgent(agent),
+    turn: input.turn,
+    step: input.step,
+    requestedProvider: config.provider,
+    requestedModel: config.model,
+    ...(switched === undefined ? {} : { switched }),
+    ...(heldForCache === undefined ? {} : { heldForCache })
+  });
+
+  // The decision is recorded where it is *made* now (g-056): the ledger, the
+  // session audit and the status feed all hear about it from here, not from the
+  // read-only request waterfall.
+  if (resolution.status) reportEffort(ctx, agent, resolution.status);
+  rememberDecision(facts, agent, input.turn, routed, resolution, effort.generation, config.model);
+
+  // Only an effort that was asked for — or one this layer just decided — is
+  // written. A selection that never carried one keeps carrying none.
+  const decidedEffort = resolution.changed ? resolution.effort : requested;
+  if (decidedEffort !== requested) plan.reasoningEffort = decidedEffort;
+  return Object.keys(plan).length === 0 ? undefined : plan;
 }
 
 /**
@@ -860,8 +1275,46 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
     })
   );
 
+  /**
+   * Decide one step's route and reasoning effort, then write it into the step's
+   * selection.
+   *
+   * ## Why the write happens here (g-056)
+   *
+   * `dsh-agent-loop` reads `const selection = this.model.current()` before it
+   * dispatches `agent/pre-step`, keeps that very object as the step's fixed
+   * selection, and afterwards rejects a request that proposes anything else:
+   *
+   *   agent/request proposed reasoning effort "high" after step preparation
+   *   fixed "reflex"; use agent.model.select() before step preparation
+   *
+   * `payload.modelSelection` *is* that object — `preStep` hands the local
+   * `selection` straight into the waterfall payload, so mutating the payload
+   * mutates what the guards compare against. `AgentModel.current()` already
+   * returned a fresh mutable copy (`{ ...recorded }` / a new object from
+   * `toSelection`), which is why the object is writable at all.
+   *
+   * The `Readonly<ModelSelection>` in the contract is a compile-time marker with
+   * no runtime freeze attached, and DSH 0.2.2 offers no other write path before
+   * step preparation: `agent.model.select()` appends a `model/selection` event
+   * that only the *next* `current()` reads, and `current()` has already been
+   * called. So this is the only seam, and the cast below is its documentation.
+   *
+   * Every failure mode degrades to "selection unchanged": a throwing planner, a
+   * frozen payload (the write raises `TypeError`, caught here), or a decision
+   * that outran {@link STEP_DECISION_TIMEOUT_MS}. An unchanged `reflex` marker
+   * is then stripped by the virtual provider's own `resolveCallConfig`, so the
+   * request lands on the adapter default instead of an unsupported effort.
+   *
+   * `next()` is called *outside* the `try` on purpose: the rest of the waterfall
+   * decides whether the step is admitted (`enter`/`reject`) and with which
+   * messages, and swallowing its rejection would turn a rejected step into a
+   * silently admitted one.
+   */
   disposers.push(
     ctx.on('agent/pre-step', async (payload, next) => {
+      // Outside the try: a rejection here must reach the loop unchanged.
+      const decision = await next();
       try {
         // Cheap liveness: the host that commits config-only saves leaves the
         // resolved config stale until someone asks. The check is a handful of
@@ -869,172 +1322,52 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         options.refreshConfig?.();
         ensureVirtualSwitchFilter(payload.agent, router, agentFilterDisposers, agentFilters);
         rememberStep(facts, payload.agent, captureTask(payload.messages, readTaskBudget()), measureMessages(payload.messages), payload.turn);
+
+        // The loop has already read `model.current()` for this step; reading our
+        // own attributes synchronously here (not through a composable) is what
+        // makes the attempt safely able to outlive its budget.
+        const selection = payload.modelSelection;
+        const attempt = startDecision(() =>
+          planStep({
+            ctx,
+            agent: payload.agent,
+            turn: payload.turn,
+            step: payload.step,
+            signal: payload.signal,
+            selection,
+            router,
+            effort: options.effort,
+            routes,
+            facts,
+            probe
+          })
+        );
+        const budget = stepDecisionBudget();
+        const settled = await withBudget(attempt, budget);
+        if (settled === undefined) {
+          warn(
+            `dsh-reflex: the step decision for "${agentKey(payload.agent) ?? 'agent'}" did not finish in ${budget}ms; the step keeps the selection it fixed`
+          );
+          return decision;
+        }
+        // A read-only payload (frozen by an embedder, or a future Host that
+        // freezes it) rejects the writes below; that is the same safe outcome.
+        applyPlan(selection, settled);
       } catch {
-        // Task capture is advisory: a malformed message must not veto the step.
+        // Decision failure never vetoes a step: the selection keeps exactly what
+        // the loop fixed, and the virtual provider's `resolveCallConfig` strips
+        // the marker if one survives, so the request lands on the model default.
       }
-      return next();
-    })
+      return decision;
+    }, { prepend: true })
   );
 
+  // Read-only by contract (see the module docstring): `await next()` and hand
+  // the configuration back exactly as produced. DSH 0.2.2 throws when this
+  // waterfall proposes a different provider, model, or reasoning effort than the
+  // step's selection, and a listener that can only pass through can never do so.
   disposers.push(
-    ctx.on('agent/request', async (payload, next) => {
-      const rawConfig = await next();
-      if (!rawConfig || payload.signal?.aborted) return rawConfig;
-      const config = resolveAdaptiveIntent(ctx, payload.agent, rawConfig, (provider) => router.owns(provider));
-
-      const remembered = recallFacts(facts, payload.agent);
-      const requested = config.reasoningEffort as unknown as string | undefined;
-      const task = remembered?.task;
-
-      // With `effort.enabled` off this layer manages no effort at all: it still
-      // routes, but the only edit it is allowed to make to `reasoningEffort` is
-      // removing its own marker. That keeps a concrete level byte-identical on
-      // its way to the adapter, and it means no decision, no audit entry and no
-      // status can be produced for a deployment that switched the layer off.
-      const effortOff = options.effort.enabled === false;
-
-      // Reflex only automatically adapts reasoning effort when the effort was
-      // explicitly chosen as reflex/auto, or when an unpinned request names the
-      // virtual provider (which defaults to adaptive effort). If the user selected
-      // High, Low, Medium, Off, or Provider Default, reflex does not touch effort.
-      // A delegated agent may not decide its effort here: `dsh-agent-loop` fixes
-      // the step's selection before this waterfall runs and rejects any effort we
-      // propose afterwards ("use agent.model.select() before step preparation").
-      // The decision is taken on the child's selection instead, ahead of the step
-      // (see `effort-delegation.ts`), so this layer must neither decide nor rewrite
-      // an effort for a delegated request — it only routes.
-      const delegated = describeAgent(payload.agent).role === 'subagent';
-
-      const isAdaptive =
-        !effortOff &&
-        !delegated &&
-        (isAdaptiveMarker(requested) ||
-          (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(options.effort.setting)));
-
-      // Same-turn follow-up steps (step > 1 without new user text) reuse the turn's
-      // decision: no second System 1 call, no second effort event, 0ms latency.
-      const isFollowupStep =
-        (payload.step ?? 1) > 1 &&
-        remembered?.decided !== undefined &&
-        remembered.decided.turn === payload.turn &&
-        remembered.stepHasText !== true &&
-        // A config-only save may replace the policy mid-turn; a decision taken
-        // under the previous policy is not this turn's answer any more.
-        remembered.decided.generation === options.effort.generation;
-
-      if (isAdaptive && isFollowupStep && remembered?.decided) {
-        const reuse = remembered.decided;
-        const routedReuse =
-          routes && router.owns(config.provider)
-            ? { ...config, provider: reuse.provider, model: reuse.model }
-            : config;
-        const effort = reuse.effort;
-        if (effort === requested && routedReuse === config) return config;
-        const rewritten: LlmCallConfig = { ...routedReuse };
-        if (effort === undefined) delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
-        else rewritten.reasoningEffort = effort as LlmCallConfig['reasoningEffort'];
-        return rewritten;
-      }
-
-      let routed = config;
-      let switched: boolean | undefined;
-      let heldForCache: boolean | undefined;
-      if (routes && router.owns(config.provider)) {
-        const decision = await router.routeModel({
-          provider: config.provider,
-          model: config.model,
-          task,
-          ...describeAgent(payload.agent),
-          turn: payload.turn,
-          step: payload.step,
-          // Cache-affinity facts: the model this session already holds and how
-          // much context it is defending.
-          ...(remembered?.currentModel ? { currentModel: remembered.currentModel } : {}),
-          ...(remembered === undefined ? {} : { contextChars: remembered.contextChars }),
-          contextTokens: estimateContextTokens(remembered?.contextChars ?? 0)
-        });
-        routed = { ...config, provider: decision.target.provider, model: decision.target.model };
-        switched = decision.switched;
-        heldForCache = decision.reason === 'sticky-affinity';
-        rememberTarget(facts, payload.agent, decision.target);
-      }
-
-      if (!isAdaptive) {
-        if (effortOff) {
-          // Transparent pass-through: the request keeps the caller's own level
-          // (never aligned, never snapped onto the routed model's vocabulary),
-          // and the plugin's marker is deleted instead of being translated — the
-          // adapter then applies the provider default, which is the only safe
-          // reading of "reflex" once the adaptive layer is switched off.
-          const kept = isAdaptiveMarker(requested) ? undefined : requested;
-          if (routed === config && kept === requested) return config;
-          const rewritten: LlmCallConfig = { ...routed };
-          if (kept === undefined) delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
-          else rewritten.reasoningEffort = kept as LlmCallConfig['reasoningEffort'];
-          return rewritten;
-        }
-        // A delegated request keeps exactly the effort its selection fixed: not
-        // aligned, not snapped. Alignment is still a rewrite of the fixed value,
-        // and the loop compares the two for equality. The selection layer has
-        // already made sure this value is a concrete level the adapter accepts.
-        if (delegated) {
-          return routed === config ? config : { ...routed };
-        }
-        // Concrete effort (high, low, off...) or provider default: align if needed, never adapt!
-        if (routed === config && requested !== undefined) {
-          const aligned = await alignReasoningEffort(requested, { provider: routed.provider, model: routed.model }, probe);
-          if (aligned === requested) return config;
-          const rewritten: LlmCallConfig = { ...routed };
-          if (aligned !== undefined) rewritten.reasoningEffort = aligned as LlmCallConfig['reasoningEffort'];
-          else delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
-          return rewritten;
-        }
-        if (routed !== config) {
-          const aligned = requested ? await alignReasoningEffort(requested, { provider: routed.provider, model: routed.model }, probe) : undefined;
-          const rewritten: LlmCallConfig = { ...routed };
-          if (aligned !== undefined) rewritten.reasoningEffort = aligned as LlmCallConfig['reasoningEffort'];
-          else delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
-          return rewritten;
-        }
-        return config;
-      }
-
-      const resolution = await options.effort.resolve({
-        requested,
-        target: { provider: routed.provider, model: routed.model },
-        probe,
-        task,
-        // Earlier turns of this agent, for the continuation path only: the
-        // effort layer consults them when the turn adds no task of its own.
-        ...(remembered?.turns?.length ? { history: remembered.turns.map((entry) => ({ text: entry.text })) } : {}),
-        agent: describeAgent(payload.agent),
-        turn: payload.turn,
-        step: payload.step,
-        requestedProvider: config.provider,
-        requestedModel: config.model,
-        ...(switched === undefined ? {} : { switched }),
-        ...(heldForCache === undefined ? {} : { heldForCache })
-      });
-
-      if (resolution.status) {
-        reportEffort(ctx, payload.agent, resolution.status);
-        rememberDecision(facts, payload.agent, payload.turn, routed, resolution, options.effort.generation);
-      }
-      if (!resolution.changed && routed === config) return config;
-
-      const rewritten: LlmCallConfig = { ...routed };
-      // Only requests that carried an effort — or whose effort this layer just
-      // decided — get one back. A cleared effort deletes the key instead of
-      // leaving an `undefined` one behind: a request that never asked for an
-      // effort must look exactly as it did before the interception.
-      const effort = resolution.changed ? resolution.effort : requested;
-      if (config.reasoningEffort !== undefined || resolution.changed) {
-        if (effort === undefined) delete (rewritten as { reasoningEffort?: unknown }).reasoningEffort;
-        else rewritten.reasoningEffort = effort as LlmCallConfig['reasoningEffort'];
-      }
-
-      return rewritten;
-    }, { prepend: true })
+    ctx.on('agent/request', async (_payload, next) => next(), { prepend: true })
   );
 
   const dispose = () => {
@@ -1191,7 +1524,8 @@ function rememberDecision(
   turn: number | undefined,
   routed: LlmCallConfig,
   resolution: EffortResolution,
-  generation: number
+  generation: number,
+  virtualModel?: string
 ): void {
   const key = agentKey(agent);
   if (key === undefined) return;
@@ -1200,6 +1534,7 @@ function rememberDecision(
     turn: turn ?? 0,
     provider: routed.provider,
     model: routed.model,
+    ...(virtualModel === undefined ? {} : { virtualModel }),
     ...(resolution.effort === undefined ? {} : { effort: resolution.effort }),
     ...(status === undefined ? {} : { status }),
     generation

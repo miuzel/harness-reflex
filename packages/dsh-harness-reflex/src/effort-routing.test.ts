@@ -106,7 +106,7 @@ test('the reflex marker becomes a concrete effort on the dispatched request', as
       task: TASK_DEEP,
       turn: 4,
       step: 2,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(config.provider, 'deepseek', 'the route is still resolved by System 1');
@@ -139,7 +139,7 @@ test('the auto alias decides exactly like reflex', async () => {
 
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('auto') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('auto') }
     });
     await dispatch(host.ctx, config, TASK_DEEP);
 
@@ -160,12 +160,12 @@ test('two turns of one agent are decided independently', async () => {
     const deep = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     const trivial = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_TRIVIAL,
       turn: 2,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(deep.reasoningEffort, 'high', 'a hard turn buys thinking');
@@ -184,7 +184,7 @@ test('a request that fixed its own effort is never overridden', async () => {
 
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_TRIVIAL,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('high') }
     });
 
     assert.equal(config.reasoningEffort, 'high', 'an explicit concrete effort wins over the deployment marker');
@@ -212,7 +212,7 @@ test('a physical model without thinking gets the key cleared, not a crash', asyn
 
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(config.provider, 'plain');
@@ -244,7 +244,7 @@ test('the decision reaches the session log without entering the model surface', 
       task: TASK_DEEP,
       turn: 2,
       step: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     const records = effortRecordsOf(session.ownEvents());
@@ -280,7 +280,7 @@ test('the status bar line and the emitted event agree with the decided turn', as
 
     await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(seen.length, 1, 'one event per decided turn');
@@ -292,7 +292,7 @@ test('the status bar line and the emitted event agree with the decided turn', as
     stop();
     await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_TRIVIAL,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(seen.length, 1, 'an unsubscribed host hears nothing further');
   } finally {
@@ -308,7 +308,7 @@ test('the marker is honoured without any virtual route', async () => {
 
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'deepseek', model: 'reasoner', reasoningEffort: effort('reflex') }
+      selection: { provider: 'deepseek', model: 'reasoner', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(config.provider, 'deepseek', 'a deployment without pools routes nothing');
@@ -340,7 +340,7 @@ test('the configured marker decides a request that carries none', async () => {
 
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto' }
+      selection: { provider: 'reflex', model: 'reflex-auto' }
     });
 
     assert.equal(
@@ -368,7 +368,7 @@ test('an aborted request spends no decision and writes no record', async () => {
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       signal: controller.signal,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.deepEqual(config, { provider: 'reflex', model: 'reflex-auto', reasoningEffort: 'reflex' });
@@ -390,7 +390,7 @@ test('a deployment with no adaptive policy leaves a bare request byte-identical'
     const { agent, session } = agentWithSession('session-unset');
     const original: LlmCallConfig = { provider: 'deepseek', model: 'reasoner' };
 
-    const config = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, config: original });
+    const config = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, selection: original });
 
     assert.deepEqual(config, original, 'a request that named no effort must come back unchanged');
     assert.equal('reasoningEffort' in config, false, 'the plugin must not invent an effort');
@@ -423,7 +423,7 @@ test('selecting High or default on a physical model passes through untouched wit
     // Explicit 'high' effort: must NOT be adapted by reflex, must stay 'high', zero events emitted
     const highConfig = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_TRIVIAL,
-      config: { provider: 'antigravity', model: 'gemini-3.8-flash', reasoningEffort: effort('high') }
+      selection: { provider: 'antigravity', model: 'gemini-3.8-flash', reasoningEffort: effort('high') }
     });
     assert.equal(highConfig.provider, 'antigravity');
     assert.equal(highConfig.reasoningEffort, 'high', 'explicit High remains High and is never overridden');
@@ -432,7 +432,7 @@ test('selecting High or default on a physical model passes through untouched wit
     // Provider default (undefined): must NOT be adapted, zero events emitted
     const defaultConfig = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_TRIVIAL,
-      config: { provider: 'antigravity', model: 'gemini-3.8-flash' }
+      selection: { provider: 'antigravity', model: 'gemini-3.8-flash' }
     });
     assert.equal(defaultConfig.provider, 'antigravity');
     assert.equal(defaultConfig.reasoningEffort, undefined, 'provider default remains untouched');
@@ -457,7 +457,7 @@ test('a multi-step turn with reflex effort only decides and records once on step
       task: TASK_DEEP,
       turn: 1,
       step: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(step1.reasoningEffort, 'high');
     assert.equal(seen.length, 1, 'step 1 produces exactly 1 effort event for the turn');
@@ -468,7 +468,7 @@ test('a multi-step turn with reflex effort only decides and records once on step
     const step2 = await dispatchAgentRequest(host.ctx, agent, {
       turn: 1,
       step: 2,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(step2.reasoningEffort, 'high', 'step 2 reuses step 1 effort');
     assert.equal(seen.length, 1, 'step 2 does NOT emit duplicate effort event');
@@ -477,7 +477,7 @@ test('a multi-step turn with reflex effort only decides and records once on step
     const step3 = await dispatchAgentRequest(host.ctx, agent, {
       turn: 1,
       step: 3,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(step3.reasoningEffort, 'high', 'step 3 reuses step 1 effort');
     assert.equal(seen.length, 1, 'step 3 does NOT emit duplicate effort event');
@@ -495,7 +495,7 @@ test('unloading the plugin detaches the interception and forgets the status', as
 
     const decided = await dispatchAgentRequest(ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(decided.reasoningEffort, 'high');
     assert.ok(runtime.effortStatusLine('session-unload'));
@@ -506,7 +506,7 @@ test('unloading the plugin detaches the interception and forgets the status', as
 
     const after = await dispatchAgentRequest(ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'deepseek', model: 'reasoner', reasoningEffort: effort('reflex') }
+      selection: { provider: 'deepseek', model: 'reasoner', reasoningEffort: effort('reflex') }
     });
     assert.equal(after.reasoningEffort, 'reflex', 'with the plugin unloaded nothing rewrites the effort any more');
   } finally {
@@ -534,14 +534,14 @@ test('a continuation reply after a deep turn keeps the deep level and audits the
     const deep = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.equal(deep.reasoningEffort, 'high');
 
     const continued = await dispatchAgentRequest(host.ctx, agent, {
       task: '继续',
       turn: 2,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     assert.notEqual(continued.reasoningEffort, 'off', 'the reply no longer collapses to off');
     assert.equal(continued.reasoningEffort, 'high', 'it follows the work being continued');
@@ -567,7 +567,7 @@ test('a session whose first turn is a continuation borrows nothing', async () =>
     await dispatchAgentRequest(host.ctx, agent, {
       task: '继续',
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     const [entry] = decisionsOf(host, 'session-cold-continue');
@@ -589,7 +589,7 @@ test('a new instruction is never graded against earlier turns', async () => {
       dispatchAgentRequest(host.ctx, agent, {
         task,
         turn,
-        config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+        selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
       });
 
     await request(withHistory, 1, TASK_DEEP);
@@ -618,13 +618,13 @@ test('a repeated continuation keeps one fixed context window instead of growing'
     await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     for (const turn of [2, 3, 4]) {
       await dispatchAgentRequest(host.ctx, agent, {
         task: '继续',
         turn,
-        config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+        selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
       });
     }
 
@@ -646,18 +646,18 @@ test('a later step of the continuation turn reuses its decision and re-asks noth
     await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     const firstStep = await dispatchAgentRequest(host.ctx, agent, {
       task: '继续',
       turn: 2,
       step: 1,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
     const laterStep = await dispatchAgentRequest(host.ctx, agent, {
       turn: 2,
       step: 2,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(laterStep.reasoningEffort, firstStep.reasoningEffort, 'the turn keeps its decided level');

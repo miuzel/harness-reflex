@@ -100,7 +100,7 @@ test('a switched-off deployment takes no decision at all', async () => {
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 3,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(config.provider, 'deepseek', 'routing still happens; only the effort layer is off');
@@ -137,7 +137,7 @@ test('the very same deployment decides once the switch is on', async () => {
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
       turn: 3,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
     });
 
     assert.equal(config.reasoningEffort, 'high', 'the positive control: the same request is decided when enabled');
@@ -233,7 +233,7 @@ test('a concrete level is passed through untouched while the switch is off', asy
     // `high`. A switched-off layer must not rewrite it either way.
     const config = await dispatchAgentRequest(host.ctx, agent, {
       task: TASK_DEEP,
-      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('max') }
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('max') }
     });
     assert.equal(config.reasoningEffort, 'max', 'a concrete level reaches the adapter exactly as it was written');
 
@@ -243,7 +243,7 @@ test('a concrete level is passed through untouched while the switch is off', asy
       registerPhysicalAdapter(aligned.ctx, 'deepseek', THINKING);
       const kept = await dispatchAgentRequest(aligned.ctx, fakeAgent({ id: 'switch-aligned' }), {
         task: TASK_DEEP,
-        config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('max') }
+        selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('max') }
       });
       assert.equal(
         kept.reasoningEffort,

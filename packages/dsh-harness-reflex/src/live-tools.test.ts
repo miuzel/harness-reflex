@@ -14,7 +14,7 @@ import { Config, resolveConfig, type ReflexConfig } from './config.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import { callTool, delegationStandIn, loaderEventReceiver, nativeExecutorPlugin } from './testing.js';
+import { callTool, delegationStandIn, loaderEventReceiver, mountHostServices, nativeExecutorPlugin } from './testing.js';
 import { REFLEX_TOOL_SUFFIXES, reflexToolNames } from './tools.js';
 
 /**
@@ -77,7 +77,7 @@ interface LiveHost {
  */
 async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
   const ctx = new Context();
-  await ctx.plugin(SystemPrompt);
+  await mountHostServices(ctx);
   await ctx.plugin(ToolRuntime);
   // dsh-tools >= 0.2.2 ships no executor; the Host mounts the native one.
   await ctx.plugin(nativeExecutorPlugin);

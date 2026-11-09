@@ -17,14 +17,7 @@ import { EffortInterceptor } from './effort.js';
 import { applyReflex, inject, name } from './index.js';
 import { buildPanelSnapshot } from './panel-api.js';
 import { panelFacts } from './panel-mount.js';
-import {
-  dispatchAgentRequest,
-  fakeAgent,
-  nativeExecutorPlugin,
-  registerPhysicalAdapter,
-  resultText,
-  loaderEventReceiver
-} from './testing.js';
+import { dispatchAgentRequest, fakeAgent, loaderEventReceiver, mountHostServices, nativeExecutorPlugin, registerPhysicalAdapter, resultText } from './testing.js';
 
 /**
  * Live policy: `effort.*` and `interventions.*` edited through a *real* loader
@@ -88,7 +81,7 @@ interface LiveHost {
  */
 async function bootLoader(authored: ReflexConfig): Promise<LiveHost> {
   const ctx = new Context();
-  await ctx.plugin(SystemPrompt);
+  await mountHostServices(ctx);
   await ctx.plugin(ToolRuntime);
   // dsh-tools ≥ 0.2.2 ships no executor; the Host mounts the native one.
   await ctx.plugin(nativeExecutorPlugin);
@@ -154,7 +147,7 @@ test('effort.enabled and reasoningEffort edits take effect on the very next requ
     const armed = await host.ctx.llm.resolveCallConfig(request as LlmCallConfig);
     assert.equal(armed.reasoningEffort, 'reflex', 'the deployment marker arms the virtual route');
 
-    const before = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, config: request });
+    const before = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, selection: request });
     assert.equal(before.reasoningEffort, 'high', 'the positive control: the marker is decided');
     const decisions = () => host.runtime.ledger.getEntries().filter((entry) => entry.type === 'effort-decision').length;
     assert.equal(decisions(), 1);
@@ -165,7 +158,7 @@ test('effort.enabled and reasoningEffort edits take effect on the very next requ
     assert.equal(host.runtime.effort.enabled, false, 'the live interceptor reads the new switch');
     assert.equal(buildPanelSnapshot(panelFacts(host.runtime)).effort.enabled, false, 'the panel reports the new switch');
 
-    const off = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 2, config: request });
+    const off = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 2, selection: request });
     assert.deepEqual(off, { provider: 'deepseek', model: 'reasoner' }, 'a switched-off layer leaves no effort key at all');
     assert.equal(decisions(), 1, 'a switched-off layer spends no decision');
 
@@ -179,7 +172,7 @@ test('effort.enabled and reasoningEffort edits take effect on the very next requ
     const disarmed = await host.ctx.llm.resolveCallConfig(request as LlmCallConfig);
     assert.equal(disarmed.reasoningEffort, undefined, 'a bare virtual request is no longer armed');
 
-    const cleared = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 3, config: request });
+    const cleared = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 3, selection: request });
     assert.deepEqual(cleared, { provider: 'deepseek', model: 'reasoner' }, 'a deployment with no marker writes no effort key');
     assert.equal(decisions(), 1, 'still no decision was taken');
   } finally {
@@ -200,7 +193,7 @@ test('an edited effort.fallback is the level the very next undecided turn uses',
     const agent = fakeAgent({ id: 'live-fallback' });
     const request = { provider: 'reflex', model: 'reflex-auto' };
 
-    const medium = await dispatchAgentRequest(host.ctx, agent, { task: TASK_NEUTRAL, turn: 1, config: request });
+    const medium = await dispatchAgentRequest(host.ctx, agent, { task: TASK_NEUTRAL, turn: 1, selection: request });
     assert.equal(medium.reasoningEffort, 'medium', 'the neutral turn falls back to the configured level');
     const firstStatus = host.runtime.effortStatus('live-fallback');
     assert.equal(firstStatus?.source, 'cue-fallback', 'the decision is the fail-safe, not System 1');
@@ -210,7 +203,7 @@ test('an edited effort.fallback is the level the very next undecided turn uses',
       routing: POOLS,
       effort: { reasoningEffort: 'reflex', fallback: 'high', minConfidence: 0.9 }
     });
-    const high = await dispatchAgentRequest(host.ctx, agent, { task: TASK_NEUTRAL, turn: 2, config: request });
+    const high = await dispatchAgentRequest(host.ctx, agent, { task: TASK_NEUTRAL, turn: 2, selection: request });
     assert.equal(high.reasoningEffort, 'high', 'the next undecided turn uses the edited fallback');
     assert.equal(host.runtime.effort.fallback, 'high', 'the interceptor itself reads the new value');
   } finally {
@@ -229,12 +222,12 @@ test('an edited effort.minConfidence changes the decision source on the next req
     const agent = fakeAgent({ id: 'live-min-confidence' });
     const request = { provider: 'reflex', model: 'reflex-auto' };
 
-    const trusted = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, config: request });
+    const trusted = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, selection: request });
     assert.equal(trusted.reasoningEffort, 'high');
     assert.equal(host.runtime.effortStatus('live-min-confidence')?.source, 'system-one', 'the positive control trusts System 1');
 
     host.commit({ backend: 'mock', routing: POOLS, effort: { reasoningEffort: 'reflex', minConfidence: 0.9 } });
-    const rejected = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 2, config: request });
+    const rejected = await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 2, selection: request });
     assert.equal(rejected.reasoningEffort, 'high', 'the cue vote still lands on high for a deep task');
     const status = host.runtime.effortStatus('live-min-confidence');
     assert.equal(status?.source, 'cue-fallback', 'but System 1 is no longer trusted');
@@ -493,7 +486,7 @@ test('the unchanged hot path compares snapshots and never re-runs the schema', a
 
     // A full request also goes through the same lazy check, still unparsed.
     const agent = fakeAgent({ id: 'live-cost' });
-    await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, config: { provider: 'reflex', model: 'reflex-auto' } });
+    await dispatchAgentRequest(host.ctx, agent, { task: TASK_DEEP, turn: 1, selection: { provider: 'reflex', model: 'reflex-auto' } });
     assert.equal(resolveCount(), 0, 'no schema resolution happened without a committed change');
 
     // Getter-only hot reads: the effort policy and intervention thresholds.
