@@ -5,12 +5,16 @@ import { DecisionLedger, MockDecisionBackend, type ChoiceResponse } from './vend
 
 import {
   ADAPTIVE_EFFORT_LEVELS,
+  EFFORT_CONTEXT_CHARS,
+  EFFORT_CONTEXT_TURNS,
   EFFORT_TRIGGERS,
   EffortInterceptor,
   EffortStatusFeed,
   buildEffortChoice,
   classifyByCues,
+  composeEffortDecisionInput,
   formatEffortStatusLine,
+  isContinuationReply,
   isEffortTrigger,
   levelOfChoiceOption,
   projectEffort,
@@ -436,4 +440,161 @@ test('the status line renders the decided level without a pin marker', () => {
     }),
     'reflex effort: medium → none (cue-fallback 0.00, 0ms) plain:basic'
   );
+});
+
+// ---------------------------------------------------------------------------
+// g-053: a continuation reply ("继续", "同意") is graded against what it continues
+// ---------------------------------------------------------------------------
+
+/** A deep task whose words are the vocabulary the continuation path borrows. */
+const DEEP_TURN = 'design the migration protocol for the distributed store';
+
+test('isContinuationReply separates replies that add nothing from turns that name work', () => {
+  for (const reply of ['继续', '同意', '按这个来', 'go ahead', 'ok go ahead', 'continue', '是的，继续', '继续吧', 'go on', '那就按这个来']) {
+    assert.equal(isContinuationReply(reply), true, `${reply} is a continuation`);
+  }
+  // A single content word makes it a new instruction, however short.
+  for (const task of ['谢谢', '好的收到', 'implement the parser', '继续实现 parser', 'go ahead and implement the parser', DEEP_TURN]) {
+    assert.equal(isContinuationReply(task), false, `${task} names work of its own`);
+  }
+});
+
+test('a continuation borrows recent turns; a new instruction never does', () => {
+  const history = [{ text: DEEP_TURN }];
+  const continuation = composeEffortDecisionInput('继续', history);
+  assert.equal(continuation.contextTurns, 1);
+  assert.equal(continuation.contextChars, DEEP_TURN.length);
+  assert.equal(continuation.text, `${DEEP_TURN}\n继续`, 'the context is prepended to the reply');
+
+  // The whole point of the split: an instruction is graded on its own text, so
+  // its level cannot be borrowed from a deep turn earlier in the session.
+  const fresh = composeEffortDecisionInput('implement the config endpoint', history);
+  assert.equal(fresh.text, 'implement the config endpoint');
+  assert.equal(fresh.contextChars, 0);
+  assert.equal(fresh.contextTurns, 0);
+});
+
+test('a continuation with no earlier turn degrades to the existing behaviour', () => {
+  for (const history of [[], [{ text: '继续' }], [{ text: '  ' }]]) {
+    const input = composeEffortDecisionInput('继续', history);
+    assert.equal(input.text, '继续', 'nothing is invented and the reply grades alone');
+    assert.equal(input.contextChars, 0);
+    assert.equal(input.contextTurns, 0);
+  }
+});
+
+test('long history is cut from the newest end and never exceeds the context budget', () => {
+  // Each turn is 100 characters; the budget holds four at most.
+  const history = Array.from({ length: 6 }, (_, index) => ({ text: `${index}:`.padEnd(100, 'x') }));
+  const input = composeEffortDecisionInput('继续', history);
+  assert.ok(input.contextChars <= EFFORT_CONTEXT_CHARS, `context ${input.contextChars} stays within ${EFFORT_CONTEXT_CHARS}`);
+  assert.equal(input.contextTurns, EFFORT_CONTEXT_TURNS, 'the turn window is the fixed one');
+  assert.match(input.text, /5:/u, 'the newest turn is kept');
+  assert.doesNotMatch(input.text, /0:/u, 'the oldest turn is what goes first');
+
+  // One turn larger than the whole budget contributes its tail, not its head.
+  const huge = { text: `HEAD${'y'.repeat(EFFORT_CONTEXT_CHARS)}TAIL` };
+  const clipped = composeEffortDecisionInput('继续', [huge]);
+  assert.ok(clipped.contextChars <= EFFORT_CONTEXT_CHARS);
+  assert.match(clipped.text, /TAIL/u);
+  assert.doesNotMatch(clipped.text, /HEAD/u);
+});
+
+test('repeated continuations do not grow the context they inject', () => {
+  // The recorded history dedupes consecutive identical replies, which is what
+  // keeps turn N+1 from carrying turn N's own copy of "继续" as well.
+  const history = [{ text: DEEP_TURN }, { text: '继续' }, { text: '继续' }];
+  const input = composeEffortDecisionInput('继续', history);
+  assert.equal(input.text, `${DEEP_TURN}\n继续`);
+  assert.equal(input.contextChars, DEEP_TURN.length, 'only the real task counts as context');
+});
+
+test('borrowed context is cleaned exactly like the current turn is (P9)', () => {
+  // The history carries the very vocabulary P9 showed must not leak in raw: a
+  // negation clause is dropped, and a restatement payload is not scored at all.
+  const history = [{ text: '原样返回：“design the migration protocol for the distributed store”' }];
+  const input = composeEffortDecisionInput('继续', history);
+  const cues = readEffortCues(input.text);
+  assert.deepEqual(cues.deep, [], 'the quoted payload was cleaned away before grading');
+});
+
+test('the target scenario decides deep, and the status shows the context it used', async () => {
+  const backend = new MockDecisionBackend();
+  const ledger = new DecisionLedger(null);
+  const effort = new EffortInterceptor({
+    setting: 'reflex',
+    decide: (request) => backend.choice(request),
+    backendName: backend.name,
+    ledger,
+    now: () => 0
+  });
+
+  const deep = await effort.resolve(context({ requested: 'reflex', task: DEEP_TURN }));
+  assert.equal(deep.decision?.level, 'high', 'the deep turn itself still decides high');
+
+  const continued = await effort.resolve(
+    context({ requested: 'reflex', task: '继续', turn: 2, history: [{ text: DEEP_TURN }] })
+  );
+  assert.notEqual(continued.decision?.level, 'off', 'the continuation no longer collapses to off');
+  assert.equal(continued.decision?.level, 'high', 'it follows the work being continued');
+
+  const entries = ledger.getEntries().filter((entry) => entry.type === 'effort-decision');
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].details?.contextChars, undefined, 'a new instruction audits no borrowed context');
+  assert.equal(entries[1].details?.contextChars, DEEP_TURN.length, 'the ledger shows the context actually used');
+  assert.equal(entries[1].details?.contextTurns, 1);
+  assert.match(String(continued.status?.line), /system-one/u);
+});
+
+test('a pinned level still bypasses the continuation path entirely', async () => {
+  let asked = 0;
+  const pinned = interceptor({
+    setting: 'reflex',
+    decide: async () => {
+      asked += 1;
+      return answer('high deep reasoning', 0.9);
+    }
+  });
+  const resolved = await pinned.effort.resolve(
+    context({ requested: 'low', task: '继续', turn: 2, history: [{ text: DEEP_TURN }] })
+  );
+  assert.equal(asked, 0, 'a concrete level spends no System 1 round trip');
+  assert.equal(resolved.decision, undefined);
+  assert.equal(resolved.effort ?? 'low', 'low', 'the pinned level is untouched');
+});
+
+test('System 1 failing on a continuation falls back to cues with the original semantics', async () => {
+  // The fail-safe chain (cue -> fallback) must not be altered by the new
+  // context: a failing backend still degrades, and it says so.
+  const failing = interceptor({
+    setting: 'reflex',
+    decide: async () => {
+      throw new Error('backend offline');
+    }
+  });
+  const degraded = await failing.effort.resolve(
+    context({ requested: 'reflex', task: '继续', turn: 2, history: [{ text: DEEP_TURN }] })
+  );
+  assert.equal(degraded.decision?.source, 'cue-fallback');
+  assert.match(String(degraded.decision?.degradedReason), /backend offline/u);
+  assert.doesNotThrow(() => formatEffortStatusLine(degraded.status ?? { level: 'medium', outcome: 'cleared', trigger: 'request', source: 'cue-fallback', confidence: 0, latencyMs: 0, provider: 'p', model: 'm', at: 0 }));
+});
+
+test('the decision input never exceeds question budget plus context budget', async () => {
+  let seen = '';
+  const measuring = interceptor({
+    setting: 'reflex',
+    decide: async (request) => {
+      seen = request.question;
+      return answer('high deep reasoning', 0.9);
+    }
+  });
+  await measuring.effort.resolve(
+    context({ requested: 'reflex', task: '继续', turn: 2, history: [{ text: 'z'.repeat(5000) }] })
+  );
+  assert.ok(
+    seen.length <= EFFORT_CONTEXT_CHARS + 3,
+    `question of ${seen.length} characters stays within EFFORT_CONTEXT_CHARS + the reply`
+  );
+  assert.ok(seen.length > 0);
 });

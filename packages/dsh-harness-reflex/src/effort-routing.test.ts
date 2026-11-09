@@ -28,6 +28,8 @@ import {
 
 const TASK_DEEP = 'design the migration protocol for the distributed store';
 const TASK_TRIVIAL = 'thanks';
+/** An ordinary instruction, used as the "new task" baseline of the g-053 tests. */
+const TASK_INSTRUCTION = 'implement the config endpoint';
 
 /**
  * Pool used by most tests: one virtual model over one physical target, so the
@@ -509,5 +511,162 @@ test('unloading the plugin detaches the interception and forgets the status', as
     assert.equal(after.reasoningEffort, 'reflex', 'with the plugin unloaded nothing rewrites the effort any more');
   } finally {
     await ctx.fiber.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// g-053: "deep turn, then 继续" through the real waterfall
+// ---------------------------------------------------------------------------
+
+/** Read the `effort-decision` entries for one agent, oldest first. */
+function decisionsOf(host: { runtime: { ledger: { getEntries(): Array<Record<string, any>> } } }, agentId: string) {
+  return host.runtime.ledger
+    .getEntries()
+    .filter((entry) => entry.type === 'effort-decision' && entry.details?.agentId === agentId);
+}
+
+test('a continuation reply after a deep turn keeps the deep level and audits the context it used', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-continue' });
+
+    const deep = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(deep.reasoningEffort, 'high');
+
+    const continued = await dispatchAgentRequest(host.ctx, agent, {
+      task: '继续',
+      turn: 2,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.notEqual(continued.reasoningEffort, 'off', 'the reply no longer collapses to off');
+    assert.equal(continued.reasoningEffort, 'high', 'it follows the work being continued');
+
+    const entries = decisionsOf(host, 'session-continue');
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].details?.level, 'high');
+    assert.equal(entries[0].details?.contextChars, undefined, 'the deep turn borrowed no context');
+    assert.equal(entries[1].details?.level, 'high');
+    assert.equal(entries[1].details?.contextChars, TASK_DEEP.length, 'the ledger shows the context actually used');
+    assert.equal(entries[1].details?.contextTurns, 1);
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a session whose first turn is a continuation borrows nothing', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-cold-continue' });
+
+    await dispatchAgentRequest(host.ctx, agent, {
+      task: '继续',
+      turn: 1,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+
+    const [entry] = decisionsOf(host, 'session-cold-continue');
+    assert.equal(entry.details?.contextChars, undefined, 'no history is invented for a cold session');
+    assert.equal(entry.details?.contextTurns, undefined);
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a new instruction is never graded against earlier turns', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const withHistory = fakeAgent({ id: 'session-new-instruction' });
+    const coldSession = fakeAgent({ id: 'session-cold-instruction' });
+
+    const request = (agent: Agent, turn: number, task: string) =>
+      dispatchAgentRequest(host.ctx, agent, {
+        task,
+        turn,
+        config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      });
+
+    await request(withHistory, 1, TASK_DEEP);
+    const afterDeep = await request(withHistory, 2, TASK_INSTRUCTION);
+    // The same task as the first turn of a session: the baseline it must match.
+    const cold = await request(coldSession, 1, TASK_INSTRUCTION);
+
+    const entries = decisionsOf(host, 'session-new-instruction');
+    assert.equal(entries[1].details?.contextChars, undefined, 'it borrows nothing from the deep turn');
+    assert.equal(
+      afterDeep.reasoningEffort,
+      cold.reasoningEffort,
+      'it decides exactly as it would in a session with no history at all'
+    );
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a repeated continuation keeps one fixed context window instead of growing', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-repeat-continue' });
+
+    await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    for (const turn of [2, 3, 4]) {
+      await dispatchAgentRequest(host.ctx, agent, {
+        task: '继续',
+        turn,
+        config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      });
+    }
+
+    const entries = decisionsOf(host, 'session-repeat-continue');
+    assert.equal(entries.length, 4);
+    const sizes = entries.slice(1).map((entry) => entry.details?.contextChars);
+    assert.deepEqual(sizes, [TASK_DEEP.length, TASK_DEEP.length, TASK_DEEP.length], 'the window does not grow with each reply');
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a later step of the continuation turn reuses its decision and re-asks nothing', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-continue-steps' });
+
+    await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    const firstStep = await dispatchAgentRequest(host.ctx, agent, {
+      task: '继续',
+      turn: 2,
+      step: 1,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    const laterStep = await dispatchAgentRequest(host.ctx, agent, {
+      turn: 2,
+      step: 2,
+      config: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+
+    assert.equal(laterStep.reasoningEffort, firstStep.reasoningEffort, 'the turn keeps its decided level');
+    assert.equal(
+      decisionsOf(host, 'session-continue-steps').length,
+      2,
+      'one decision per turn: the continuation turn is decided once and reused by its later steps'
+    );
+  } finally {
+    await host.dispose();
   }
 });

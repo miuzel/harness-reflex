@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { isAgentLoopRequest, markAgentLoopRequest, type ContentBlock, type LlmCallConfig, type LlmRuntime, type UserMessage } from '@deepseek-ai/dsh-llm';
 
 import type { EffortInterceptor, EffortResolution, ReflexEffortStatus } from './effort.js';
-import { formatEffortStatusLine } from './effort.js';
+import { formatEffortStatusLine, EFFORT_CONTEXT_TURNS } from './effort.js';
 import { appendEffortRecord } from './session-audit.js';
 import { resolveAdaptiveIntent } from './adaptive-intent.js';
 import type { PhysicalTarget, ReasoningProbe, RouteContext, VirtualModelRouter } from './router.js';
@@ -224,6 +224,24 @@ interface AgentRoutingFacts {
   decided?: TurnDecision;
   /** Adaptive effort this layer dispatched most recently, used to recognise a header echo. */
   lastAdaptiveEffort?: string;
+  /**
+   * One entry per earlier turn that carried user text, oldest first — the
+   * observed turn text the continuation path may grade a short reply against.
+   *
+   * This is an *observation* like every other fact here, not a session-log read:
+   * routing must not depend on the session module's internal event shapes. Only
+   * the turn number and the captured text are kept, and the list is bounded by
+   * the effort layer's own window, so a long session cannot grow it without limit.
+   */
+  turns?: TrackedTurn[];
+}
+
+/** One earlier turn's captured task text. */
+interface TrackedTurn {
+  /** Turn the text was observed on. */
+  turn: number;
+  /** Joined user text of that turn, as captured by `agent/pre-step`. */
+  text: string;
 }
 
 /** One decided turn, kept so a same-turn follow-up step costs nothing. */
@@ -850,7 +868,7 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         // identity comparisons and parses nothing unless the loader committed.
         options.refreshConfig?.();
         ensureVirtualSwitchFilter(payload.agent, router, agentFilterDisposers, agentFilters);
-        rememberStep(facts, payload.agent, captureTask(payload.messages, readTaskBudget()), measureMessages(payload.messages));
+        rememberStep(facts, payload.agent, captureTask(payload.messages, readTaskBudget()), measureMessages(payload.messages), payload.turn);
       } catch {
         // Task capture is advisory: a malformed message must not veto the step.
       }
@@ -986,6 +1004,9 @@ export function installModelRouting(ctx: Context, options: ModelRoutingOptions):
         target: { provider: routed.provider, model: routed.model },
         probe,
         task,
+        // Earlier turns of this agent, for the continuation path only: the
+        // effort layer consults them when the turn adds no task of its own.
+        ...(remembered?.turns?.length ? { history: remembered.turns.map((entry) => ({ text: entry.text })) } : {}),
         agent: describeAgent(payload.agent),
         turn: payload.turn,
         step: payload.step,
@@ -1084,18 +1105,27 @@ function captureTask(messages: readonly UserMessage[], budget: number): string |
  * @param agent - the agent proposing the step.
  * @param text - the captured task text, when the step carried any.
  * @param chars - characters of step input observed.
+ * @param turn - the turn the step belongs to.
  */
-function rememberStep(facts: Map<string, AgentRoutingFacts>, agent: Agent, text: string | undefined, chars: number): void {
+function rememberStep(
+  facts: Map<string, AgentRoutingFacts>,
+  agent: Agent,
+  text: string | undefined,
+  chars: number,
+  turn?: number
+): void {
   const key = agentKey(agent);
   if (key === undefined) return;
   const previous = facts.get(key);
+  const turns = rememberTurn(previous?.turns ?? [], text, turn);
   const next: AgentRoutingFacts = {
     ...(text ?? previous?.task ? { task: text ?? previous?.task } : {}),
     ...(previous?.currentModel ? { currentModel: previous.currentModel } : {}),
     contextChars: (previous?.contextChars ?? 0) + Math.max(0, Math.round(chars)),
     stepHasText: text !== undefined,
     ...(previous?.decided ? { decided: previous.decided } : {}),
-    ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {})
+    ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {}),
+    ...(turns.length === 0 ? {} : { turns })
   };
   facts.delete(key);
   facts.set(key, next);
@@ -1104,6 +1134,40 @@ function rememberStep(facts: Map<string, AgentRoutingFacts>, agent: Agent, text:
     if (oldest.done) break;
     facts.delete(oldest.value);
   }
+}
+
+/**
+ * Append one observed turn text, one entry per turn, bounded by the effort
+ * layer's window.
+ *
+ * A second step of the *same* turn replaces that turn's entry instead of adding
+ * another: the window is defined in turns, so a step count must not be able to
+ * push an earlier turn out of it. Consecutive replies of the same text are folded
+ * too — "继续" said three times is one piece of context, not three that grow
+ * with every turn.
+ *
+ * @param turns - the turns kept so far, oldest first.
+ * @param text - the text this step carried; a step without text adds nothing.
+ * @param turn - the turn the step belongs to; `undefined` is treated as a new turn.
+ * @returns the bounded turn list, oldest first.
+ */
+function rememberTurn(turns: readonly TrackedTurn[], text: string | undefined, turn?: number): TrackedTurn[] {
+  if (text === undefined) return [...turns];
+  const last = turns.at(-1);
+  // Without a turn number every step is its own turn: the pre-step hook is the
+  // only place this is read, and guessing an increment would merge a multi-step
+  // turn into one entry — which is harmless — while a wrong merge across real
+  // turns would drop history. Separate entries is the safe reading.
+  const entry: TrackedTurn = { turn: turn ?? (last === undefined ? 0 : last.turn + 1), text };
+  const kept =
+    turn !== undefined && last !== undefined && last.turn === turn ? [...turns.slice(0, -1), entry] : [...turns, entry];
+  // The same text repeated consecutively is one context, not an ever-growing one.
+  const deduped: TrackedTurn[] = [];
+  for (const item of kept) {
+    if (deduped.at(-1)?.text === item.text) continue;
+    deduped.push(item);
+  }
+  return deduped.slice(-EFFORT_CONTEXT_TURNS);
 }
 
 /**
@@ -1150,7 +1214,8 @@ function rememberDecision(
     decided: decision,
     // An echo is only recognisable when this layer, not the user, chose the
     // effort — so the marker is recorded for adaptive decisions alone.
-    ...(resolution.decision ? { lastAdaptiveEffort: resolution.effort } : {})
+    ...(resolution.decision ? { lastAdaptiveEffort: resolution.effort } : {}),
+    ...(previous?.turns?.length ? { turns: previous.turns } : {})
   });
 }
 
@@ -1246,7 +1311,8 @@ function rememberTarget(facts: Map<string, AgentRoutingFacts>, agent: Agent, tar
     contextChars: previous?.contextChars ?? 0,
     ...(previous?.stepHasText === undefined ? {} : { stepHasText: previous.stepHasText }),
     ...(previous?.decided ? { decided: previous.decided } : {}),
-    ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {})
+    ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {}),
+    ...(previous?.turns?.length ? { turns: previous.turns } : {})
   });
 }
 

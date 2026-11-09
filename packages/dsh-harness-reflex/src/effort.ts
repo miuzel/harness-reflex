@@ -71,8 +71,26 @@ export type EffortTriggerKind = 'request' | 'config';
 /** Characters of the turn input handed to System 1 as the question. */
 export const EFFORT_QUESTION_CHARS = 600;
 
+/**
+ * Characters of *earlier turn* context prepended to a continuation reply.
+ *
+ * Deliberately a separate budget from {@link EFFORT_QUESTION_CHARS}: that one
+ * bounds how much of the current turn is shown, this one bounds how much of the
+ * session's history is borrowed. Raising the question budget must never widen
+ * the history window as a side effect, and a continuation reply's own text is
+ * only a few characters — the two limits answer different questions and are
+ * kept independent on purpose.
+ *
+ * The whole decision input of one turn is therefore bounded by
+ * `EFFORT_CONTEXT_CHARS + EFFORT_QUESTION_CHARS`, both constants, both known.
+ */
+export const EFFORT_CONTEXT_CHARS = 400;
+
 /** Characters of the turn input kept in the audit surfaces. */
 export const EFFORT_AUDIT_TASK_CHARS = 160;
+
+/** How many earlier turns of a session may contribute context. Fixed window. */
+export const EFFORT_CONTEXT_TURNS = 3;
 
 /**
  * Scenario vocabulary of one adaptive level. The first token of every rendered
@@ -151,6 +169,16 @@ export interface EffortRequestContext {
   probe?: ReasoningProbe;
   /** Turn input captured on `agent/pre-step`. */
   task?: string;
+  /**
+   * Task text of earlier turns of this agent, oldest first.
+   *
+   * Consulted only when this turn is a continuation reply (see
+   * {@link isContinuationReply}), and only through {@link composeEffortDecisionInput},
+   * so this cannot change how a new instruction is graded. The caller supplies
+   * observed turn text — never a session-log structure — keeping routing's ban on
+   * depending on the session module's internals intact.
+   */
+  history?: readonly EffortContextTurn[];
   agent?: EffortAgentFacts;
   turn?: number;
   step?: number;
@@ -221,6 +249,14 @@ export interface ReflexEffortStatus {
   heldForCache?: boolean;
   /** Effort ids the routed model declares; `[]` when it declares none. */
   supportedEfforts?: string[];
+  /**
+   * Characters of earlier-turn context that went into this decision; absent when
+   * the turn was graded on its own text (every new instruction). Present only
+   * for a continuation reply, and never above `EFFORT_CONTEXT_CHARS`.
+   */
+  contextChars?: number;
+  /** How many earlier turns that context came from, at most `EFFORT_CONTEXT_TURNS`. */
+  contextTurns?: number;
 }
 
 /** Whether a value is the adaptive trigger marker. */
@@ -634,6 +670,169 @@ export function readEffortCues(task: string): EffortCues {
   return cues;
 }
 
+/** Politeness that may surround a continuation without being one. */
+const CONTINUATION_FILLER = new Set([
+  'ok', 'okay', 'sure', 'yes', 'yeah', 'yep', 'alright', 'right', 'fine', 'great', 'cool', 'good', 'perfect',
+  'go', 'just', 'then', 'please', 'thanks', 'thank', 'you', 'on', 'ahead', 'and',
+  '好的', '好', '行', '可以', '没问题', '那就', '就', '嗯', '对', '是的', '收到', '谢谢', '麻烦你', '请', '吧', '来', '做', '了', '的'
+]);
+
+/** Leading filler that may be glued to a Han verb: `那就继续`, `那就按这个来`. */
+const CONTINUATION_LEAD = ['那就', '就这么'];
+
+/**
+ * Multi-word English continuations. Split into tokens these are
+ * `go`+`ahead`, `go`+`on`, `carry`+`on`, `keep`+`going`; each word is filler or
+ * verb on its own, so the pair is what has to be recognised.
+ */
+const CONTINUATION_PHRASE = /\b(?:go\s+(?:ahead|on)|carry\s+on|keep\s+going)\b/iu;
+
+/**
+ * Words that *are* the continuation, as opposed to politeness around it.
+ *
+ * Agreeing — 同意, 赞成, 按这个来 — is the same act as "continue": it commits the
+ * session to work already described rather than describing new work.
+ */
+const CONTINUATION_VERB = new Set([
+  'continue', 'proceed', 'carry', 'keep', 'going',
+  '继续', '接着', '下一步', '按这个', '按这样', '就这么', '照这个', '往下', '同意', '赞成', '可以的'
+]);
+
+/** Longest continuation verb, used to bound the prefix scan. */
+const CONTINUATION_VERB_MAX = Math.max(...[...CONTINUATION_VERB].map((word) => word.length));
+
+/** Split one reply into content-bearing pieces, dropping punctuation and spacing. */
+function replyTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^\p{Script=Han}a-z0-9]+/u)
+    .filter((token) => token.length > 0);
+}
+
+/**
+ * Whether one token is a continuation verb, alone or with trailing filler:
+ * `继续`, `继续吧`, `继续做`, `按这个来`, `go`+`ahead` handled at token level.
+ */
+function isContinuationVerb(token: string): boolean {
+  if (CONTINUATION_VERB.has(token)) return true;
+  for (const lead of CONTINUATION_LEAD) {
+    if (token.startsWith(lead)) return isContinuationVerb(token.slice(lead.length));
+  }
+  // A Han run may carry trailing filler ("继续吧", "那就继续吧" splits into
+  // "那就"+"继续吧"): match the longest known prefix whose remainder is all
+  // filler, one character at a time. A shorter verb must still be tried when the
+  // longest prefix's remainder is not filler, hence the loop rather than a return.
+  for (let size = Math.min(token.length, CONTINUATION_VERB_MAX); size > 0; size -= 1) {
+    const head = token.slice(0, size);
+    if (!CONTINUATION_VERB.has(head)) continue;
+    const rest = token.slice(size);
+    if (rest.length === 0) return true;
+    if (!/\p{Script=Han}/u.test(rest)) continue;
+    if ([...rest].every((char) => CONTINUATION_FILLER.has(char))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether one turn input is a continuation reply rather than a new instruction.
+ *
+ * A continuation adds no task information of its own — "继续", "同意", "go
+ * ahead" — so grading its few characters in isolation answers a question the
+ * user did not ask. The caller decides the level from *what is being continued*
+ * instead; see {@link composeEffortDecisionInput}.
+ *
+ * The rule is word-level rather than one clever pattern: every token must be a
+ * continuation verb or filler, and at least one verb must be present. Any other
+ * content word — `继续实现 parser`, `go ahead and implement it` — names work this
+ * turn, so it is a new instruction and never a continuation. That is what keeps
+ * the path from widening beyond the replies it is meant for.
+ *
+ * `同意` and `按这个来` are not in {@link CUE_VOCABULARY}, so they are named here
+ * explicitly: without them the classifier would miss exactly the replies the
+ * goal is about, and they would keep being graded as if they were the whole task.
+ *
+ * @param task - the raw turn input.
+ * @returns whether the turn is a continuation reply.
+ */
+export function isContinuationReply(task: string): boolean {
+  const text = cleanEffortTaskText(task).text;
+  if (text.length === 0) return false;
+  const tokens = replyTokens(text);
+  if (tokens.length === 0) return false;
+
+  // Every token must be filler or a continuation verb, and at least one must be
+  // a verb. Filler may sit on either side of it ("好的，继续", "继续吧，那就"), so
+  // the scan only has to reject a foreign word, not order the reply.
+  let sawVerb = CONTINUATION_PHRASE.test(text);
+  for (const token of tokens) {
+    if (isContinuationVerb(token)) sawVerb = true;
+    else if (!CONTINUATION_FILLER.has(token)) return false;
+  }
+  return sawVerb;
+}
+
+/** One earlier turn's text, as the continuation path may consult it. */
+export interface EffortContextTurn {
+  /** That turn's captured task text, already cleaned by the caller or here. */
+  text: string;
+}
+
+/**
+ * Compose the text one adaptive decision is graded on.
+ *
+ * For a new instruction the turn text is the whole input, exactly as before —
+ * the history of the session says nothing about how hard *this* turn is. For a
+ * continuation reply the earlier turns are prepended, so the level follows the
+ * work being continued instead of the two characters that agreed to it.
+ *
+ * Every part goes through {@link cleanEffortTaskText}: the history carries the
+ * same architecture/proof vocabulary the current turn does, and it is exactly
+ * that vocabulary that P9 showed must not leak into a decision as a raw keyword.
+ *
+ * The history is cut from its **end**: the most recent turns are the ones being
+ * continued, so when the window overflows the oldest text is what goes first.
+ *
+ * @param task - the current turn input.
+ * @param history - earlier turns of this session, oldest first.
+ * @returns the text to grade, and how much history was actually used.
+ */
+export function composeEffortDecisionInput(
+  task: string,
+  history: readonly EffortContextTurn[] = []
+): { text: string; contextChars: number; contextTurns: number } {
+  if (!isContinuationReply(task)) return { text: task, contextChars: 0, contextTurns: 0 };
+
+  // The current turn is already recorded in the history by the time it is
+  // decided (`agent/pre-step` runs first), so it is dropped here: a session's
+  // first turn being "继续" must borrow nothing, or the reply would become its
+  // own context and the window would say it used one turn of history.
+  const current = cleanEffortTaskText(task).text;
+  // Newest first, bounded by the turn window, then joined oldest-first inside
+  // the window so the reading order matches the session's own.
+  const recent = history
+    .map((turn) => cleanEffortTaskText(turn.text).text)
+    .filter((text) => text.length > 0 && text !== current)
+    .slice(-EFFORT_CONTEXT_TURNS)
+    .reverse();
+  if (recent.length === 0) return { text: task, contextChars: 0, contextTurns: 0 };
+
+  const kept: string[] = [];
+  let budget = EFFORT_CONTEXT_CHARS;
+  for (const text of recent) {
+    if (budget <= 0) break;
+    // A turn longer than what is left contributes its tail: the end of a task
+    // description is the part a continuation is most likely about.
+    const slice = text.length > budget ? text.slice(text.length - budget) : text;
+    kept.push(slice);
+    budget -= slice.length + 1; // +1 for the newline joining it to the next entry
+  }
+  if (kept.length === 0) return { text: task, contextChars: 0, contextTurns: 0 };
+
+  const context = kept.reverse().join('\n');
+  const text = `${context}\n${current}`;
+  return { text, contextChars: context.length, contextTurns: kept.length };
+}
+
 /** One tier's vote. */
 export interface EffortCueVote {
   level: AdaptiveEffortLevel;
@@ -957,6 +1156,11 @@ export class EffortInterceptor {
   async #decideTurn(trigger: EffortTriggerKind, context: EffortRequestContext): Promise<EffortResolution> {
     const task = context.task ?? '';
     const started = this.#now();
+    // A continuation reply ("继续", "同意") adds no task of its own, so it is
+    // graded together with the turns it continues; every other turn is graded on
+    // its own text, exactly as before (g-053).
+    const decisionInput = composeEffortDecisionInput(task, context.history);
+    const graded = decisionInput.text;
     const support = await resolveSupport(context);
     const efforts = support.kind === 'declared' ? [...support.efforts] : undefined;
 
@@ -965,18 +1169,18 @@ export class EffortInterceptor {
       // turn's level is still *reported* — the status row and the audit have to
       // say how deep the turn was — but the request must not carry the key.
       const decision = this.#decideByCues(
-        readEffortCues(task),
+        readEffortCues(graded),
         started,
         undefined,
         'target model declares no reasoning; the level is reported but never sent'
       );
-      const status = buildEffortStatus(decision, { outcome: 'cleared' }, trigger, context, support);
+      const status = buildEffortStatus(decision, { outcome: 'cleared' }, trigger, context, support, decisionInput);
       this.#publish(decision, status, task);
 
       return { changed: context.requested !== undefined, outcome: 'cleared', trigger, decision, status };
     }
 
-    const cues = readEffortCues(task);
+    const cues = readEffortCues(graded);
     // A restatement instruction is decided by its shape, not by its content: the
     // payload may be unquoted (`原文照抄：design the migration protocol`) and the
     // instruction's own phrasing may survive the negation cleanup (`不要优化…`).
@@ -984,11 +1188,11 @@ export class EffortInterceptor {
     // false positive the cleanup exists to remove, so the cue verdict stands.
     const attempt = cleanEffortTaskText(task).verbatim
       ? { reason: 'the turn is a restatement instruction; the payload is a copy, not work to grade' }
-      : await this.#askSystemOne(task, cues, started, efforts);
+      : await this.#askSystemOne(graded, cues, started, efforts);
     const decision = attempt.decision ?? this.#decideByCues(cues, started, efforts, attempt.reason);
 
     const projection = projectWithinSupport(decision.level, support);
-    const status = buildEffortStatus(decision, projection, trigger, context, support);
+    const status = buildEffortStatus(decision, projection, trigger, context, support, decisionInput);
     this.#publish(decision, status, task);
 
     return {
@@ -1101,7 +1305,10 @@ export class EffortInterceptor {
           ...(status.role ? { role: status.role } : {}),
           ...(status.delegationDepth === undefined ? {} : { delegationDepth: status.delegationDepth }),
           ...(status.turn === undefined ? {} : { turn: status.turn }),
-          ...(status.step === undefined ? {} : { step: status.step })
+          ...(status.step === undefined ? {} : { step: status.step }),
+          // g-053: the ledger has to show *that* earlier context was used, not
+          // just the level that came out of it.
+          ...(status.contextChars === undefined ? {} : { contextChars: status.contextChars, contextTurns: status.contextTurns })
         }
       });
     } catch {
@@ -1164,7 +1371,8 @@ function buildEffortStatus(
   projection: { effort?: string; outcome: EffortOutcome },
   trigger: EffortTriggerKind,
   context: EffortRequestContext,
-  support?: ReasoningSupport
+  support?: ReasoningSupport,
+  decisionInput?: { contextChars: number; contextTurns: number }
 ): ReflexEffortStatus {
   const task = context.task?.trim() ?? '';
   const status: ReflexEffortStatus = {
@@ -1192,7 +1400,11 @@ function buildEffortStatus(
     ...(context.switched === undefined ? {} : { switched: context.switched }),
     ...(context.heldForCache === undefined ? {} : { heldForCache: context.heldForCache }),
     ...(support?.kind === 'declared' ? { supportedEfforts: [...support.efforts] } : {}),
-    ...(support?.kind === 'none' ? { supportedEfforts: [] } : {})
+    ...(support?.kind === 'none' ? { supportedEfforts: [] } : {}),
+    // Audit trail of the continuation path: how much earlier-turn text the
+    // decision actually saw. Absent when the turn was graded on its own text,
+    // so a new instruction's status keeps the exact shape it had before g-053.
+    ...(decisionInput?.contextChars ? { contextChars: decisionInput.contextChars, contextTurns: decisionInput.contextTurns } : {})
   };
 
   return { ...status, line: formatEffortStatusLine(status) };
