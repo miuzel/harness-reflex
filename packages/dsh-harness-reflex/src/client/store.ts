@@ -480,6 +480,7 @@ export class PanelStore {
             apiKey: '',
             apiKeyPresent: false,
             apiKeyFromProfile: false,
+            apiKeyVariable: '',
             clearKey: false
           }
         ]

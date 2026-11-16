@@ -271,11 +271,13 @@ export interface PanelSystemOneProfileView {
   apiKeyEnv?: string;
   /**
    * Whether this profile currently resolves a key — from its own secret slot or
-   * from the variable it names. Never which, and never the value.
+   * from the variable the chain names. Never which value.
    */
   apiKeyPresent: boolean;
-  /** Whether the key this profile resolves is its own secret slot (not the variable). */
+  /** Whether the key this profile resolves is its own secret slot (not a variable). */
   apiKeyFromProfile: boolean;
+  /** The variable that supplied this profile's key, when one did. A name, never a value. */
+  apiKeyVariable?: string;
   timeoutMs?: number;
   backend?: string;
   /** Whether this is the profile in force. */
@@ -291,8 +293,23 @@ export interface PanelSystemOneView {
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
-  /** Whether `apiKeyEnv` currently holds a non-empty value. Never the value. */
+  /**
+   * Whether the key chain currently resolves a key — from the settings
+   * document, from `apiKeyEnv`, or from one of the fallback variables. Never
+   * which value.
+   */
   apiKeyPresent: boolean;
+  /**
+   * Where that key came from, so the page can say "from the configuration" or
+   * "from JEV_API_KEY" instead of guessing from `apiKeyEnv`. Absent when no key
+   * resolves at all.
+   */
+  apiKeySource?: 'profile' | 'env';
+  /**
+   * The environment variable that supplied the key (present only when
+   * {@link apiKeySource} is `env`). A *name*; the value never travels.
+   */
+  apiKeyVariable?: string;
   /** Whether the resolved configuration carries a literal key. Never the key. */
   apiKeyFromProfile: boolean;
   timeoutMs?: number;
@@ -381,15 +398,23 @@ export interface PanelRuntimeFacts {
   ledger: Pick<DecisionLedger, 'getSummary' | 'getEntries' | 'getLogPath'>;
   /** Latest adaptive decision of this activation. */
   effort: ReflexEffortStatus | undefined;
-  /** Whether an API key is currently reachable through the declared variable. */
+  /** Whether an API key is currently reachable through the resolved key chain. */
   apiKeyPresent: boolean;
+  /**
+   * Where that key came from: a literal in the settings document (`profile`) or
+   * an environment variable (`env`). Absent when no key resolves.
+   */
+  apiKeySource?: 'profile' | 'env';
+  /** The variable that supplied the key, when {@link apiKeySource} is `env`. A name, never a value. */
+  apiKeyVariable?: string;
   /**
    * Key *presence* per profile name — the only key fact the panel may receive.
    *
-   * A map of booleans, never of values: the projection cannot leak what it is not
-   * handed, and a test asserts the serialized snapshot contains no key substring.
+   * A map of booleans and variable names, never of values: the projection cannot
+   * leak what it is not handed, and a test asserts the serialized snapshot
+   * contains no key substring.
    */
-  profileKeys?: Record<string, { present: boolean; fromProfile: boolean }>;
+  profileKeys?: Record<string, { present: boolean; fromProfile: boolean; variable?: string }>;
   /** Health of the backend's gateway conversation, when it tracks one. */
   systemOneHealth?: PanelSystemOneHealth;
   /** Available physical model catalog from ctx.llm. */
@@ -576,10 +601,13 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
 export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRuntimeFacts): PanelSystemOneView {
   const { systemOne } = config;
   // Presence, never value: a profile "has" a key when its own secret slot is set,
-  // else when the variable it names holds a non-empty value.
-  const keyFacts = (name: string, profile: { apiKey?: string; apiKeyEnv?: string }): { present: boolean; fromProfile: boolean } => {
+  // else when one of the variables the chain names holds a non-empty value.
+  const keyFacts = (
+    name: string,
+    profile: { apiKey?: string; apiKeyEnv?: string }
+  ): { present: boolean; fromProfile: boolean; variable?: string } => {
     const supplied = facts.profileKeys?.[name];
-    if (supplied !== undefined) return { present: supplied.present, fromProfile: supplied.fromProfile };
+    if (supplied !== undefined) return supplied;
     const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
     return { present: own, fromProfile: own };
   };
@@ -596,6 +624,7 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
       active: systemOne.active === name,
       apiKeyPresent: keys.present,
       apiKeyFromProfile: keys.fromProfile,
+      ...(keys.variable === undefined ? {} : { apiKeyVariable: keys.variable }),
       ...(merged.baseUrl === undefined ? {} : { baseUrl: merged.baseUrl }),
       ...(merged.model === undefined ? {} : { model: merged.model }),
       ...(merged.apiKeyEnv === undefined ? {} : { apiKeyEnv: merged.apiKeyEnv }),
@@ -609,6 +638,10 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
     active: facts.backendName,
     apiKeyPresent: facts.apiKeyPresent,
     apiKeyFromProfile: resolvedCarriesKey,
+    // Provenance travels as a source tag and a variable *name* — the caller
+    // resolved them through the one key chain and dropped the value there.
+    ...(facts.apiKeySource === undefined ? {} : { apiKeySource: facts.apiKeySource }),
+    ...(facts.apiKeyVariable === undefined ? {} : { apiKeyVariable: facts.apiKeyVariable }),
     profiles,
     activeProfileMissing: systemOne.activeProfileMissing === true,
     ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),

@@ -35,7 +35,7 @@ import type {
   ResolvedSystemOneConfig,
   ResolvedToolsConfig
 } from './config.js';
-import { resolveApiKey, resolveConfig, volatileSnapshots } from './config.js';
+import { resolveApiKeyWithSource, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { DelegatedEffortInheritance } from './effort-delegation.js';
 import type { DelegationHealth } from './delegation-health.js';
@@ -966,8 +966,16 @@ function backendSignature(config: ResolvedReflexConfig): string {
  * this plugin instance only: the backend implementations already fall back to
  * the environment for every omitted option, so an explicitly configured
  * deployment and an env-configured one behave the same when the block is empty.
+ *
+ * The key is the exception worth naming: it is resolved **here**, through
+ * {@link resolveApiKeyWithSource}, and handed to the backend explicitly. The
+ * backends keep their own environment reads for the fields they own (base URL,
+ * model), but a key that only arrived through their fallback would be invisible
+ * to {@link resolveApiKeyWithSource} — and therefore to the panel, which is how
+ * "the panel says the env var is empty while the backend works" was possible.
+ * One chain, one answer for both.
  * @param config - resolved plugin configuration.
- * @param env - environment the API-key indirection reads; defaults to `process.env`.
+ * @param env - environment the API-key chain reads; defaults to `process.env`.
  * @returns the forced backend, or one chosen from the environment for `auto`.
  */
 export function createBackend(
@@ -975,7 +983,8 @@ export function createBackend(
   env: Record<string, string | undefined> = process.env
 ): DecisionBackend {
   const { backend, baseUrl, model, timeoutMs } = config.systemOne;
-  const apiKey = resolveApiKey(config.systemOne, env);
+  const resolvedKey = resolveApiKeyWithSource(config.systemOne, env);
+  const apiKey = resolvedKey?.key;
   switch (backend) {
     case 'mock':
       return new MockDecisionBackend();

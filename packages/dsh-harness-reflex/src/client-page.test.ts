@@ -401,6 +401,10 @@ function facts(apiKeyPresent: boolean): PanelRuntimeFacts {
       at: 1_709_530_000_000
     },
     apiKeyPresent,
+    // g-058: presence alone is no longer the whole fact — the panel reports
+    // *where* the key came from. A fixture with a key therefore has to say so,
+    // exactly as the mount layer does.
+    ...(apiKeyPresent ? { apiKeySource: 'env' as const, apiKeyVariable: 'JEV_API_KEY' } : {}),
     now: 1_709_530_001_000
   };
 }
@@ -1316,28 +1320,134 @@ test('the backend page shows where the key lives, never the key', async () => {
     const { form } = settingsForm(AUTHORED);
     const mounted = await mountPanel({ facts: facts(true), form });
     openTab(mounted.tree, 'System 1 后端');
-    const tree = await mounted.runtime.flush();
+    // g-058: the flat block folds by default; its fields are still editable.
+    const tree = await expandFlatBlock(mounted);
     const text = textOf(tree);
 
     assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
     assert.equal(inputOf(tree, 'Base URL'), 'http://127.0.0.1:8000/v1');
     assert.ok(!text.includes(SECRET), 'the page rendered an API key value');
-    assert.ok(text.includes('环境变量已就绪'), 'the page does not say whether the key is present');
+    assert.ok(text.includes('密钥来自 JEV_API_KEY'), 'the page does not say where the key came from');
     mounted.unmount();
   } finally {
     delete process.env.REFLEX_TEST_KEY;
   }
 });
 
-test('the backend page reports a missing key variable', async () => {
+test('the backend page reports a missing key variable without claiming it is the cause', async () => {
   const { form } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(false), form });
   openTab(mounted.tree, 'System 1 后端');
-  const tree = await mounted.runtime.flush();
-  assert.ok(textOf(tree).includes('环境变量为空'), 'a missing key is not reported');
+  const tree = await expandFlatBlock(mounted);
+  const text = textOf(tree);
+  // The old copy said "the environment variable is empty" while the backend
+  // could still be serving the key from a fallback variable. The page now states
+  // the fact (nothing resolved) and names what it checked.
+  assert.ok(text.includes('缺少 REFLEX_TEST_KEY'), 'a missing key does not name the declared variable');
+  assert.ok(!text.includes('环境变量为空'), 'the old "the variable is empty" claim survived');
+  assert.ok(text.includes('OPENAI_API_KEY'), 'the copy does not name the candidates it checked');
   assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
   mounted.unmount();
 });
+
+//#region the flat block's compatibility fold (g-058)
+
+/**
+ * Expand the compatibility fold on the connection page.
+ *
+ * The flat block is the fallback step of the resolution chain, so its fields must
+ * stay editable — but they must not compete with the profiles card for the same
+ * fields, which is what made the page read as two editors of one thing.
+ * @param mounted - the mounted page, already switched to the backend tab.
+ * @returns the freshly rendered tree, with the fold open.
+ */
+async function expandFlatBlock(mounted: Mounted): Promise<unknown> {
+  // `openTab` only marks the page stale; the tab content appears on the next
+  // render, so look at a freshly flushed tree rather than the previous one.
+  const rendered = await mounted.runtime.flush();
+  const header = elements(rendered).find((element) => element.type === 'button' && textOf(element).includes('决策后端连接'));
+  assert.ok(
+    header !== undefined,
+    `the compatibility fold has no disclosure header among [${elements(rendered)
+      .filter((element) => element.type === 'button')
+      .map((element) => textOf(element))
+      .join(' | ')}]`
+  );
+  assert.equal(header.props['data-reflex-folded'], undefined, 'the fold is not a button-led card');
+  fire(header, 'onClick');
+  return mounted.runtime.flush();
+}
+
+test('the flat connection block folds by default and expands to the same editable fields', async () => {
+  const { form } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  const collapsed = await mounted.runtime.flush();
+
+  // 1. Collapsed by default: the card exists, its fields are not in the tree.
+  const folds = elements(collapsed).filter((element) => typeof element.props['data-reflex-folded'] === 'string');
+  assert.equal(folds.length, 1, 'exactly one compatibility fold');
+  assert.equal(folds[0]!.props['data-reflex-folded'], 'closed', 'the fold must start collapsed');
+  assert.equal(elements(collapsed).some((e) => e.type === 'label' && textOf(e).includes('API Key 环境变量名')), false, 'the folded block still rendered its fields');
+
+  // 2. The collapsed header still answers "is my key working", and says which
+  //    variable supplied it — the fact the old page got wrong.
+  const collapsedText = textOf(folds[0]!);
+  assert.ok(collapsedText.includes('决策后端连接'), 'the fold has no title');
+  assert.ok(collapsedText.includes('兼容区'), 'the fold does not explain its role');
+  assert.ok(collapsedText.includes('密钥来自 JEV_API_KEY'), 'the collapsed header does not report where the key came from');
+  assert.ok(collapsedText.includes('新配置请用上方连接配置'), 'the collapsed header does not point at the profiles above');
+
+  // 3. Expanding reveals the editable fields and their values, unchanged, plus
+  //    the explanation of the fold's role.
+  fire(folds[0]!.children[0] as any, 'onClick');
+  const expanded = await mounted.runtime.flush();
+  const expandedFold = elements(expanded).find((element) => typeof element.props['data-reflex-folded'] === 'string');
+  assert.ok(expandedFold !== undefined, 'the fold disappeared');
+  assert.equal(expandedFold.props['data-reflex-folded'], 'open', 'the fold did not open');
+  assert.equal(inputOf(expanded, 'API Key 环境变量名'), 'REFLEX_TEST_KEY', 'the expanded field lost its value');
+  assert.equal(inputOf(expanded, 'Base URL'), 'http://127.0.0.1:8000/v1');
+  assert.ok(textOf(expandedFold).includes('新连接请用上方'), 'the open fold does not say to use the profiles above');
+
+  // 4. The profiles card is the main editing surface: it is not folded, and its
+  //    own controls are on screen without expanding anything.
+  assert.ok(textOf(collapsed).includes('连接配置（可多套）'), 'the profiles card is missing');
+  assert.ok(find(collapsed, 'button', '新增配置') !== undefined, 'the profiles card is not editable on screen');
+  mounted.unmount();
+});
+
+test('folding the flat block does not change what a save writes', async () => {
+  // The fold is presentational: both states render the same draft and the write
+  // path is untouched. This pins the "collapsed" state specifically, so a future
+  // refactor that derives the write from what is on screen would go red.
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  const tree = await mounted.runtime.flush();
+  const folded = elements(tree).find((element) => element.props['data-reflex-folded'] === 'closed');
+  assert.ok(folded !== undefined, 'the flat block did not start collapsed');
+
+  // Save with the fold still closed: the narrow-path write of the flat block and
+  // of every profile must still happen, and never a whole-group `systemOne` write.
+  fire(find(tree, 'button', '保存'), 'onClick');
+  await mounted.runtime.flush(2);
+  const writes = mounted.observed.calls.map((call) => call.url);
+  assert.ok(writes.length > 0, 'saving wrote nothing');
+  const ops = (mounted.observed as unknown as { mutations?: { ops: { op?: string; path: string[] }[] }[] }).mutations;
+  if (ops !== undefined) {
+    for (const mutation of ops) {
+      for (const op of mutation.ops) {
+        assert.ok(
+          !(op.op === 'set' && op.path.length === 1 && op.path[0] === 'systemOne'),
+          'a collapsed flat block produced a whole-group systemOne write'
+        );
+      }
+    }
+  }
+  mounted.unmount();
+});
+
+//#endregion
 
 //#region connection profiles (g-057)
 
@@ -1556,7 +1666,7 @@ test('the status icon is focusable and explains routing, effort, and backend', a
     assert.ok(title.includes('推理强度'), 'the explanation does not describe reasoning effort');
     assert.ok(title.includes('「推理强度」页'), 'the explanation does not say where to change effort');
     assert.ok(title.includes('System One 决策后端'), 'the explanation does not describe the backend');
-    assert.ok(title.includes('apiKeyEnv: set'), 'the explanation drops the key status');
+    assert.ok(title.includes('密钥来自环境变量 JEV_API_KEY'), 'the explanation drops where the key came from');
     assert.ok(title.includes('「System 1 后端」页'), 'the explanation does not say where to configure the backend');
   } finally {
     mounted.unmount();
@@ -1608,6 +1718,45 @@ test('the icon distinguishes healthy, missing-key, and degraded states', async (
   }
 });
 
+test('the status chip reports where the key came from, and never claims the named variable is empty', async () => {
+  // g-058: the reported shape was `apiKeyEnv: SYSTEM_ONE_API_KEY` with a shell
+  // exporting only `JEV_API_KEY`, so the page said the variable was empty while
+  // the backend worked. The chip now states the fact the chain resolved.
+  const { form } = settingsForm(AUTHORED);
+  const cases: { source: 'profile' | 'env' | undefined; variable?: string; expect: RegExp; forbidden?: RegExp }[] = [
+    { source: 'profile', expect: /密钥来自连接配置/ },
+    { source: 'env', variable: 'JEV_API_KEY', expect: /来自环境变量 JEV_API_KEY/ },
+    { source: undefined, expect: /缺少 REFLEX_TEST_KEY/, forbidden: /环境变量为空/ }
+  ];
+  for (const entry of cases) {
+    const base = facts(entry.source !== undefined);
+    const scenarioFacts: PanelRuntimeFacts = {
+      ...base,
+      ...(entry.source === undefined
+        ? {}
+        : { apiKeySource: entry.source, ...(entry.variable === undefined ? {} : { apiKeyVariable: entry.variable }) })
+    };
+    const mounted = await mountPanel({ facts: scenarioFacts, form });
+    try {
+      const title = String(statusButtons(mounted.tree)[0]?.props.title ?? '');
+      assert.match(title, entry.expect, `source ${String(entry.source)} is not reported: ${title}`);
+      if (entry.forbidden !== undefined) {
+        assert.doesNotMatch(title, entry.forbidden, 'the old "the variable is empty" claim survived');
+      }
+      // The candidates are named when nothing resolves, so the user knows what to check.
+      if (entry.source === undefined) {
+        assert.match(title, /SYSTEM_ONE_API_KEY/, 'the missing-key copy must name the candidates');
+        assert.match(title, /OPENAI_API_KEY/, 'the missing-key copy must name every candidate');
+      }
+      // Whatever the source, the credential itself never reaches the copy.
+      const serialized = JSON.stringify([title, textOf(mounted.tree)]);
+      assert.ok(!serialized.includes('sk-'), 'a key value leaked into the rendered copy');
+    } finally {
+      mounted.unmount();
+    }
+  }
+});
+
 test('the English status icon mirrors the label, title, and three states', async () => {
   const { form } = settingsForm(AUTHORED);
   const healthy = await mountPanel({ facts: facts(true), form, language: 'en' });
@@ -1623,7 +1772,7 @@ test('the English status icon mirrors the label, title, and three states', async
     assert.ok(title.includes('"Virtual Provider" page'), 'the English explanation omits the routing page');
     assert.ok(title.includes('"Reasoning effort" page'), 'the English explanation omits the effort page');
     assert.ok(title.includes('"System 1 backend" page'), 'the English explanation omits the backend page');
-    assert.ok(title.includes('apiKeyEnv: set'), 'the English explanation drops the key status');
+    assert.ok(title.includes('environment variable JEV_API_KEY'), `the English explanation drops where the key came from: ${title}`);
   } finally {
     healthy.unmount();
   }
@@ -1633,8 +1782,8 @@ test('the English status icon mirrors the label, title, and three states', async
     const icon = statusButtons(missingKey.tree)[0]!;
     assert.equal(icon.props['data-reflex-status'], 'warn');
     const title = String(icon.props.title ?? '');
-    assert.ok(title.includes('is missing'), 'the English warning does not name the missing key');
-    assert.ok(title.includes('apiKeyEnv: empty'), 'the English warning drops the key status');
+    assert.ok(title.includes('missing REFLEX_TEST_KEY'), 'the English warning does not name the missing key');
+    assert.ok(title.includes('OPENAI_API_KEY'), 'the English warning does not name the fallback candidates');
     assert.ok(title.includes('degrade'), 'the English warning does not warn about degradation');
     assert.match(String(icon.props['aria-label'] ?? ''), /missing its API key/);
   } finally {
@@ -1836,6 +1985,24 @@ function editBackendPage(tree: unknown): void {
   type(inputElement(tree, '工具名前缀'), 'rv_');
 }
 
+/**
+ * The disclosure button of the flat block's compatibility fold.
+ * @param tree - the rendered page.
+ * @param title - the fold's title in the page's language.
+ * @returns the header element.
+ */
+function flatFoldHeader(tree: unknown, title = '决策后端连接'): Element {
+  const header = elements(tree).find((element) => element.type === 'button' && textOf(element).includes(title));
+  assert.ok(
+    header !== undefined,
+    `the compatibility fold is missing among [${elements(tree)
+      .filter((element) => element.type === 'button')
+      .map((element) => textOf(element))
+      .join(' | ')}]`
+  );
+  return header;
+}
+
 //#endregion
 
 test('the System 1 backend page writes the scalar and its block, on the paths the Host declares', async () => {
@@ -1843,6 +2010,10 @@ test('the System 1 backend page writes the scalar and its block, on the paths th
   const mounted = await mountPanel({ facts: facts(true), form });
   openTab(mounted.tree, 'System 1 后端');
   let tree = await mounted.runtime.flush();
+
+  // g-058: the flat block folds by default; its fields stay editable once open.
+  fire(flatFoldHeader(tree), 'onClick');
+  tree = await mounted.runtime.flush();
 
   editBackendPage(tree);
   tree = await mounted.runtime.flush();
@@ -1920,6 +2091,13 @@ test('every path the panel writes is a path the Host declares volatile', async (
     const mounted = await mountPanel({ facts: facts(true), form });
     openTab(mounted.tree, perturb.tab);
     let tree = await mounted.runtime.flush();
+    // g-058: the backend page's flat block folds by default. Opening it is the
+    // step a user takes before editing those fields, and the write path behind
+    // them is unchanged.
+    if (perturb.tab === 'System 1 后端') {
+      fire(flatFoldHeader(tree), 'onClick');
+      tree = await mounted.runtime.flush();
+    }
     perturb.edit(tree);
     tree = await mounted.runtime.flush();
     fire(find(tree, 'button', '保存'), 'onClick');
@@ -2262,8 +2440,20 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
     const tabs = ['routing', 'effort', 'backend', 'interventions', 'tools'];
     const renderedPaths = new Set<string>();
     for (const tab of tabs) {
-      openTab(mounted.tree, tabLabels[tab] as string);
-      const tree = await mounted.runtime.flush();
+      // One page per tab: the stub runtime allocates hook slots by call order, so
+      // a `useState` left non-default on one tab would leak into the `?`
+      // expansion checks of the next. g-058 added such a state (the flat block's
+      // fold), which is why this walk no longer shares one mounted page.
+      const { form: tabForm } = settingsForm(AUTHORED);
+      const page = await mountPanel({ facts: facts(true), form: tabForm, language });
+      openTab(page.tree, tabLabels[tab] as string);
+      let tree = await page.runtime.flush();
+      if (tab === 'backend') {
+        // The flat connection block folds by default; open it so its schema
+        // fields are still inspected.
+        fire(flatFoldHeader(tree, language === 'zh' ? '决策后端连接' : 'Backend connection'), 'onClick');
+        tree = await page.runtime.flush();
+      }
       const wrappers = elements(tree).filter((element) => typeof element.props['data-reflex-path'] === 'string');
       for (const wrapper of wrappers) renderedPaths.add(String(wrapper.props['data-reflex-path']));
       const pathsInTab = uniquePaths.filter((path) => groupOf(path) === tab);
@@ -2340,7 +2530,6 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
       [...uniquePaths].sort(),
       `the panel's editable field set (${language}) differs from the schema leaf set`
     );
-    mounted.unmount();
   }
 
   // Every expected field was rendered in both languages.

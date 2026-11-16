@@ -874,9 +874,16 @@ window.__ModuleLoader__.load({
 			    labelApiKeyEnv: 'API Key 环境变量名',
 			    labelTimeoutMs: '超时（毫秒）',
 			    backendHint: '可填环境变量名，或在上方连接配置里直接保存 API Key（只写不读）。',
+			    backendFlatFoldRole: '兼容区：新配置请用上方连接配置',
+			    backendHintFlat: '兼容区：新连接请用上方「连接配置（可多套）」，这里只作为它未覆盖字段时的兜底。点标题可展开编辑。',
+			    backendFlatFoldedSummary: '已折叠（新配置请用上方连接配置）',
 			    backendActive: '当前生效实现',
-			    apiKeyPresent: '环境变量已就绪',
-			    apiKeyMissing: '环境变量为空',
+			    // Key readiness reports *where* the key came from, because the chain the
+			    // backend follows is longer than the one variable this page names.
+			    apiKeyFromProfile: '密钥来自配置（只写，不回显）',
+			    apiKeyFromEnv: '密钥来自 {name}',
+			    apiKeyMissing: '未配置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
+			    apiKeyMissingNamed: '缺少 {name}，且已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥',
 			    profilesTitle: '连接配置（可多套）',
 			    profilesHint: '每套配置一个连接；选一套为当前激活。API Key 只写不读：保存后立即写入设置文档，页面只显示占位符。',
 			    profilesEmpty: '还没有连接配置。新增一套即可填写 baseURL、模型与 API Key。',
@@ -889,7 +896,7 @@ window.__ModuleLoader__.load({
 			    profileKeyPlaceholder: '粘贴 API Key（留空表示不改动）',
 			    profileKeyStored: '已保存（只写，不回显）',
 			    profileKeyFromEnv: '来自环境变量 {name}',
-			    profileKeyMissing: '未设置',
+			    profileKeyMissing: '未设置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
 			    profileClearKey: '清除已存 Key',
 			    profileClearConfirm: '确认清除？',
 			    profileTest: '测试',
@@ -977,9 +984,9 @@ window.__ModuleLoader__.load({
 			    chipEffortTitleSet: '已选择推理强度：每轮按 {level} 执行并随请求下发。可在模型选择器里改选其他档位，或在「推理强度」页选择 Reflex 自适应。',
 			    chipEffortTitleUnset: '无推理强度选择：插件不干预，使用模型默认档位。请在模型选择器里选择具体档位，或在「推理强度」页选择 Reflex 自适应。',
 			    chipBackend: '后端 · {backend}',
-			    chipBackendTitle: 'System One 决策后端当前为 {backend}；API Key 环境变量 {env} 已就绪（apiKeyEnv: set）。可在「System 1 后端」页更换实现或调整连接。',
-			    chipBackendTitleMissing: 'System One 决策后端当前为 {backend}；缺少 {env} 环境变量（apiKeyEnv: empty），决策会降级到本地兜底。请在「System 1 后端」页配置该环境变量或更换后端。',
-			    chipBackendTitleUnsetKey: 'System One 决策后端当前为 {backend}；未声明 API Key 环境变量，插件会使用环境默认密钥或降级到本地兜底。可在「System 1 后端」页配置连接。',
+			    chipBackendTitle: 'System One 决策后端当前为 {backend}；密钥来自环境变量 {env}。可在「System 1 后端」页更换实现或调整连接。',
+			    chipBackendTitleFromProfile: 'System One 决策后端当前为 {backend}；密钥来自连接配置里保存的 Key（只写，不回显）。可在「System 1 后端」页更换实现或调整连接。',
+			    chipBackendTitleMissingKey: 'System One 决策后端当前为 {backend}；缺少 {env}：系统已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥，决策会降级到本地兜底。请在「System 1 后端」页配置其中之一。',
 			    statusLabel: 'Reflex 运行状态：{routing}；{effort}；{backend}。悬停或聚焦查看完整说明。',
 			    statusRoutingActive: '路由已启用（{candidates} 候选）',
 			    statusRoutingInactive: '路由未启用',
@@ -1193,9 +1200,14 @@ window.__ModuleLoader__.load({
 			    labelApiKeyEnv: 'API key environment variable',
 			    labelTimeoutMs: 'Timeout (ms)',
 			    backendHint: 'Name an environment variable here, or store the API key directly in a connection profile above (write-only).',
+			    backendFlatFoldRole: 'Compatibility area: configure new connections above',
+			    backendHintFlat: 'Compatibility area: configure new connections in "Connections (multiple)" above; this block only serves as the fallback for fields no profile covers. Click the title to expand and edit.',
+			    backendFlatFoldedSummary: 'collapsed (use the connections above for new config)',
 			    backendActive: 'Effective implementation',
-			    apiKeyPresent: 'Variable is set',
-			    apiKeyMissing: 'Variable is empty',
+			    apiKeyFromProfile: 'Key from the configuration (write-only, never shown)',
+			    apiKeyFromEnv: 'Key from {name}',
+			    apiKeyMissing: 'No API key configured (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
+			    apiKeyMissingNamed: 'missing {name}, and the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY',
 			    profilesTitle: 'Connections (multiple)',
 			    profilesHint: 'One connection per profile; pick one as active. The API key is write-only: it is stored on save and the page only ever shows a placeholder.',
 			    profilesEmpty: 'No connection profile yet. Add one to fill in its baseURL, model, and API key.',
@@ -1208,7 +1220,7 @@ window.__ModuleLoader__.load({
 			    profileKeyPlaceholder: 'Paste the API key (empty = leave unchanged)',
 			    profileKeyStored: 'Stored (write-only, never shown)',
 			    profileKeyFromEnv: 'From environment variable {name}',
-			    profileKeyMissing: 'Not set',
+			    profileKeyMissing: 'No API key (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
 			    profileClearKey: 'Clear stored key',
 			    profileClearConfirm: 'Confirm clear?',
 			    profileTest: 'Test',
@@ -1296,9 +1308,9 @@ window.__ModuleLoader__.load({
 			    chipEffortTitleSet: 'A reasoning effort is selected: every turn dispatches {level} with the request. Change it in the model selector, or choose Reflex adaptive on the "Reasoning effort" page.',
 			    chipEffortTitleUnset: 'No reasoning effort is selected: the plugin does not intervene and the model default level applies. Choose a concrete level in the model selector, or Reflex adaptive on the "Reasoning effort" page.',
 			    chipBackend: 'Backend · {backend}',
-			    chipBackendTitle: 'System One decision backend is {backend}; API key env {env} is ready (apiKeyEnv: set). Change the implementation or connection on the "System 1 backend" page.',
-			    chipBackendTitleMissing: 'System One decision backend is {backend}; API key env {env} is missing (apiKeyEnv: empty), so decisions degrade to the local fallback. Set that env var or change the backend on the "System 1 backend" page.',
-			    chipBackendTitleUnsetKey: 'System One decision backend is {backend}; no API key env is declared, so the plugin uses the environment default key or degrades to the local fallback. Configure the connection on the "System 1 backend" page.',
+			    chipBackendTitle: 'System One decision backend is {backend}; the key comes from environment variable {env}. Change the implementation or connection on the "System 1 backend" page.',
+			    chipBackendTitleFromProfile: 'System One decision backend is {backend}; the key comes from the connection profile (write-only, never shown). Change the implementation or connection on the "System 1 backend" page.',
+			    chipBackendTitleMissingKey: 'System One decision backend is {backend}; missing {env}: the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY without finding a key, so decisions degrade to the local fallback. Set one of them on the "System 1 backend" page.',
 			    statusLabel: 'Reflex status: {routing}; {effort}; {backend}. Hover or focus for the full explanation.',
 			    statusRoutingActive: 'routing enabled ({candidates} candidates)',
 			    statusRoutingInactive: 'routing disabled',
@@ -1937,7 +1949,16 @@ window.__ModuleLoader__.load({
 			        const name = typeof profile.name === 'string' ? profile.name : '';
 			        return name.length === 0
 			            ? []
-			            : [[name, { present: profile.apiKeyPresent === true, fromProfile: profile.apiKeyFromProfile === true }]];
+			            : [
+			                [
+			                    name,
+			                    {
+			                        present: profile.apiKeyPresent === true,
+			                        fromProfile: profile.apiKeyFromProfile === true,
+			                        variable: typeof profile.apiKeyVariable === 'string' ? profile.apiKeyVariable : ''
+			                    }
+			                ]
+			            ];
 			    }));
 			    if (presence.size > 0) {
 			        draft.backend = {
@@ -1946,7 +1967,7 @@ window.__ModuleLoader__.load({
 			                const fact = presence.get(row.name.trim());
 			                if (fact === undefined)
 			                    return row;
-			                return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile };
+			                return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile, apiKeyVariable: fact.variable };
 			            })
 			        };
 			    }
@@ -2005,6 +2026,7 @@ window.__ModuleLoader__.load({
 			                apiKey: '',
 			                apiKeyPresent: false,
 			                apiKeyFromProfile: false,
+			                apiKeyVariable: '',
 			                clearKey: false
 			            }
 			        ];
@@ -2717,7 +2739,6 @@ window.__ModuleLoader__.load({
 			    const effortUnset = setting === null || setting === undefined || setting === '';
 			    const backend = snapshot.systemOne;
 			    const backendName = String(backend?.active ?? backend?.backend ?? '');
-			    const apiKeyEnv = backend?.apiKeyEnv;
 			    const degraded = backend?.health !== undefined && backend.health.available === false;
 			    const missingKey = !degraded && backend?.apiKeyPresent === false;
 			    const state = degraded ? 'error' : missingKey ? 'warn' : 'ok';
@@ -2732,11 +2753,18 @@ window.__ModuleLoader__.load({
 			    const effortLine = effortUnset
 			        ? { key: 'chipEffortTitleUnset' }
 			        : { key: 'chipEffortTitleSet', values: { level: String(setting) } };
-			    const backendLine = apiKeyEnv === undefined
-			        ? { key: 'chipBackendTitleUnsetKey', values: { backend: backendName } }
-			        : backend?.apiKeyPresent === true
-			            ? { key: 'chipBackendTitle', values: { backend: backendName, env: apiKeyEnv } }
-			            : { key: 'chipBackendTitleMissing', values: { backend: backendName, env: apiKeyEnv } };
+			    // The line follows the *resolved* provenance, not the variable the block
+			    // names: a key that came from a fallback variable must be reported as coming
+			    // from that variable, otherwise the chip repeats the very claim this fix
+			    // removed (naming `SYSTEM_ONE_API_KEY` while `JEV_API_KEY` supplied the key).
+			    const keyVariable = backend?.apiKeyVariable ?? backend?.apiKeyEnv;
+			    const backendLine = backend?.apiKeyPresent !== true
+			        ? keyVariable === undefined
+			            ? { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: '—' } }
+			            : { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: keyVariable } }
+			        : backend.apiKeySource === 'profile'
+			            ? { key: 'chipBackendTitleFromProfile', values: { backend: backendName } }
+			            : { key: 'chipBackendTitle', values: { backend: backendName, env: keyVariable ?? '—' } };
 			    const backendFragment = degraded
 			        ? { key: 'statusBackendDegraded', values: { backend: backendName } }
 			        : missingKey
@@ -3177,6 +3205,7 @@ window.__ModuleLoader__.load({
 			                        apiKey: '',
 			                        apiKeyPresent: false,
 			                        apiKeyFromProfile: false,
+			                        apiKeyVariable: '',
 			                        clearKey: false
 			                    }
 			                ]
@@ -3497,6 +3526,26 @@ window.__ModuleLoader__.load({
 			        padding: '12px'
 			    },
 			    cardTitle: { fontSize: '12px', fontWeight: 600, margin: '0 0 10px 0', color: token('--dsw-alias-label-secondary', '#b4b4b4') },
+			    /**
+			     * The disclosure header of a folded card: looks like the card title, behaves
+			     * like a button (focusable, keyboard-operable, `aria-expanded`).
+			     */
+			    foldHead: {
+			        display: 'flex',
+			        alignItems: 'baseline',
+			        gap: '6px',
+			        flexWrap: 'wrap',
+			        width: '100%',
+			        padding: 0,
+			        margin: 0,
+			        background: 'transparent',
+			        border: 'none',
+			        color: 'inherit',
+			        font: 'inherit',
+			        textAlign: 'left',
+			        cursor: 'pointer'
+			    },
+			    foldCaret: { fontSize: '11px', color: token('--dsw-alias-label-tertiary', '#8a8a8a') },
 			    grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(148px, 1fr))', gap: '8px' },
 			    /**
 			     * One switch per row, wide enough for real prose.
@@ -3677,6 +3726,25 @@ window.__ModuleLoader__.load({
 			/** A titled card. */
 			function Card(props) {
 			    return (0, react_1.createElement)('section', { style: S.card }, (0, react_1.createElement)('h4', { style: S.cardTitle }, props.title), props.children);
+			}
+			/**
+			 * A titled card whose body folds away behind a disclosure header.
+			 *
+			 * Used for surfaces that must stay *reachable* but must stop competing for
+			 * attention — the flat connection block after g-058, which profiles now supersede
+			 * for editing while remaining the documented fallback of the resolution chain.
+			 * Collapsed by default, and collapse is purely presentational: the fields render
+			 * the same draft and write through the same narrow paths whether or not they are
+			 * on screen, so folding can never change what a save writes.
+			 */
+			function FoldedCard(props) {
+			    const [open, setOpen] = (0, react_1.useState)(false);
+			    return (0, react_1.createElement)('section', { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' }, (0, react_1.createElement)('button', {
+			        type: 'button',
+			        style: S.foldHead,
+			        'aria-expanded': open ? 'true' : 'false',
+			        onClick: () => setOpen((current) => !current)
+			    }, (0, react_1.createElement)('span', { style: S.foldCaret }, open ? '▾' : '▸'), (0, react_1.createElement)('span', { style: S.cardTitle }, props.title), open ? null : (0, react_1.createElement)('span', { style: S.hint }, props.summary)), open ? props.children : null);
 			}
 			/** A button. */
 			function Button(props) {
@@ -3998,10 +4066,14 @@ window.__ModuleLoader__.load({
 			 */
 			function ProfileRow(props) {
 			    const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+			    // The variable reported is the one that *supplied* the key, not the one the
+			    // row names: the chain falls back, so a row naming SYSTEM_ONE_API_KEY can be
+			    // served by JEV_API_KEY, and the page must say which.
+			    const keyVariable = profile.apiKeyFromProfile ? '' : profile.apiKeyVariable || profile.apiKeyEnv || '—';
 			    const keyState = profile.apiKeyPresent
 			        ? profile.apiKeyFromProfile
 			            ? t('profileKeyStored')
-			            : t('profileKeyFromEnv').replace('{name}', profile.apiKeyEnv || '—')
+			            : t('profileKeyFromEnv').replace('{name}', keyVariable)
 			        : t('profileKeyMissing');
 			    const statusLabel = (status) => {
 			        switch (status) {
@@ -4131,6 +4203,22 @@ window.__ModuleLoader__.load({
 			    };
 			    const profiles = draft.backend.profiles;
 			    const activeName = draft.backend.active.trim();
+			    // The flat block's own key readiness, from the snapshot's provenance: say what
+			    // supplied the key ("from the configuration" / "from JEV_API_KEY") or name the
+			    // candidates when none did — never claim a specific variable is empty when the
+			    // chain may still serve the key from another one.
+			    // A blank `env` is passed through as `{name}` so the copy still names the
+			    // variable the configuration points at, instead of rendering an empty slot.
+			    const flatKeyState = systemOne?.apiKeyPresent !== true
+			        ? t('apiKeyMissingNamed').replace('{name}', draft.backend.apiKeyEnv || '—')
+			        : systemOne.apiKeySource === 'profile'
+			            ? t('apiKeyFromProfile')
+			            : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
+			    // One line for the collapsed header. It leads with the effective key state,
+			    // because that is the fact a user comes to this page to check; the note about
+			    // which surface to edit is the copy inside the fold.
+			    const flatConfigured = [draft.backend.baseUrl, draft.backend.model, draft.backend.apiKeyEnv, draft.backend.timeoutMs].some((field) => field.trim().length > 0);
+			    const flatSummary = `${t('backendFlatFoldRole')} · ${draft.backend.backend} · ${flatKeyState}${flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''}`;
 			    const activeMissing = systemOne?.activeProfileMissing === true;
 			    const setProfile = (index, patch) => {
 			        store.edit((current) => ({
@@ -4160,9 +4248,15 @@ window.__ModuleLoader__.load({
 			                store,
 			                onEdit: (patch) => setProfile(index, patch)
 			            }))), Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() }))
-			    }), Card({
+			    }), 
+			    // g-058: the flat block is the *compatibility* surface now — profiles above
+			    // are the main editing face. It stays a real fallback of the resolution chain
+			    // ("active profile > flat block > environment"), so it must remain editable,
+			    // but it no longer competes with the profiles card for the same fields.
+			    FoldedCard({
 			        title: t('groupBackend'),
-			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
+			        summary: flatSummary,
+			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('span', { style: S.hint }, t('backendHintFlat')), (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			            t,
 			            path: 'backend',
 			            value: draft.backend.backend,
@@ -4181,9 +4275,15 @@ window.__ModuleLoader__.load({
 			                    setBackend({ backend: value });
 			                }
 			            }
-			        }), GuidedField({ t, path: 'systemOne.baseUrl', value: draft.backend.baseUrl, disabled, mono: true, onChange: (value) => setBackend({ baseUrl: value }) }), GuidedField({ t, path: 'systemOne.model', value: draft.backend.model, disabled, mono: true, onChange: (value) => setBackend({ model: value }) }), GuidedField({ t, path: 'systemOne.apiKeyEnv', hint: t('backendHint'), value: draft.backend.apiKeyEnv, disabled, mono: true, onChange: (value) => setBackend({ apiKeyEnv: value }) }), GuidedField({ t, path: 'systemOne.timeoutMs', value: draft.backend.timeoutMs, disabled, onChange: (value) => setBackend({ timeoutMs: value }) })), (0, react_1.createElement)('div', { style: S.row }, (0, react_1.createElement)('span', { style: S.label }, t('backendActive')), (0, react_1.createElement)('span', { style: S.mono }, String(systemOne?.active ?? '—')), systemOne?.apiKeyEnv === undefined
-			            ? null
-			            : (0, react_1.createElement)('span', { style: { ...S.hint, color: token(systemOne.apiKeyPresent === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary', 'inherit') } }, `${systemOne.apiKeyEnv} · ${t(systemOne.apiKeyPresent === true ? 'apiKeyPresent' : 'apiKeyMissing')}`)))
+			        }), GuidedField({ t, path: 'systemOne.baseUrl', value: draft.backend.baseUrl, disabled, mono: true, onChange: (value) => setBackend({ baseUrl: value }) }), GuidedField({ t, path: 'systemOne.model', value: draft.backend.model, disabled, mono: true, onChange: (value) => setBackend({ model: value }) }), GuidedField({ t, path: 'systemOne.apiKeyEnv', hint: t('backendHint'), value: draft.backend.apiKeyEnv, disabled, mono: true, onChange: (value) => setBackend({ apiKeyEnv: value }) }), GuidedField({ t, path: 'systemOne.timeoutMs', value: draft.backend.timeoutMs, disabled, onChange: (value) => setBackend({ timeoutMs: value }) })), (0, react_1.createElement)('div', { style: S.row }, (0, react_1.createElement)('span', { style: S.label }, t('backendActive')), (0, react_1.createElement)('span', { style: S.mono }, String(systemOne?.active ?? '—')), 
+			        // Where the key really comes from, read from the snapshot's provenance
+			        // rather than guessed from `apiKeyEnv`.
+			        (0, react_1.createElement)('span', {
+			            style: {
+			                ...S.hint,
+			                color: token(systemOne?.apiKeyPresent === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary', 'inherit')
+			            }
+			        }, flatKeyState)))
 			    }), Card({
 			        title: t('groupRuntime'),
 			        children: (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({ t, path: 'toolPrefix', value: draft.runtime.toolPrefix, disabled, mono: true, onChange: (value) => setRuntime({ toolPrefix: value }) }), GuidedField({ t, path: 'pruneThreshold', value: draft.runtime.pruneThreshold, disabled, onChange: (value) => setRuntime({ pruneThreshold: value }) }), GuidedField({ t, path: 'ledgerPath', value: draft.runtime.ledgerPath, disabled, mono: true, onChange: (value) => setRuntime({ ledgerPath: value }) }), GuidedField({ t, path: 'calibrationPath', value: draft.runtime.calibrationPath, disabled, mono: true, onChange: (value) => setRuntime({ calibrationPath: value }) }))

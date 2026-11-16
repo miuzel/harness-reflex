@@ -20,7 +20,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage } from 'node:http';
 
-import { connectionTarget, resolveApiKey, resolveSystemOneConfig, routingActive, type ResolvedSystemOneConfig } from './config.js';
+import {
+  connectionTarget,
+  resolveApiKeyWithSource,
+  resolveSystemOneConfig,
+  routingActive,
+  type ResolvedSystemOneConfig
+} from './config.js';
 import { enableHostModelSelection, inspectHostModelSelection, type HostPatchOptions } from './host-patch.js';
 import { formatTargetName } from './router.js';
 import type { ReflexRuntime } from './bridge.js';
@@ -146,7 +152,10 @@ export function panelFacts(
     toolSurface: [...runtime.toolSurface],
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
-    apiKeyPresent: resolveApiKey(effective.systemOne, env) !== undefined,
+    // Resolved through the same function the backend construction and the probe
+    // use, so "the panel says the env var is empty" can no longer contradict a
+    // working backend: presence *and* provenance come from one chain.
+    ...apiKeyFacts(effective.systemOne, env),
     // Presence only, per profile. Gathered here (and not by the projection) so
     // the one place that reads the environment is this file, and so the wire
     // projection is handed booleans rather than anything it could leak.
@@ -163,28 +172,58 @@ export function panelFacts(
 }
 
 /**
- * Gather key *presence* for every authored profile.
+ * The readiness facts the snapshot reports about the key in force.
  *
- * Returns booleans and nothing else: the panel renders a placeholder from
- * `present` and never needs the value. `fromProfile` distinguishes a key stored in
- * the settings document from one read out of the environment, which the panel
- * words differently ("stored" vs "from <VAR>") — still without the value.
+ * Presence and provenance are read from {@link resolveApiKeyWithSource} — the
+ * one chain — so the panel can say *where* the key came from instead of guessing
+ * from `apiKeyEnv`. The value is dropped here and never travels: the facts are a
+ * boolean, a source tag, and a variable *name*.
  *
  * @param systemOne - the connection block in force.
- * @param env - environment the `apiKeyEnv` indirection reads.
+ * @param env - environment the chain reads.
+ * @returns the presence/provenance facts for the snapshot.
+ */
+export function apiKeyFacts(
+  systemOne: Pick<ResolvedSystemOneConfig, 'apiKey' | 'apiKeyEnv'>,
+  env: Record<string, string | undefined> = process.env
+): { apiKeyPresent: boolean; apiKeySource?: 'profile' | 'env'; apiKeyVariable?: string } {
+  const resolved = resolveApiKeyWithSource(systemOne, env);
+  if (resolved === undefined) return { apiKeyPresent: false };
+  return {
+    apiKeyPresent: true,
+    apiKeySource: resolved.source,
+    ...(resolved.variable === undefined ? {} : { apiKeyVariable: resolved.variable })
+  };
+}
+
+/**
+ * Gather key *presence* and provenance for every authored profile.
+ *
+ * Returns facts and nothing else: the panel renders a placeholder from
+ * `present` and never needs the value. `fromProfile` distinguishes a key stored in
+ * the settings document from one read out of the environment, and `variable`
+ * names the variable that supplied it — still without the value. Each row goes
+ * through {@link resolveApiKeyWithSource}, so a profile inheriting a fallback
+ * variable is reported the same way the backend would resolve it.
+ *
+ * @param systemOne - the connection block in force.
+ * @param env - environment the chain reads.
  * @returns one presence record per profile name.
  */
 export function profileKeyPresence(
   systemOne: Pick<ResolvedSystemOneConfig, 'profiles'>,
   env: Record<string, string | undefined> = process.env
-): Record<string, { present: boolean; fromProfile: boolean }> {
-  const out: Record<string, { present: boolean; fromProfile: boolean }> = {};
+): Record<string, { present: boolean; fromProfile: boolean; variable?: string }> {
+  const out: Record<string, { present: boolean; fromProfile: boolean; variable?: string }> = {};
   for (const [name, profile] of Object.entries(systemOne.profiles ?? {})) {
-    // Same precedence the runtime uses: the profile's own key, then the variable.
-    const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
-    const fromEnv =
-      profile.apiKeyEnv === undefined ? false : typeof env[profile.apiKeyEnv] === 'string' && (env[profile.apiKeyEnv]?.length ?? 0) > 0;
-    out[name] = { present: own || fromEnv, fromProfile: own };
+    // The profile's own fields, with no flat block folded in: a row reports what
+    // *it* supplies, and the panel already shows the flat block's own status.
+    const resolved = resolveApiKeyWithSource(profile, env);
+    out[name] = {
+      present: resolved !== undefined,
+      fromProfile: resolved?.source === 'profile',
+      ...(resolved?.variable === undefined ? {} : { variable: resolved.variable })
+    };
   }
   return out;
 }

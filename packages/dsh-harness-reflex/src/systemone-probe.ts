@@ -27,6 +27,7 @@
  *
  * @module dsh-reflex/systemone-probe
  */
+import { resolveApiKeyWithSource } from './config.js';
 import { normalizeSystemOneEndpoint } from './vendor/harness-reflex/backend/jev.js';
 
 /** Model the Jev gateway serves when nothing overrides it (mirrors the vendor backend). */
@@ -170,13 +171,10 @@ export function buildProbeRequest(
   if (backend === 'mock') {
     return { status: 'misconfigured', detail: 'this profile resolves to the mock backend: there is no remote endpoint to test' };
   }
-  // Key precedence matches the runtime: profile key, then the named variable.
-  const key =
-    typeof target.apiKey === 'string' && target.apiKey.length > 0
-      ? target.apiKey
-      : target.apiKeyEnv === undefined
-        ? undefined
-        : env[target.apiKeyEnv];
+  // The key follows the runtime's chain exactly — {@link resolveApiKeyWithSource}
+  // is the one implementation of it, so a "test connection" button can never send
+  // a different credential from the one the real request would send.
+  const key = resolveApiKeyWithSource(target, env)?.key;
 
   if (backend === 'vllm') {
     const base = (target.baseUrl ?? '').trim().replace(/\/+$/, '');

@@ -938,32 +938,88 @@ function resolveSystemOneProfiles(
 }
 
 /**
+ * The environment variables the key chain falls back to, in order.
+ *
+ * This list is the *whole* fallback, exported so callers that want to name the
+ * candidates (the panel's "nothing configured" copy) read it from here instead of
+ * restating it. Changing the order here changes it for the backend, the panel,
+ * and the connection probe at once — which is the point.
+ */
+export const API_KEY_ENV_FALLBACKS = ['SYSTEM_ONE_API_KEY', 'JEV_API_KEY', 'VLLM_API_KEY', 'OPENAI_API_KEY'] as const;
+
+/** Where a resolved key came from. */
+export interface ResolvedApiKey {
+  /** The key itself. Stays in the host process; no projection serializes it. */
+  key: string;
+  /** `profile` for a literal key from the settings document, `env` for a variable's value. */
+  source: 'profile' | 'env';
+  /** The variable that supplied the key when {@link source} is `env`. */
+  variable?: string;
+}
+
+/**
+ * Resolve the API key for a connection, and say where it came from.
+ *
+ * This is the **single source of truth** for the key chain. The backend
+ * constructors, the panel's readiness projection, and the `/systemone/test`
+ * probe all call it, so the panel can never again report a different reality
+ * from the one the runtime acts on.
+ *
+ * The chain, in order:
+ *
+ * 1. **`config.apiKey`** — a literal key from the settings document, where it is
+ *    a declared `role('secret')` slot. It outranks every variable.
+ * 2. **`config.apiKeyEnv`** — the variable the connection *names*. The settings
+ *    document carries only the name, so a panel write can never leak the value.
+ * 3. **{@link API_KEY_ENV_FALLBACKS}** — `SYSTEM_ONE_API_KEY`, `JEV_API_KEY`,
+ *    `VLLM_API_KEY`, `OPENAI_API_KEY`, first non-empty wins.
+ *
+ * Step 2 falling through to step 3 is deliberate and matches what the backends
+ * did before this function existed: naming a variable that happens to be empty
+ * is not a request to *lock* onto it. "Naming locks" would have to be stated
+ * explicitly; it cannot be inferred from an empty value.
+ *
+ * An empty string counts as absent at every step, so an exported-but-empty
+ * variable cannot shadow a working one further down the list.
+ *
+ * @param config - resolved System One connection settings (a profile's, or the flat block's).
+ * @param env - environment to read; defaults to `process.env`.
+ * @returns the key and its provenance, or `undefined` when no source holds one.
+ */
+export function resolveApiKeyWithSource(
+  config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv' | 'apiKey'>,
+  env: Record<string, string | undefined> = process.env
+): ResolvedApiKey | undefined {
+  if (typeof config.apiKey === 'string' && config.apiKey.length > 0) return { key: config.apiKey, source: 'profile' };
+  if (typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0) {
+    const named = env[config.apiKeyEnv];
+    if (typeof named === 'string' && named.length > 0) return { key: named, source: 'env', variable: config.apiKeyEnv };
+  }
+  for (const variable of API_KEY_ENV_FALLBACKS) {
+    const value = env[variable];
+    if (typeof value === 'string' && value.length > 0) return { key: value, source: 'env', variable };
+  }
+  return undefined;
+}
+
+/**
  * Read the API key a resolved connection block points at.
  *
- * Two indirections, in this order:
- *
- * 1. **A literal key** — `apiKey`, only ever populated by an active profile. It
- *    comes straight from the settings document, where it is a declared
- *    `role('secret')` slot; no read path can hand it back out.
- * 2. **An environment variable name** — `apiKeyEnv`. The settings document then
- *    carries the variable's *name*, so a panel write can never leak the
- *    credential into a file the Host renders back to every client.
- *
- * A profile that states both uses its key, which is the precedence the panel
- * documents ("profile key first, environment name second").
+ * A thin wrapper over {@link resolveApiKeyWithSource}: callers that need only the
+ * value use this one, and callers that must report *where* it came from use that
+ * one. Deliberately kept as the only spelling of the chain — a second
+ * implementation here is exactly the drift (`panel says empty, backend works`)
+ * this pair exists to prevent.
  *
  * @param config - resolved System One connection settings.
  * @param env - environment to read; defaults to `process.env`.
- * @returns the key, or `undefined` when neither source holds one.
+ * @returns the key, or `undefined` when no source holds one.
  */
 export function resolveApiKey(
   config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv' | 'apiKey'>,
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
-  if (typeof config.apiKey === 'string' && config.apiKey.length > 0) return config.apiKey;
-  if (config.apiKeyEnv === undefined) return undefined;
-  const value = env[config.apiKeyEnv];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  return resolveApiKeyWithSource(config, env)?.key;
 }
 
 /** The connection facts one probe target carries (never a value it can echo). */

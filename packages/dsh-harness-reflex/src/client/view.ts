@@ -160,6 +160,26 @@ const S = {
     padding: '12px'
   },
   cardTitle: { fontSize: '12px', fontWeight: 600, margin: '0 0 10px 0', color: token('--dsw-alias-label-secondary', '#b4b4b4') },
+  /**
+   * The disclosure header of a folded card: looks like the card title, behaves
+   * like a button (focusable, keyboard-operable, `aria-expanded`).
+   */
+  foldHead: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px',
+    flexWrap: 'wrap',
+    width: '100%',
+    padding: 0,
+    margin: 0,
+    background: 'transparent',
+    border: 'none',
+    color: 'inherit',
+    font: 'inherit',
+    textAlign: 'left',
+    cursor: 'pointer'
+  },
+  foldCaret: { fontSize: '11px', color: token('--dsw-alias-label-tertiary', '#8a8a8a') },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(148px, 1fr))', gap: '8px' },
   /**
    * One switch per row, wide enough for real prose.
@@ -342,6 +362,37 @@ function Metric(props: { label: string; value: string }): ReactNode {
 /** A titled card. */
 function Card(props: { title: string; children?: ReactNode }): ReactNode {
   return h('section', { style: S.card }, h('h4', { style: S.cardTitle }, props.title), props.children);
+}
+
+/**
+ * A titled card whose body folds away behind a disclosure header.
+ *
+ * Used for surfaces that must stay *reachable* but must stop competing for
+ * attention — the flat connection block after g-058, which profiles now supersede
+ * for editing while remaining the documented fallback of the resolution chain.
+ * Collapsed by default, and collapse is purely presentational: the fields render
+ * the same draft and write through the same narrow paths whether or not they are
+ * on screen, so folding can never change what a save writes.
+ */
+function FoldedCard(props: { title: string; summary: string; children?: ReactNode }): ReactNode {
+  const [open, setOpen] = useState(false);
+  return h(
+    'section',
+    { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' },
+    h(
+      'button',
+      {
+        type: 'button',
+        style: S.foldHead,
+        'aria-expanded': open ? 'true' : 'false',
+        onClick: () => setOpen((current) => !current)
+      },
+      h('span', { style: S.foldCaret }, open ? '▾' : '▸'),
+      h('span', { style: S.cardTitle }, props.title),
+      open ? null : h('span', { style: S.hint }, props.summary)
+    ),
+    open ? props.children : null
+  );
 }
 
 /** A button. */
@@ -915,10 +966,14 @@ function ProfileRow(props: {
   onEdit: (patch: Partial<ProfileDraft>) => void;
 }): ReactNode {
   const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+  // The variable reported is the one that *supplied* the key, not the one the
+  // row names: the chain falls back, so a row naming SYSTEM_ONE_API_KEY can be
+  // served by JEV_API_KEY, and the page must say which.
+  const keyVariable = profile.apiKeyFromProfile ? '' : profile.apiKeyVariable || profile.apiKeyEnv || '—';
   const keyState = profile.apiKeyPresent
     ? profile.apiKeyFromProfile
       ? t('profileKeyStored')
-      : t('profileKeyFromEnv').replace('{name}', profile.apiKeyEnv || '—')
+      : t('profileKeyFromEnv').replace('{name}', keyVariable)
     : t('profileKeyMissing');
   const statusLabel = (status: string | undefined): string => {
     switch (status) {
@@ -1080,6 +1135,27 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   };
   const profiles = draft.backend.profiles;
   const activeName = draft.backend.active.trim();
+  // The flat block's own key readiness, from the snapshot's provenance: say what
+  // supplied the key ("from the configuration" / "from JEV_API_KEY") or name the
+  // candidates when none did — never claim a specific variable is empty when the
+  // chain may still serve the key from another one.
+  // A blank `env` is passed through as `{name}` so the copy still names the
+  // variable the configuration points at, instead of rendering an empty slot.
+  const flatKeyState =
+    systemOne?.apiKeyPresent !== true
+      ? t('apiKeyMissingNamed').replace('{name}', draft.backend.apiKeyEnv || '—')
+      : systemOne.apiKeySource === 'profile'
+        ? t('apiKeyFromProfile')
+        : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
+  // One line for the collapsed header. It leads with the effective key state,
+  // because that is the fact a user comes to this page to check; the note about
+  // which surface to edit is the copy inside the fold.
+  const flatConfigured = [draft.backend.baseUrl, draft.backend.model, draft.backend.apiKeyEnv, draft.backend.timeoutMs].some(
+    (field) => field.trim().length > 0
+  );
+  const flatSummary = `${t('backendFlatFoldRole')} · ${draft.backend.backend} · ${flatKeyState}${
+    flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''
+  }`;
   const activeMissing = systemOne?.activeProfileMissing === true;
   const setProfile = (index: number, patch: Partial<ProfileDraft>): void => {
     store.edit((current) => ({
@@ -1129,11 +1205,17 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
         Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() })
       )
     }),
-    Card({
+    // g-058: the flat block is the *compatibility* surface now — profiles above
+    // are the main editing face. It stays a real fallback of the resolution chain
+    // ("active profile > flat block > environment"), so it must remain editable,
+    // but it no longer competes with the profiles card for the same fields.
+    FoldedCard({
       title: t('groupBackend'),
+      summary: flatSummary,
       children: h(
         'div',
         { style: S.field },
+        h('span', { style: S.hint }, t('backendHintFlat')),
         h(
           'div',
           { style: S.fieldRow },
@@ -1166,9 +1248,21 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
           { style: S.row },
           h('span', { style: S.label }, t('backendActive')),
           h('span', { style: S.mono }, String(systemOne?.active ?? '—')),
-          systemOne?.apiKeyEnv === undefined
-            ? null
-            : h('span', { style: { ...S.hint, color: token(systemOne.apiKeyPresent === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary', 'inherit') } }, `${systemOne.apiKeyEnv} · ${t(systemOne.apiKeyPresent === true ? 'apiKeyPresent' : 'apiKeyMissing')}`)
+          // Where the key really comes from, read from the snapshot's provenance
+          // rather than guessed from `apiKeyEnv`.
+          h(
+            'span',
+            {
+              style: {
+                ...S.hint,
+                color: token(
+                  systemOne?.apiKeyPresent === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary',
+                  'inherit'
+                )
+              }
+            },
+            flatKeyState
+          )
         )
       )
     }),

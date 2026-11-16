@@ -263,6 +263,13 @@ export interface ProfileDraft {
   apiKeyPresent: boolean;
   /** Whether the key comes from the named environment variable rather than the store. */
   apiKeyFromProfile: boolean;
+  /**
+   * The variable that actually supplied this row's key, when one did — which is
+   * not necessarily the variable the row *names*, because the chain falls back.
+   * The page reports this one, so it cannot claim `SYSTEM_ONE_API_KEY` while the
+   * key really came from `JEV_API_KEY`.
+   */
+  apiKeyVariable: string;
   /** Set by the explicit clear action; makes the write unset the secret slot. */
   clearKey: boolean;
 }
@@ -447,7 +454,16 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
       const name = typeof profile.name === 'string' ? profile.name : '';
       return name.length === 0
         ? []
-        : [[name, { present: profile.apiKeyPresent === true, fromProfile: profile.apiKeyFromProfile === true }] as const];
+        : [
+            [
+              name,
+              {
+                present: profile.apiKeyPresent === true,
+                fromProfile: profile.apiKeyFromProfile === true,
+                variable: typeof profile.apiKeyVariable === 'string' ? profile.apiKeyVariable : ''
+              }
+            ] as const
+          ];
     })
   );
   if (presence.size > 0) {
@@ -456,7 +472,7 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
       profiles: draft.backend.profiles.map((row) => {
         const fact = presence.get(row.name.trim());
         if (fact === undefined) return row;
-        return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile };
+        return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile, apiKeyVariable: fact.variable };
       })
     };
   }
@@ -516,6 +532,7 @@ export function profileRowsFrom(value: unknown): ProfileDraft[] {
         apiKey: '',
         apiKeyPresent: false,
         apiKeyFromProfile: false,
+        apiKeyVariable: '',
         clearKey: false
       }
     ];
@@ -1264,6 +1281,10 @@ export interface PanelSnapshotLike {
     model?: string;
     apiKeyEnv?: string;
     apiKeyPresent?: boolean;
+    /** Where the resolved key came from; absent when none resolves. */
+    apiKeySource?: 'profile' | 'env';
+    /** The variable that supplied the key (a name, never a value). */
+    apiKeyVariable?: string;
     /** Whether the resolved block carries a literal key (never the key itself). */
     apiKeyFromProfile?: boolean;
     timeoutMs?: number;
@@ -1274,6 +1295,7 @@ export interface PanelSnapshotLike {
       model?: string;
       apiKeyEnv?: string;
       apiKeyPresent?: boolean;
+      apiKeyVariable?: string;
       apiKeyFromProfile?: boolean;
       timeoutMs?: number;
       backend?: string;
@@ -1408,7 +1430,6 @@ export function panelStatus(snapshot: PanelSnapshotLike | null): PanelStatus | u
 
   const backend = snapshot.systemOne;
   const backendName = String(backend?.active ?? backend?.backend ?? '');
-  const apiKeyEnv = backend?.apiKeyEnv;
   const degraded = backend?.health !== undefined && backend.health.available === false;
   const missingKey = !degraded && backend?.apiKeyPresent === false;
 
@@ -1426,12 +1447,19 @@ export function panelStatus(snapshot: PanelSnapshotLike | null): PanelStatus | u
   const effortLine: PanelStatusFragment = effortUnset
     ? { key: 'chipEffortTitleUnset' }
     : { key: 'chipEffortTitleSet', values: { level: String(setting) } };
+  // The line follows the *resolved* provenance, not the variable the block
+  // names: a key that came from a fallback variable must be reported as coming
+  // from that variable, otherwise the chip repeats the very claim this fix
+  // removed (naming `SYSTEM_ONE_API_KEY` while `JEV_API_KEY` supplied the key).
+  const keyVariable = backend?.apiKeyVariable ?? backend?.apiKeyEnv;
   const backendLine: PanelStatusFragment =
-    apiKeyEnv === undefined
-      ? { key: 'chipBackendTitleUnsetKey', values: { backend: backendName } }
-      : backend?.apiKeyPresent === true
-        ? { key: 'chipBackendTitle', values: { backend: backendName, env: apiKeyEnv } }
-        : { key: 'chipBackendTitleMissing', values: { backend: backendName, env: apiKeyEnv } };
+    backend?.apiKeyPresent !== true
+      ? keyVariable === undefined
+        ? { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: '—' } }
+        : { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: keyVariable } }
+      : backend.apiKeySource === 'profile'
+        ? { key: 'chipBackendTitleFromProfile', values: { backend: backendName } }
+        : { key: 'chipBackendTitle', values: { backend: backendName, env: keyVariable ?? '—' } };
 
   const backendFragment: PanelStatusFragment = degraded
     ? { key: 'statusBackendDegraded', values: { backend: backendName } }

@@ -240,9 +240,18 @@ export const zh = {
   labelApiKeyEnv: 'API Key 环境变量名',
   labelTimeoutMs: '超时（毫秒）',
   backendHint: '可填环境变量名，或在上方连接配置里直接保存 API Key（只写不读）。',
+  backendFlatFoldRole: '兼容区：新配置请用上方连接配置',
+  backendHintFlat:
+    '兼容区：新连接请用上方「连接配置（可多套）」，这里只作为它未覆盖字段时的兜底。点标题可展开编辑。',
+  backendFlatFoldedSummary: '已折叠（新配置请用上方连接配置）',
   backendActive: '当前生效实现',
-  apiKeyPresent: '环境变量已就绪',
-  apiKeyMissing: '环境变量为空',
+  // Key readiness reports *where* the key came from, because the chain the
+  // backend follows is longer than the one variable this page names.
+  apiKeyFromProfile: '密钥来自配置（只写，不回显）',
+  apiKeyFromEnv: '密钥来自 {name}',
+  apiKeyMissing: '未配置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
+  apiKeyMissingNamed:
+    '缺少 {name}，且已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥',
   profilesTitle: '连接配置（可多套）',
   profilesHint: '每套配置一个连接；选一套为当前激活。API Key 只写不读：保存后立即写入设置文档，页面只显示占位符。',
   profilesEmpty: '还没有连接配置。新增一套即可填写 baseURL、模型与 API Key。',
@@ -255,7 +264,7 @@ export const zh = {
   profileKeyPlaceholder: '粘贴 API Key（留空表示不改动）',
   profileKeyStored: '已保存（只写，不回显）',
   profileKeyFromEnv: '来自环境变量 {name}',
-  profileKeyMissing: '未设置',
+  profileKeyMissing: '未设置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
   profileClearKey: '清除已存 Key',
   profileClearConfirm: '确认清除？',
   profileTest: '测试',
@@ -356,11 +365,11 @@ export const zh = {
     '无推理强度选择：插件不干预，使用模型默认档位。请在模型选择器里选择具体档位，或在「推理强度」页选择 Reflex 自适应。',
   chipBackend: '后端 · {backend}',
   chipBackendTitle:
-    'System One 决策后端当前为 {backend}；API Key 环境变量 {env} 已就绪（apiKeyEnv: set）。可在「System 1 后端」页更换实现或调整连接。',
-  chipBackendTitleMissing:
-    'System One 决策后端当前为 {backend}；缺少 {env} 环境变量（apiKeyEnv: empty），决策会降级到本地兜底。请在「System 1 后端」页配置该环境变量或更换后端。',
-  chipBackendTitleUnsetKey:
-    'System One 决策后端当前为 {backend}；未声明 API Key 环境变量，插件会使用环境默认密钥或降级到本地兜底。可在「System 1 后端」页配置连接。',
+    'System One 决策后端当前为 {backend}；密钥来自环境变量 {env}。可在「System 1 后端」页更换实现或调整连接。',
+  chipBackendTitleFromProfile:
+    'System One 决策后端当前为 {backend}；密钥来自连接配置里保存的 Key（只写，不回显）。可在「System 1 后端」页更换实现或调整连接。',
+  chipBackendTitleMissingKey:
+    'System One 决策后端当前为 {backend}；缺少 {env}：系统已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥，决策会降级到本地兜底。请在「System 1 后端」页配置其中之一。',
 
   statusLabel: 'Reflex 运行状态：{routing}；{effort}；{backend}。悬停或聚焦查看完整说明。',
   statusRoutingActive: '路由已启用（{candidates} 候选）',
@@ -632,9 +641,16 @@ export const en: Record<keyof typeof zh, string> = {
   labelApiKeyEnv: 'API key environment variable',
   labelTimeoutMs: 'Timeout (ms)',
   backendHint: 'Name an environment variable here, or store the API key directly in a connection profile above (write-only).',
+  backendFlatFoldRole: 'Compatibility area: configure new connections above',
+  backendHintFlat:
+    'Compatibility area: configure new connections in "Connections (multiple)" above; this block only serves as the fallback for fields no profile covers. Click the title to expand and edit.',
+  backendFlatFoldedSummary: 'collapsed (use the connections above for new config)',
   backendActive: 'Effective implementation',
-  apiKeyPresent: 'Variable is set',
-  apiKeyMissing: 'Variable is empty',
+  apiKeyFromProfile: 'Key from the configuration (write-only, never shown)',
+  apiKeyFromEnv: 'Key from {name}',
+  apiKeyMissing: 'No API key configured (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
+  apiKeyMissingNamed:
+    'missing {name}, and the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY',
   profilesTitle: 'Connections (multiple)',
   profilesHint:
     'One connection per profile; pick one as active. The API key is write-only: it is stored on save and the page only ever shows a placeholder.',
@@ -648,7 +664,7 @@ export const en: Record<keyof typeof zh, string> = {
   profileKeyPlaceholder: 'Paste the API key (empty = leave unchanged)',
   profileKeyStored: 'Stored (write-only, never shown)',
   profileKeyFromEnv: 'From environment variable {name}',
-  profileKeyMissing: 'Not set',
+  profileKeyMissing: 'No API key (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
   profileClearKey: 'Clear stored key',
   profileClearConfirm: 'Confirm clear?',
   profileTest: 'Test',
@@ -749,11 +765,11 @@ export const en: Record<keyof typeof zh, string> = {
     'No reasoning effort is selected: the plugin does not intervene and the model default level applies. Choose a concrete level in the model selector, or Reflex adaptive on the "Reasoning effort" page.',
   chipBackend: 'Backend · {backend}',
   chipBackendTitle:
-    'System One decision backend is {backend}; API key env {env} is ready (apiKeyEnv: set). Change the implementation or connection on the "System 1 backend" page.',
-  chipBackendTitleMissing:
-    'System One decision backend is {backend}; API key env {env} is missing (apiKeyEnv: empty), so decisions degrade to the local fallback. Set that env var or change the backend on the "System 1 backend" page.',
-  chipBackendTitleUnsetKey:
-    'System One decision backend is {backend}; no API key env is declared, so the plugin uses the environment default key or degrades to the local fallback. Configure the connection on the "System 1 backend" page.',
+    'System One decision backend is {backend}; the key comes from environment variable {env}. Change the implementation or connection on the "System 1 backend" page.',
+  chipBackendTitleFromProfile:
+    'System One decision backend is {backend}; the key comes from the connection profile (write-only, never shown). Change the implementation or connection on the "System 1 backend" page.',
+  chipBackendTitleMissingKey:
+    'System One decision backend is {backend}; missing {env}: the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY without finding a key, so decisions degrade to the local fallback. Set one of them on the "System 1 backend" page.',
 
   statusLabel: 'Reflex status: {routing}; {effort}; {backend}. Hover or focus for the full explanation.',
   statusRoutingActive: 'routing enabled ({candidates} candidates)',
