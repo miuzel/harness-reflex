@@ -35,7 +35,7 @@ import type {
   ResolvedSystemOneConfig,
   ResolvedToolsConfig
 } from './config.js';
-import { resolveApiKeyWithSource, resolveConfig, volatileSnapshots } from './config.js';
+import { resolveApiKeyWithSource, resolvedKeyOf, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { DelegatedEffortInheritance } from './effort-delegation.js';
 import type { DelegationHealth } from './delegation-health.js';
@@ -974,6 +974,15 @@ function backendSignature(config: ResolvedReflexConfig): string {
  * to {@link resolveApiKeyWithSource} — and therefore to the panel, which is how
  * "the panel says the env var is empty while the backend works" was possible.
  * One chain, one answer for both.
+ *
+ * Every construction here also passes `apiKeyResolved: true` (g-059). That flag
+ * makes "the chain resolved no key" *final*: without it both backends would
+ * re-read `SYSTEM_ONE_API_KEY` / `JEV_API_KEY` (and the logits backend would
+ * invent `dummy`) whenever the key was omitted, so a block naming an empty
+ * variable would show as missing on the panel while its requests still
+ * authenticated — the divergence this file exists to close, pointing the other
+ * way. The flag defaults to `false` in the vendored backends, so every other
+ * construction (tests, probes, a bare import) keeps the historical chain.
  * @param config - resolved plugin configuration.
  * @param env - environment the API-key chain reads; defaults to `process.env`.
  * @returns the forced backend, or one chosen from the environment for `auto`.
@@ -983,8 +992,7 @@ export function createBackend(
   env: Record<string, string | undefined> = process.env
 ): DecisionBackend {
   const { backend, baseUrl, model, timeoutMs } = config.systemOne;
-  const resolvedKey = resolveApiKeyWithSource(config.systemOne, env);
-  const apiKey = resolvedKey?.key;
+  const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));
   switch (backend) {
     case 'mock':
       return new MockDecisionBackend();
@@ -992,6 +1000,8 @@ export function createBackend(
       return new JevDecisionBackend({
         ...(baseUrl === undefined ? {} : { baseUrl }),
         ...(apiKey === undefined ? {} : { apiKey }),
+        // The chain above is the whole chain: no second read behind its back.
+        apiKeyResolved: true,
         ...(model === undefined ? {} : { model }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         // The resolved config wins over SYSTEM_ONE_PRUNE_JUDGE_MIN_CHARS: the
@@ -1002,11 +1012,19 @@ export function createBackend(
       return new SimpleJevDecisionBackend({
         ...(baseUrl === undefined ? {} : { vllmBaseUrl: baseUrl }),
         ...(apiKey === undefined ? {} : { apiKey }),
+        // Same for the logits backend, whose `dummy` fallback would otherwise
+        // turn "no key" into a header nobody configured.
+        apiKeyResolved: true,
         ...(model === undefined ? {} : { model }),
         ...(timeoutMs === undefined ? {} : { timeoutMs })
       });
     default:
-      return createSystemOneBackend();
+      // `auto` (the DEFAULT backend) delegates to the vendored factory, which
+      // keeps choosing a provider from the environment but now takes the
+      // already-resolved credential instead of reading one of its own (g-059).
+      // Without this the lock would not hold on the default configuration —
+      // only a deployment that explicitly chose `jev`/`vllm` would be safe.
+      return createSystemOneBackend({ apiKeyResolved: true, ...(apiKey === undefined ? {} : { apiKey }) });
   }
 }
 

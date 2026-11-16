@@ -947,14 +947,43 @@ function resolveSystemOneProfiles(
  */
 export const API_KEY_ENV_FALLBACKS = ['SYSTEM_ONE_API_KEY', 'JEV_API_KEY', 'VLLM_API_KEY', 'OPENAI_API_KEY'] as const;
 
+/**
+ * The outcome of resolving one connection's key.
+ *
+ * A discriminated union rather than `{ key } | undefined` (g-059): "the block
+ * named a variable and that variable is empty" is a *different fact* from "the
+ * block named nothing and nothing was exported", and the panel has to say which.
+ * Collapsing both into `undefined` is exactly what let the two be conflated.
+ *
+ * - `{ key }` — a key was found; {@link source} says where.
+ * - `{ missing: 'named', variable }` — the block **named** `variable` and it holds
+ *   nothing. Naming is a lock: no fallback variable was consulted, and none may be.
+ * - `undefined` — the block named nothing and no fallback variable holds a key.
+ */
+export type ApiKeyResolution = ResolvedApiKey | ApiKeyNotFound;
+
 /** Where a resolved key came from. */
 export interface ResolvedApiKey {
   /** The key itself. Stays in the host process; no projection serializes it. */
   key: string;
-  /** `profile` for a literal key from the settings document, `env` for a variable's value. */
-  source: 'profile' | 'env';
-  /** The variable that supplied the key when {@link source} is `env`. */
+  /**
+   * `profile` for a literal key from the settings document; `env` for the
+   * variable the block named; `fallback` for a {@link API_KEY_ENV_FALLBACKS}
+   * variable reached because the block named none. `fallback` is a separate tag
+   * so the panel can print "（回退）" — a deployment that *meant* to name a
+   * variable can then see that it in fact named nothing.
+   */
+  source: 'profile' | 'env' | 'fallback';
+  /** The variable that supplied the key when {@link source} is `env` or `fallback`. */
   variable?: string;
+}
+
+/** The variable the block named holds nothing, and the lookup stopped there. */
+export interface ApiKeyNotFound {
+  /** Why nothing resolved. */
+  missing: 'named';
+  /** The variable the block named — the empty one, never a fallback. */
+  variable: string;
 }
 
 /**
@@ -968,38 +997,68 @@ export interface ResolvedApiKey {
  * The chain, in order:
  *
  * 1. **`config.apiKey`** — a literal key from the settings document, where it is
- *    a declared `role('secret')` slot. It outranks every variable.
- * 2. **`config.apiKeyEnv`** — the variable the connection *names*. The settings
- *    document carries only the name, so a panel write can never leak the value.
- * 3. **{@link API_KEY_ENV_FALLBACKS}** — `SYSTEM_ONE_API_KEY`, `JEV_API_KEY`,
- *    `VLLM_API_KEY`, `OPENAI_API_KEY`, first non-empty wins.
+ *    a declared `role('secret')` slot. It outranks every variable and makes
+ *    `apiKeyEnv` irrelevant: a deployment that stores the secret outright has no
+ *    use for a variable *name*.
+ * 2. **`config.apiKeyEnv`** — the variable the connection *names*. **Naming
+ *    locks**: this is the only variable consulted, and if it is empty the result
+ *    is {@link ApiKeyNotFound} — never a fallback to step 3. The settings
+ *    document carries only the name, so a panel write cannot leak the value.
+ * 3. **{@link API_KEY_ENV_FALLBACKS}** — only when step 2 named nothing:
+ *    `SYSTEM_ONE_API_KEY`, `JEV_API_KEY`, `VLLM_API_KEY`, `OPENAI_API_KEY`,
+ *    first non-empty wins.
  *
- * Step 2 falling through to step 3 is deliberate and matches what the backends
- * did before this function existed: naming a variable that happens to be empty
- * is not a request to *lock* onto it. "Naming locks" would have to be stated
- * explicitly; it cannot be inferred from an empty value.
+ * Step 2 no longer falls through to step 3 (g-059). The earlier choice — "naming
+ * a variable is not a request to lock onto it" — was reversed by the owner: a
+ * deployment that names `SYSTEM_ONE_API_KEY` while only `JEV_API_KEY` is
+ * exported must read as *missing*, not silently work from a variable nobody
+ * named. Locking is now implied by naming, so an empty value cannot be mistaken
+ * for "nobody named anything".
  *
  * An empty string counts as absent at every step, so an exported-but-empty
- * variable cannot shadow a working one further down the list.
+ * variable is never a credential.
+ *
+ * A **blank** `apiKeyEnv` (spaces only) is not a naming:
+ * {@link resolveSystemOneConfig} trims it away before this function sees it, so
+ * a stray space in the name field keeps the historical fallback instead of
+ * locking onto a variable whose name is a space.
  *
  * @param config - resolved System One connection settings (a profile's, or the flat block's).
  * @param env - environment to read; defaults to `process.env`.
- * @returns the key and its provenance, or `undefined` when no source holds one.
+ * @returns the key and its provenance; the locked-but-empty fact; or `undefined`
+ *   when nothing was named and nothing was exported.
  */
 export function resolveApiKeyWithSource(
   config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv' | 'apiKey'>,
   env: Record<string, string | undefined> = process.env
-): ResolvedApiKey | undefined {
+): ApiKeyResolution | undefined {
   if (typeof config.apiKey === 'string' && config.apiKey.length > 0) return { key: config.apiKey, source: 'profile' };
   if (typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0) {
     const named = env[config.apiKeyEnv];
     if (typeof named === 'string' && named.length > 0) return { key: named, source: 'env', variable: config.apiKeyEnv };
+    // Naming locks (g-059): a named-but-empty variable ends the lookup here. It
+    // must not reach the fallback loop, or the panel would report a lock the
+    // runtime never honoured.
+    return { missing: 'named', variable: config.apiKeyEnv };
   }
   for (const variable of API_KEY_ENV_FALLBACKS) {
     const value = env[variable];
-    if (typeof value === 'string' && value.length > 0) return { key: value, source: 'env', variable };
+    if (typeof value === 'string' && value.length > 0) return { key: value, source: 'fallback', variable };
   }
   return undefined;
+}
+
+/**
+ * The key a resolution carries, or `undefined` for both kinds of absence.
+ *
+ * The one place the union is flattened: a transport only needs to know *whether*
+ * there is a key, never *why* there is none. Panel copy must not use this —
+ * telling "named but empty" from "nothing configured" is the point of the union.
+ * @param resolution - a {@link resolveApiKeyWithSource} result.
+ * @returns the key, when one resolved.
+ */
+export function resolvedKeyOf(resolution: ApiKeyResolution | undefined): string | undefined {
+  return resolution === undefined || !('key' in resolution) ? undefined : resolution.key;
 }
 
 /**
@@ -1019,7 +1078,7 @@ export function resolveApiKey(
   config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv' | 'apiKey'>,
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
-  return resolveApiKeyWithSource(config, env)?.key;
+  return resolvedKeyOf(resolveApiKeyWithSource(config, env));
 }
 
 /** The connection facts one probe target carries (never a value it can echo). */

@@ -27,7 +27,7 @@
  *
  * @module dsh-reflex/systemone-probe
  */
-import { resolveApiKeyWithSource } from './config.js';
+import { resolveApiKeyWithSource, resolvedKeyOf } from './config.js';
 import { normalizeSystemOneEndpoint } from './vendor/harness-reflex/backend/jev.js';
 
 /** Model the Jev gateway serves when nothing overrides it (mirrors the vendor backend). */
@@ -173,8 +173,11 @@ export function buildProbeRequest(
   }
   // The key follows the runtime's chain exactly — {@link resolveApiKeyWithSource}
   // is the one implementation of it, so a "test connection" button can never send
-  // a different credential from the one the real request would send.
-  const key = resolveApiKeyWithSource(target, env)?.key;
+  // a different credential from the one the real request would send. A named
+  // variable that is empty (g-059) resolves to no key here too: the probe sends
+  // an unauthenticated request, exactly as the real one does, so a locked
+  // deployment's test button reports the 401 instead of a false green.
+  const key = resolvedKeyOf(resolveApiKeyWithSource(target, env));
 
   if (backend === 'vllm') {
     const base = (target.baseUrl ?? '').trim().replace(/\/+$/, '');

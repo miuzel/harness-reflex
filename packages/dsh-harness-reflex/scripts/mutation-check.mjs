@@ -1014,14 +1014,73 @@ const MUTATIONS = [
   // makes one of them disagree with the others — the exact shape of the bug
   // ("the panel says the env var is empty while the backend works").
   {
-    // The whole point of the chain: naming a variable is not a request to lock
-    // onto it. Dropping the fallthrough restores the panel's old behaviour, where
-    // a named-but-empty variable hid a key that sat in a fallback variable.
-    name: 'named-empty-variable-blocks-the-fallback',
-    area: 'an empty apiKeyEnv falls through to the fallback chain',
+    // g-059 reversed this one. Naming a variable now LOCKS the lookup, so the
+    // fault is the old behaviour coming back: a named-but-empty variable falling
+    // through to the fallback list, i.e. the panel reporting a lock the runtime
+    // never honoured.
+    name: 'named-empty-variable-falls-through-to-the-fallback',
+    area: 'naming a variable locks the lookup (g-059)',
     file: 'src/config.ts',
-    from: "    if (typeof named === 'string' && named.length > 0) return { key: named, source: 'env', variable: config.apiKeyEnv };",
-    to: "    if (typeof named === 'string') return named.length > 0 ? { key: named, source: 'env', variable: config.apiKeyEnv } : undefined;"
+    from: "    return { missing: 'named', variable: config.apiKeyEnv };",
+    to: '    return undefined;'
+  },
+  {
+    // The fallback loop must not run when a variable was named: even if the lock
+    // branch returned, a `for` that still executes would let a fallback variable
+    // answer a locked lookup.
+    name: 'fallback-loop-runs-after-a-lock',
+    area: 'a locked lookup never consults the fallback list',
+    file: 'src/config.ts',
+    from: "export function resolvedKeyOf(resolution: ApiKeyResolution | undefined): string | undefined {\n  return resolution === undefined || !('key' in resolution) ? undefined : resolution.key;",
+    to: "export function resolvedKeyOf(resolution: ApiKeyResolution | undefined): string | undefined {\n  if (resolution !== undefined && !('key' in resolution)) { for (const v of API_KEY_ENV_FALLBACKS) { const x = process.env[v]; if (x) return x; } }\n  return resolution === undefined || !('key' in resolution) ? undefined : resolution.key;"
+  },
+  {
+    // The panel must distinguish "named but empty" from "nothing configured": the
+    // two call for different fixes. Collapsing the locked fact to a plain absence
+    // is the fault this asserts against.
+    name: 'panel-collapses-locked-into-missing',
+    area: 'the panel reports a locked lookup separately from an unconfigured one',
+    file: 'src/panel-mount.ts',
+    from: '    return { apiKeyPresent: false, apiKeyLocked: true, apiKeyVariable: resolved.variable };',
+    to: '    return { apiKeyPresent: false };'
+  },
+  {
+    // And the backend must not re-read the environment behind the panel's back:
+    // dropping the flag hands a locked (empty) resolution to a backend that would
+    // authenticate from SYSTEM_ONE_API_KEY / JEV_API_KEY anyway.
+    name: 'backend-drops-the-resolved-key-flag',
+    area: 'the plugin backend is told the credential is already resolved (g-059)',
+    file: 'src/bridge.ts',
+    from: "        // The chain above is the whole chain: no second read behind its back.\n        apiKeyResolved: true,",
+    to: '        apiKeyResolved: false,'
+  },
+  {
+    // `auto` is the DEFAULT backend: if the plugin forgets to hand the resolved
+    // credential to the factory, the lock silently stops holding for everyone who
+    // never configured an explicit backend — the majority of deployments.
+    name: 'auto-backend-forgets-the-resolved-key',
+    area: 'the default `auto` backend honours the locked lookup (g-059)',
+    file: 'src/bridge.ts',
+    from: '      return createSystemOneBackend({ apiKeyResolved: true, ...(apiKey === undefined ? {} : { apiKey }) });',
+    to: '      return createSystemOneBackend();'
+  },
+  {
+    // The factory must not re-read the environment for the key once the caller
+    // resolved it, while still selecting the provider from that same environment.
+    name: 'factory-rereads-the-environment-for-a-resolved-key',
+    area: 'the vendored factory never re-reads the key once it is resolved',
+    file: 'src/vendor/harness-reflex/backend/factory.ts',
+    from: '    override?.apiKeyResolved === true',
+    to: '    false'
+  },
+  {
+    // The vendored Jev backend must honour that flag; without it the transport
+    // reads the environment even when the caller resolved "no key".
+    name: 'vendored-jev-ignores-the-resolved-flag',
+    area: 'the vendored Jev backend never re-reads the environment once resolved',
+    file: 'src/vendor/harness-reflex/backend/jev.ts',
+    from: '      config?.apiKeyResolved === true',
+    to: '      false'
   },
   {
     // The fallback order is the documented priority; reversing it silently makes
@@ -1045,11 +1104,16 @@ const MUTATIONS = [
   {
     // Readiness must come from the chain, not from "did the block name a
     // variable": presence is the fact the page renders.
+    // Readiness must come from the chain, not from "did the block name a
+    // variable": presence is the fact the page renders. g-059 split the outcome
+    // into three branches, so the fault is aimed at the *resolved* one — report
+    // "absent" whenever nothing was named by hand, i.e. ignore a fallback that
+    // actually supplied a key.
     name: 'panel-readiness-ignores-the-resolved-key',
     area: 'the panel readiness follows the resolved chain',
     file: 'src/panel-mount.ts',
-    from: '  if (resolved === undefined) return { apiKeyPresent: false };',
-    to: "  if (resolved === undefined) return { apiKeyPresent: systemOne.apiKeyEnv !== undefined };"
+    from: "  return {\n    apiKeyPresent: true,\n    apiKeySource: resolved.source,",
+    to: "  return {\n    apiKeyPresent: systemOne.apiKeyEnv !== undefined,\n    apiKeySource: resolved.source,"
   },
   {
     // The probe and the real request must send the same credential. Reverting the
@@ -1057,7 +1121,7 @@ const MUTATIONS = [
     name: 'probe-skips-the-fallback-chain',
     area: 'the connection probe sends the key the runtime would send',
     file: 'src/systemone-probe.ts',
-    from: '  const key = resolveApiKeyWithSource(target, env)?.key;',
+    from: '  const key = resolvedKeyOf(resolveApiKeyWithSource(target, env));',
     to: "  const key = target.apiKeyEnv === undefined ? undefined : env[target.apiKeyEnv];"
   },
   {
@@ -1067,7 +1131,7 @@ const MUTATIONS = [
     name: 'backend-drops-the-resolved-key',
     area: 'the backend is constructed with the chain-resolved key',
     file: 'src/bridge.ts',
-    from: '  const apiKey = resolvedKey?.key;',
+    from: '  const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));',
     to: '  const apiKey = undefined;'
   },
   {

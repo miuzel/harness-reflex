@@ -223,3 +223,81 @@ test('both copies report the same candidate sizes and score counts, including a 
     }
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* The key chain's DEFAULT behaviour (g-059)                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The key a backend will present, read at the wire.
+ *
+ * The claim under test is about what reaches the gateway, and a private field
+ * cannot tell "holds no key" from "holds none but signs anyway".
+ * @param module - the copy under test.
+ * @param config - constructor config; the same object is handed to both copies.
+ * @returns the `Authorization` header the request carried, or `undefined`.
+ */
+async function authorizationSentBy(
+  module: JevModule,
+  config: { apiKey?: string; apiKeyResolved?: boolean }
+): Promise<string | undefined> {
+  const original = globalThis.fetch;
+  let authorization: string | undefined;
+  let reached = false;
+  globalThis.fetch = (async (_url: string | URL, init?: { headers?: Record<string, string> }) => {
+    reached = true;
+    authorization = init?.headers?.Authorization;
+    return new Response(JSON.stringify({ answers: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  try {
+    const backend = new module.JevDecisionBackend({ ...config, model: 'jev-latest', timeoutMs: 500 });
+    try {
+      await backend.choice({ question: 'pick', options: ['a', 'b'] });
+    } catch {
+      // The fixture need not be a valid System One envelope: the request has
+      // already been captured by the time parsing could fail.
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.ok(reached, 'the backend never reached the network');
+  return authorization;
+}
+
+test('with apiKeyResolved absent, the vendored key lookup matches the root copy', async () => {
+  // g-059 added `apiKeyResolved` to the vendor only: the root adapter has no such
+  // field and is intentionally NOT changed by this goal. What must not drift is
+  // the behaviour those two share — the *default*, override-free chain. This
+  // assertion deliberately says nothing about `apiKeyResolved: true`; pinning
+  // that against a root copy that lacks the field would be pretending the two
+  // are isomorphic. Consolidating them is g-060.
+  const root = await loadRoot();
+  const saved = { SYSTEM_ONE_API_KEY: process.env.SYSTEM_ONE_API_KEY, JEV_API_KEY: process.env.JEV_API_KEY };
+  const scenarios: { name: string; env: Record<string, string | undefined>; config: { apiKey?: string } }[] = [
+    { name: 'no env key, no explicit key', env: { SYSTEM_ONE_API_KEY: undefined, JEV_API_KEY: undefined }, config: {} },
+    { name: 'only JEV_API_KEY exported', env: { SYSTEM_ONE_API_KEY: undefined, JEV_API_KEY: 'sk-jev' }, config: {} },
+    { name: 'SYSTEM_ONE_API_KEY outranks JEV_API_KEY', env: { SYSTEM_ONE_API_KEY: 'sk-so', JEV_API_KEY: 'sk-jev' }, config: {} },
+    { name: 'an explicit key wins over the environment', env: { SYSTEM_ONE_API_KEY: 'sk-so', JEV_API_KEY: 'sk-jev' }, config: { apiKey: 'sk-explicit' } },
+    { name: 'an empty explicit key falls back, as it always did', env: { JEV_API_KEY: 'sk-jev' }, config: { apiKey: '' } }
+  ];
+  try {
+    for (const scenario of scenarios) {
+      for (const [name, value] of Object.entries(scenario.env)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      const rootAuthorization = await authorizationSentBy(root as unknown as JevModule, scenario.config);
+      const vendorAuthorization = await authorizationSentBy(vendor, scenario.config);
+      assert.equal(
+        vendorAuthorization,
+        rootAuthorization,
+        `${scenario.name}: the vendored default key chain drifted from the root copy`
+      );
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});

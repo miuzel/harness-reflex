@@ -966,15 +966,20 @@ function ProfileRow(props: {
   onEdit: (patch: Partial<ProfileDraft>) => void;
 }): ReactNode {
   const { t, profile, isActive, probe, disabled, store, onEdit } = props;
-  // The variable reported is the one that *supplied* the key, not the one the
-  // row names: the chain falls back, so a row naming SYSTEM_ONE_API_KEY can be
-  // served by JEV_API_KEY, and the page must say which.
+  // The variable reported is the one the resolution reported, which is the one
+  // that *supplied* the key when there is one, and the named-but-empty one when
+  // the row locked onto a variable (g-059). A named row can no longer be served
+  // by a different variable, so the two cases can no longer be confused.
   const keyVariable = profile.apiKeyFromProfile ? '' : profile.apiKeyVariable || profile.apiKeyEnv || '—';
   const keyState = profile.apiKeyPresent
     ? profile.apiKeyFromProfile
       ? t('profileKeyStored')
-      : t('profileKeyFromEnv').replace('{name}', keyVariable)
-    : t('profileKeyMissing');
+      : profile.apiKeySource === 'fallback'
+        ? t('profileKeyFromFallback').replace('{name}', keyVariable)
+        : t('profileKeyFromEnv').replace('{name}', keyVariable)
+    : profile.apiKeyLocked
+      ? t('profileKeyLocked').replace('{name}', keyVariable)
+      : t('profileKeyMissing');
   const statusLabel = (status: string | undefined): string => {
     switch (status) {
       case 'ok':
@@ -1141,12 +1146,20 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   // chain may still serve the key from another one.
   // A blank `env` is passed through as `{name}` so the copy still names the
   // variable the configuration points at, instead of rendering an empty slot.
+  // Four states (g-059): a literal key, the one named variable, the named
+  // variable that is empty (a lock, not a fallback), or a fallback variable that
+  // answered because nothing was named. The last two call for different fixes,
+  // so they never share copy.
   const flatKeyState =
     systemOne?.apiKeyPresent !== true
-      ? t('apiKeyMissingNamed').replace('{name}', draft.backend.apiKeyEnv || '—')
+      ? systemOne?.apiKeyLocked === true
+        ? t('apiKeyLockedNamed').replace('{name}', systemOne.apiKeyVariable ?? draft.backend.apiKeyEnv ?? '—')
+        : t('apiKeyMissing')
       : systemOne.apiKeySource === 'profile'
         ? t('apiKeyFromProfile')
-        : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
+        : systemOne.apiKeySource === 'fallback'
+          ? t('apiKeyFromFallback').replace('{name}', systemOne.apiKeyVariable ?? '—')
+          : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
   // One line for the collapsed header. It leads with the effective key state,
   // because that is the fact a user comes to this page to check; the note about
   // which surface to edit is the copy inside the fold.

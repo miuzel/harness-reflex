@@ -245,13 +245,16 @@ export const zh = {
     '兼容区：新连接请用上方「连接配置（可多套）」，这里只作为它未覆盖字段时的兜底。点标题可展开编辑。',
   backendFlatFoldedSummary: '已折叠（新配置请用上方连接配置）',
   backendActive: '当前生效实现',
-  // Key readiness reports *where* the key came from, because the chain the
-  // backend follows is longer than the one variable this page names.
+  // Key readiness reports *where* the key came from, in four distinct states
+  // (g-059): stored literal / the one named variable / named-but-empty (locked) /
+  // a fallback variable that answered because nothing was named. Locking and
+  // "nothing configured" must never share copy: they call for different fixes.
   apiKeyFromProfile: '密钥来自配置（只写，不回显）',
   apiKeyFromEnv: '密钥来自 {name}',
-  apiKeyMissing: '未配置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
-  apiKeyMissingNamed:
-    '缺少 {name}，且已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥',
+  apiKeyFromFallback: '密钥来自 {name}（回退：未指定变量名）',
+  apiKeyMissing: '未配置密钥（未指定变量名；检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
+  apiKeyLockedNamed:
+    '已点名 {name}，但该变量未设置——密钥为空（点名即锁定，不会回退到 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY）',
   profilesTitle: '连接配置（可多套）',
   profilesHint: '每套配置一个连接；选一套为当前激活。API Key 只写不读：保存后立即写入设置文档，页面只显示占位符。',
   profilesEmpty: '还没有连接配置。新增一套即可填写 baseURL、模型与 API Key。',
@@ -264,7 +267,9 @@ export const zh = {
   profileKeyPlaceholder: '粘贴 API Key（留空表示不改动）',
   profileKeyStored: '已保存（只写，不回显）',
   profileKeyFromEnv: '来自环境变量 {name}',
-  profileKeyMissing: '未设置密钥（检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
+  profileKeyFromFallback: '来自环境变量 {name}（回退：本配置未指定变量名）',
+  profileKeyMissing: '未设置密钥（未指定变量名；检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
+  profileKeyLocked: '已点名 {name}，但该变量未设置——密钥为空（不会回退到其他变量）',
   profileClearKey: '清除已存 Key',
   profileClearConfirm: '确认清除？',
   profileTest: '测试',
@@ -368,8 +373,12 @@ export const zh = {
     'System One 决策后端当前为 {backend}；密钥来自环境变量 {env}。可在「System 1 后端」页更换实现或调整连接。',
   chipBackendTitleFromProfile:
     'System One 决策后端当前为 {backend}；密钥来自连接配置里保存的 Key（只写，不回显）。可在「System 1 后端」页更换实现或调整连接。',
+  chipBackendTitleFromFallback:
+    'System One 决策后端当前为 {backend}；密钥来自环境变量 {env}（回退：连接配置没有指定变量名）。可在「System 1 后端」页指定变量名或直接保存 Key。',
+  chipBackendTitleLockedKey:
+    'System One 决策后端当前为 {backend}；已点名 {env}，但该变量未设置——密钥为空，且点名即锁定、不会回退到其他变量，决策会降级到本地兜底。请在「System 1 后端」页设置该变量，或改点名其他变量，或直接保存 Key。',
   chipBackendTitleMissingKey:
-    'System One 决策后端当前为 {backend}；缺少 {env}：系统已按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 兜底仍未取到密钥，决策会降级到本地兜底。请在「System 1 后端」页配置其中之一。',
+    'System One 决策后端当前为 {backend}；未指定变量名，且 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 均未取到密钥，决策会降级到本地兜底。请在「System 1 后端」页配置其中之一。',
 
   statusLabel: 'Reflex 运行状态：{routing}；{effort}；{backend}。悬停或聚焦查看完整说明。',
   statusRoutingActive: '路由已启用（{candidates} 候选）',
@@ -648,9 +657,11 @@ export const en: Record<keyof typeof zh, string> = {
   backendActive: 'Effective implementation',
   apiKeyFromProfile: 'Key from the configuration (write-only, never shown)',
   apiKeyFromEnv: 'Key from {name}',
-  apiKeyMissing: 'No API key configured (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
-  apiKeyMissingNamed:
-    'missing {name}, and the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY',
+  apiKeyFromFallback: 'Key from {name} (fallback: no variable named)',
+  apiKeyMissing:
+    'No API key configured (no variable named; checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
+  apiKeyLockedNamed:
+    '{name} is named, but that variable is unset — the key is empty (naming locks the lookup: it will not fall back to SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY)',
   profilesTitle: 'Connections (multiple)',
   profilesHint:
     'One connection per profile; pick one as active. The API key is write-only: it is stored on save and the page only ever shows a placeholder.',
@@ -664,7 +675,9 @@ export const en: Record<keyof typeof zh, string> = {
   profileKeyPlaceholder: 'Paste the API key (empty = leave unchanged)',
   profileKeyStored: 'Stored (write-only, never shown)',
   profileKeyFromEnv: 'From environment variable {name}',
-  profileKeyMissing: 'No API key (checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
+  profileKeyFromFallback: 'From environment variable {name} (fallback: this profile names no variable)',
+  profileKeyMissing: 'No API key (no variable named; checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
+  profileKeyLocked: '{name} is named but unset — the key is empty (no fallback to another variable)',
   profileClearKey: 'Clear stored key',
   profileClearConfirm: 'Confirm clear?',
   profileTest: 'Test',
@@ -768,8 +781,12 @@ export const en: Record<keyof typeof zh, string> = {
     'System One decision backend is {backend}; the key comes from environment variable {env}. Change the implementation or connection on the "System 1 backend" page.',
   chipBackendTitleFromProfile:
     'System One decision backend is {backend}; the key comes from the connection profile (write-only, never shown). Change the implementation or connection on the "System 1 backend" page.',
+  chipBackendTitleFromFallback:
+    'System One decision backend is {backend}; the key comes from environment variable {env} (fallback: the connection names no variable). Name one, or store a key, on the "System 1 backend" page.',
+  chipBackendTitleLockedKey:
+    'System One decision backend is {backend}; {env} is named but unset — the key is empty, and naming locks the lookup so it will not fall back to another variable; decisions degrade to the local fallback. Set that variable, name a different one, or store a key on the "System 1 backend" page.',
   chipBackendTitleMissingKey:
-    'System One decision backend is {backend}; missing {env}: the chain already fell through SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY without finding a key, so decisions degrade to the local fallback. Set one of them on the "System 1 backend" page.',
+    'System One decision backend is {backend}; no variable is named and none of SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY holds a key, so decisions degrade to the local fallback. Set one of them on the "System 1 backend" page.',
 
   statusLabel: 'Reflex status: {routing}; {effort}; {backend}. Hover or focus for the full explanation.',
   statusRoutingActive: 'routing enabled ({candidates} candidates)',

@@ -270,6 +270,14 @@ export interface ProfileDraft {
    * key really came from `JEV_API_KEY`.
    */
   apiKeyVariable: string;
+  /** Where this row's key came from, when it resolved: literal, named, or fallback. */
+  apiKeySource: 'profile' | 'env' | 'fallback';
+  /**
+   * This row names a variable that is empty, and the lookup locked onto it
+   * (g-059): no fallback variable was consulted. Separate from `apiKeyPresent`
+   * so the row can say "named, but empty" instead of "no key configured".
+   */
+  apiKeyLocked: boolean;
   /** Set by the explicit clear action; makes the write unset the secret slot. */
   clearKey: boolean;
 }
@@ -460,7 +468,9 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
               {
                 present: profile.apiKeyPresent === true,
                 fromProfile: profile.apiKeyFromProfile === true,
-                variable: typeof profile.apiKeyVariable === 'string' ? profile.apiKeyVariable : ''
+                variable: typeof profile.apiKeyVariable === 'string' ? profile.apiKeyVariable : '',
+                source: profile.apiKeySource === 'fallback' ? ('fallback' as const) : profile.apiKeySource === 'env' ? ('env' as const) : profile.apiKeyFromProfile === true ? ('profile' as const) : ('env' as const),
+                locked: profile.apiKeyLocked === true
               }
             ] as const
           ];
@@ -472,7 +482,14 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
       profiles: draft.backend.profiles.map((row) => {
         const fact = presence.get(row.name.trim());
         if (fact === undefined) return row;
-        return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile, apiKeyVariable: fact.variable };
+        return {
+          ...row,
+          apiKeyPresent: fact.present,
+          apiKeyFromProfile: fact.fromProfile,
+          apiKeyVariable: fact.variable,
+          apiKeySource: fact.source,
+          apiKeyLocked: fact.locked
+        };
       })
     };
   }
@@ -533,6 +550,8 @@ export function profileRowsFrom(value: unknown): ProfileDraft[] {
         apiKeyPresent: false,
         apiKeyFromProfile: false,
         apiKeyVariable: '',
+        apiKeySource: 'env' as const,
+        apiKeyLocked: false,
         clearKey: false
       }
     ];
@@ -1282,9 +1301,11 @@ export interface PanelSnapshotLike {
     apiKeyEnv?: string;
     apiKeyPresent?: boolean;
     /** Where the resolved key came from; absent when none resolves. */
-    apiKeySource?: 'profile' | 'env';
-    /** The variable that supplied the key (a name, never a value). */
+    apiKeySource?: 'profile' | 'env' | 'fallback';
+    /** The variable that supplied the key, or the named-but-empty one (a name, never a value). */
     apiKeyVariable?: string;
+    /** The block named a variable that is empty, so no fallback was consulted (g-059). */
+    apiKeyLocked?: boolean;
     /** Whether the resolved block carries a literal key (never the key itself). */
     apiKeyFromProfile?: boolean;
     timeoutMs?: number;
@@ -1296,6 +1317,8 @@ export interface PanelSnapshotLike {
       apiKeyEnv?: string;
       apiKeyPresent?: boolean;
       apiKeyVariable?: string;
+      apiKeySource?: 'profile' | 'env' | 'fallback';
+      apiKeyLocked?: boolean;
       apiKeyFromProfile?: boolean;
       timeoutMs?: number;
       backend?: string;
@@ -1449,17 +1472,27 @@ export function panelStatus(snapshot: PanelSnapshotLike | null): PanelStatus | u
     : { key: 'chipEffortTitleSet', values: { level: String(setting) } };
   // The line follows the *resolved* provenance, not the variable the block
   // names: a key that came from a fallback variable must be reported as coming
-  // from that variable, otherwise the chip repeats the very claim this fix
-  // removed (naming `SYSTEM_ONE_API_KEY` while `JEV_API_KEY` supplied the key).
+  // from that variable, otherwise the chip repeats the very claim g-058 removed
+  // (naming `SYSTEM_ONE_API_KEY` while `JEV_API_KEY` supplied the key).
+  //
+  // Four states, in the order they are decided (g-059):
+  //   locked   -> the block named a variable and it is empty: say *that*, and
+  //               say it will not fall back, instead of "no key configured";
+  //   profile  -> a literal key from the settings document;
+  //   fallback -> no variable was named, one of the four answered (marked as
+  //               such, so a deployment that meant to name one can tell);
+  //   missing  -> nothing named, nothing exported.
   const keyVariable = backend?.apiKeyVariable ?? backend?.apiKeyEnv;
   const backendLine: PanelStatusFragment =
     backend?.apiKeyPresent !== true
-      ? keyVariable === undefined
-        ? { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: '—' } }
-        : { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: keyVariable } }
+      ? backend?.apiKeyLocked === true
+        ? { key: 'chipBackendTitleLockedKey', values: { backend: backendName, env: keyVariable ?? '—' } }
+        : { key: 'chipBackendTitleMissingKey', values: { backend: backendName, env: keyVariable ?? '—' } }
       : backend.apiKeySource === 'profile'
         ? { key: 'chipBackendTitleFromProfile', values: { backend: backendName } }
-        : { key: 'chipBackendTitle', values: { backend: backendName, env: keyVariable ?? '—' } };
+        : backend.apiKeySource === 'fallback'
+          ? { key: 'chipBackendTitleFromFallback', values: { backend: backendName, env: keyVariable ?? '—' } }
+          : { key: 'chipBackendTitle', values: { backend: backendName, env: keyVariable ?? '—' } };
 
   const backendFragment: PanelStatusFragment = degraded
     ? { key: 'statusBackendDegraded', values: { backend: backendName } }

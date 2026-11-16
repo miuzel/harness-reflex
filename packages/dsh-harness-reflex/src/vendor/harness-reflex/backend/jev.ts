@@ -26,6 +26,26 @@ import { CURRENT_MODEL_MARK, buildRouteContext } from './route-prompt.js';
 export interface JevBackendConfig {
   baseUrl?: string;
   apiKey?: string;
+  /**
+   * The caller has already resolved the credential (g-059).
+   *
+   * `true` means `apiKey` is used **verbatim**, including "absent": an omitted
+   * or empty key means requests go out with no `Authorization` header at all,
+   * and this class never consults `SYSTEM_ONE_API_KEY` / `JEV_API_KEY` itself.
+   * Without this bit a caller that resolved "no key" (a naming that locks onto an
+   * empty variable) would be silently served by the environment read below — the
+   * panel would say the key is empty while requests actually authenticated,
+   * which is the divergence `g-058` removed, pointing the other way.
+   *
+   * Default `false`: the environment chain stays exactly as it was for every
+   * bare construction.
+   *
+   * **Plugin-only extension.** The vendored backends are a manual port verified
+   * by behaviour (`vendor-contract.test.ts`), not a generated mirror, so this
+   * field lives here first; the root adapter does not have it yet and is not
+   * changed by this goal. Consolidating the two copies is g-060.
+   */
+  apiKeyResolved?: boolean;
   model?: string;
   timeoutMs?: number;
   /**
@@ -1179,11 +1199,18 @@ export class JevDecisionBackend implements DecisionBackend {
         process.env.JEV_API_BASE ||
         DEFAULT_SYSTEMONE_ENDPOINT
     );
+    // A caller that resolved the credential owns the answer, empty included
+    // (g-059): reading the environment here would resurrect a key that caller
+    // deliberately decided not to send. See `JevBackendConfig.apiKeyResolved`.
+    // `=== true` rather than truthiness: only an explicit opt-in may change the
+    // historical chain, so any other value (including a stray `'false'`) keeps it.
     this.apiKey =
-      config?.apiKey ||
-      process.env.SYSTEM_ONE_API_KEY ||
-      process.env.JEV_API_KEY ||
-      '';
+      config?.apiKeyResolved === true
+        ? config.apiKey ?? ''
+        : config?.apiKey ||
+          process.env.SYSTEM_ONE_API_KEY ||
+          process.env.JEV_API_KEY ||
+          '';
     this.model =
       config?.model ||
       process.env.SYSTEM_ONE_MODEL ||

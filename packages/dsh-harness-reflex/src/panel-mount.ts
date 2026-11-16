@@ -172,12 +172,41 @@ export function panelFacts(
 }
 
 /**
+ * Key readiness as the panel needs it: presence, provenance, and the *reason*
+ * for an absence.
+ *
+ * `apiKeyLocked` is the fact g-059 added: the block **named** a variable and that
+ * variable is empty. It is deliberately separate from plain
+ * `apiKeyPresent === false`, which now means "nothing was named and nothing was
+ * exported" — the two need different copy, and "the name I typed is empty" must
+ * not read as "no key anywhere".
+ *
+ * The value is never part of this type: the facts are booleans, a source tag,
+ * and a variable *name*.
+ */
+export interface ApiKeyFacts {
+  /** Whether a key resolved. */
+  apiKeyPresent: boolean;
+  /** Where the key came from when {@link apiKeyPresent}. */
+  apiKeySource?: 'profile' | 'env' | 'fallback';
+  /**
+   * The variable behind the key (when present), or the named-but-empty variable
+   * (when locked). Absent only when nothing was named and nothing resolved.
+   */
+  apiKeyVariable?: string;
+  /**
+   * The block named a variable, that variable is empty, and the lookup stopped
+   * there on purpose: no fallback was consulted and none will be.
+   */
+  apiKeyLocked?: boolean;
+}
+
+/**
  * The readiness facts the snapshot reports about the key in force.
  *
  * Presence and provenance are read from {@link resolveApiKeyWithSource} — the
  * one chain — so the panel can say *where* the key came from instead of guessing
- * from `apiKeyEnv`. The value is dropped here and never travels: the facts are a
- * boolean, a source tag, and a variable *name*.
+ * from `apiKeyEnv`.
  *
  * @param systemOne - the connection block in force.
  * @param env - environment the chain reads.
@@ -186,9 +215,12 @@ export function panelFacts(
 export function apiKeyFacts(
   systemOne: Pick<ResolvedSystemOneConfig, 'apiKey' | 'apiKeyEnv'>,
   env: Record<string, string | undefined> = process.env
-): { apiKeyPresent: boolean; apiKeySource?: 'profile' | 'env'; apiKeyVariable?: string } {
+): ApiKeyFacts {
   const resolved = resolveApiKeyWithSource(systemOne, env);
   if (resolved === undefined) return { apiKeyPresent: false };
+  if (!('key' in resolved)) {
+    return { apiKeyPresent: false, apiKeyLocked: true, apiKeyVariable: resolved.variable };
+  }
   return {
     apiKeyPresent: true,
     apiKeySource: resolved.source,
@@ -213,16 +245,20 @@ export function apiKeyFacts(
 export function profileKeyPresence(
   systemOne: Pick<ResolvedSystemOneConfig, 'profiles'>,
   env: Record<string, string | undefined> = process.env
-): Record<string, { present: boolean; fromProfile: boolean; variable?: string }> {
-  const out: Record<string, { present: boolean; fromProfile: boolean; variable?: string }> = {};
+): Record<string, { present: boolean; fromProfile: boolean; variable?: string; locked?: boolean }> {
+  const out: Record<string, { present: boolean; fromProfile: boolean; variable?: string; locked?: boolean }> = {};
   for (const [name, profile] of Object.entries(systemOne.profiles ?? {})) {
     // The profile's own fields, with no flat block folded in: a row reports what
     // *it* supplies, and the panel already shows the flat block's own status.
     const resolved = resolveApiKeyWithSource(profile, env);
+    // `locked` mirrors {@link ApiKeyFacts.apiKeyLocked}: the row named a variable
+    // that is empty, so the row says so instead of "no key anywhere".
+    const present = resolved !== undefined && 'key' in resolved;
     out[name] = {
-      present: resolved !== undefined,
-      fromProfile: resolved?.source === 'profile',
-      ...(resolved?.variable === undefined ? {} : { variable: resolved.variable })
+      present,
+      fromProfile: present && resolved.source === 'profile',
+      ...(resolved?.variable === undefined ? {} : { variable: resolved.variable }),
+      ...(present ? {} : { locked: resolved !== undefined })
     };
   }
   return out;

@@ -481,6 +481,10 @@ export class PanelStore {
             apiKeyPresent: false,
             apiKeyFromProfile: false,
             apiKeyVariable: '',
+            // A blank row has locked onto nothing yet: `env` is the neutral tag
+            // until the Host reports where a saved row's key really comes from.
+            apiKeySource: 'env',
+            apiKeyLocked: false,
             clearKey: false
           }
         ]

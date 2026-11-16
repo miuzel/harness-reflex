@@ -1334,20 +1334,38 @@ test('the backend page shows where the key lives, never the key', async () => {
   }
 });
 
-test('the backend page reports a missing key variable without claiming it is the cause', async () => {
+test('the backend page tells a locked lookup apart from an unconfigured one', async () => {
+  // g-059 reversed the g-058 wording. Naming a variable now *locks* the lookup,
+  // so "the variable you named is empty" is the truthful sentence — and it must
+  // not be confused with "nothing was named and nothing was found", which calls
+  // for a different fix and therefore different copy.
   const { form } = settingsForm(AUTHORED);
-  const mounted = await mountPanel({ facts: facts(false), form });
-  openTab(mounted.tree, 'System 1 后端');
-  const tree = await expandFlatBlock(mounted);
-  const text = textOf(tree);
-  // The old copy said "the environment variable is empty" while the backend
-  // could still be serving the key from a fallback variable. The page now states
-  // the fact (nothing resolved) and names what it checked.
-  assert.ok(text.includes('缺少 REFLEX_TEST_KEY'), 'a missing key does not name the declared variable');
-  assert.ok(!text.includes('环境变量为空'), 'the old "the variable is empty" claim survived');
-  assert.ok(text.includes('OPENAI_API_KEY'), 'the copy does not name the candidates it checked');
-  assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
-  mounted.unmount();
+  const locked = await mountPanel({
+    facts: { ...facts(false), apiKeyLocked: true, apiKeyVariable: 'REFLEX_TEST_KEY' },
+    form
+  });
+  try {
+    openTab(locked.tree, 'System 1 后端');
+    const tree = await expandFlatBlock(locked);
+    const text = textOf(tree);
+    assert.ok(text.includes('已点名 REFLEX_TEST_KEY'), `the locked copy does not name the locked variable: ${text}`);
+    assert.ok(text.includes('不会回退'), 'the locked copy does not say the lookup will not fall back');
+    assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
+  } finally {
+    locked.unmount();
+  }
+
+  const unconfigured = await mountPanel({ facts: facts(false), form });
+  try {
+    openTab(unconfigured.tree, 'System 1 后端');
+    const tree = await expandFlatBlock(unconfigured);
+    const text = textOf(tree);
+    assert.ok(text.includes('未配置密钥'), 'the unconfigured copy does not state the absence');
+    assert.ok(text.includes('OPENAI_API_KEY'), 'the copy does not name the candidates it checked');
+    assert.ok(!text.includes('已点名'), 'an unconfigured block must not claim a variable was named');
+  } finally {
+    unconfigured.unmount();
+  }
 });
 
 //#region the flat block's compatibility fold (g-058)
@@ -1685,16 +1703,37 @@ test('the icon distinguishes healthy, missing-key, and degraded states', async (
     healthy.unmount();
   }
 
+  // A *locked* lookup (g-059): the variable was named and is empty. The icon is
+  // still a warning — there is no key — but the copy names the locked variable
+  // and says the lookup will not fall back.
+  const locked = await mountPanel({
+    facts: { ...factsWithUnsetEffort(false), routingActive: false, apiKeyLocked: true, apiKeyVariable: 'REFLEX_TEST_KEY' },
+    form
+  });
+  try {
+    const icon = statusButtons(locked.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'warn', 'a locked key is not a warning state');
+    assert.match(String(styleOf(icon).color), /state-warn/, 'a locked key is not drawn in the warning tone');
+    assert.equal(textOf(icon).trim(), '!', 'the warning glyph is not distinctive');
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('已点名 REFLEX_TEST_KEY'), `the warning state does not name the locked variable: ${title}`);
+    assert.ok(title.includes('不会回退'), 'the warning state does not say the lookup is locked');
+    assert.ok(title.includes('降级'), 'the warning state does not warn about degradation');
+    assert.match(String(icon.props['aria-label'] ?? ''), /缺少 API Key/);
+  } finally {
+    locked.unmount();
+  }
+
+  // Nothing named, nothing exported: still a warning, and still no claim that a
+  // variable was named.
   const missingKey = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form });
   try {
     const icon = statusButtons(missingKey.tree)[0]!;
     assert.equal(icon.props['data-reflex-status'], 'warn', 'a missing key is not a warning state');
-    assert.match(String(styleOf(icon).color), /state-warn/, 'a missing key is not drawn in the warning tone');
-    assert.equal(textOf(icon).trim(), '!', 'the warning glyph is not distinctive');
     const title = String(icon.props.title ?? '');
-    assert.ok(title.includes('缺少 REFLEX_TEST_KEY'), 'the warning state does not name the missing key');
+    assert.ok(title.includes('未指定变量名'), 'the warning does not state that nothing was named');
+    assert.ok(!title.includes('已点名'), 'an unconfigured block must not claim a variable was named');
     assert.ok(title.includes('降级'), 'the warning state does not warn about degradation');
-    assert.match(String(icon.props['aria-label'] ?? ''), /缺少 API Key/);
   } finally {
     missingKey.unmount();
   }
@@ -1718,15 +1757,33 @@ test('the icon distinguishes healthy, missing-key, and degraded states', async (
   }
 });
 
-test('the status chip reports where the key came from, and never claims the named variable is empty', async () => {
-  // g-058: the reported shape was `apiKeyEnv: SYSTEM_ONE_API_KEY` with a shell
-  // exporting only `JEV_API_KEY`, so the page said the variable was empty while
-  // the backend worked. The chip now states the fact the chain resolved.
+test('the status chip reports all four key states, never the key itself', async () => {
+  // g-059: four states, each with its own sentence — a literal key, the one named
+  // variable, a named variable that is empty (locked, and it says so), and a
+  // fallback variable that answered because nothing was named.
   const { form } = settingsForm(AUTHORED);
-  const cases: { source: 'profile' | 'env' | undefined; variable?: string; expect: RegExp; forbidden?: RegExp }[] = [
-    { source: 'profile', expect: /密钥来自连接配置/ },
+  const cases: {
+    source: 'profile' | 'env' | 'fallback' | undefined;
+    variable?: string;
+    locked?: boolean;
+    expect: RegExp;
+    forbidden?: RegExp;
+  }[] = [
+    { source: 'profile', expect: /密钥来自连接配置/, forbidden: /来自环境变量/ },
     { source: 'env', variable: 'JEV_API_KEY', expect: /来自环境变量 JEV_API_KEY/ },
-    { source: undefined, expect: /缺少 REFLEX_TEST_KEY/, forbidden: /环境变量为空/ }
+    {
+      source: undefined,
+      variable: 'REFLEX_TEST_KEY',
+      locked: true,
+      expect: /已点名 REFLEX_TEST_KEY.*不会回退/,
+      // A locked lookup must never be described as "nothing configured": the
+      // user typed a name, and the fix is to set *that* variable.
+      forbidden: /未配置密钥/
+    },
+    { source: 'fallback', variable: 'JEV_API_KEY', expect: /来自环境变量 JEV_API_KEY（回退/ },
+    // Nothing named, nothing exported: the chip states *that*, and names the four
+    // variables it checked rather than implying a name was locked onto.
+    { source: undefined, expect: /未指定变量名/, forbidden: /已点名/ }
   ];
   for (const entry of cases) {
     const base = facts(entry.source !== undefined);
@@ -1734,17 +1791,20 @@ test('the status chip reports where the key came from, and never claims the name
       ...base,
       ...(entry.source === undefined
         ? {}
-        : { apiKeySource: entry.source, ...(entry.variable === undefined ? {} : { apiKeyVariable: entry.variable }) })
+        : { apiKeySource: entry.source, ...(entry.variable === undefined ? {} : { apiKeyVariable: entry.variable }) }),
+      ...(entry.locked === true
+        ? { apiKeyLocked: true, ...(entry.variable === undefined ? {} : { apiKeyVariable: entry.variable }) }
+        : {})
     };
     const mounted = await mountPanel({ facts: scenarioFacts, form });
     try {
       const title = String(statusButtons(mounted.tree)[0]?.props.title ?? '');
       assert.match(title, entry.expect, `source ${String(entry.source)} is not reported: ${title}`);
       if (entry.forbidden !== undefined) {
-        assert.doesNotMatch(title, entry.forbidden, 'the old "the variable is empty" claim survived');
+        assert.doesNotMatch(title, entry.forbidden, `state ${String(entry.source)} leaked another state's copy`);
       }
       // The candidates are named when nothing resolves, so the user knows what to check.
-      if (entry.source === undefined) {
+      if (entry.source === undefined && entry.locked !== true) {
         assert.match(title, /SYSTEM_ONE_API_KEY/, 'the missing-key copy must name the candidates');
         assert.match(title, /OPENAI_API_KEY/, 'the missing-key copy must name every candidate');
       }
@@ -1777,14 +1837,31 @@ test('the English status icon mirrors the label, title, and three states', async
     healthy.unmount();
   }
 
+  const locked = await mountPanel({
+    facts: { ...factsWithUnsetEffort(false), routingActive: false, apiKeyLocked: true, apiKeyVariable: 'REFLEX_TEST_KEY' },
+    form,
+    language: 'en'
+  });
+  try {
+    const icon = statusButtons(locked.tree)[0]!;
+    assert.equal(icon.props['data-reflex-status'], 'warn');
+    const title = String(icon.props.title ?? '');
+    assert.ok(title.includes('REFLEX_TEST_KEY is named but unset'), `the English warning does not name the locked variable: ${title}`);
+    assert.ok(title.includes('will not fall back'), 'the English warning does not say the lookup is locked');
+    assert.ok(title.includes('degrade'), 'the English warning does not warn about degradation');
+    assert.match(String(icon.props['aria-label'] ?? ''), /missing its API key/);
+  } finally {
+    locked.unmount();
+  }
+
   const missingKey = await mountPanel({ facts: { ...factsWithUnsetEffort(false), routingActive: false }, form, language: 'en' });
   try {
     const icon = statusButtons(missingKey.tree)[0]!;
     assert.equal(icon.props['data-reflex-status'], 'warn');
     const title = String(icon.props.title ?? '');
-    assert.ok(title.includes('missing REFLEX_TEST_KEY'), 'the English warning does not name the missing key');
+    assert.ok(title.includes('no variable is named'), 'the English warning does not state that nothing was named');
     assert.ok(title.includes('OPENAI_API_KEY'), 'the English warning does not name the fallback candidates');
-    assert.ok(title.includes('degrade'), 'the English warning does not warn about degradation');
+    assert.ok(!title.includes('is named but unset'), 'an unconfigured block must not claim a variable was named');
     assert.match(String(icon.props['aria-label'] ?? ''), /missing its API key/);
   } finally {
     missingKey.unmount();

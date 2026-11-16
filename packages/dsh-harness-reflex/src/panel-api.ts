@@ -276,8 +276,17 @@ export interface PanelSystemOneProfileView {
   apiKeyPresent: boolean;
   /** Whether the key this profile resolves is its own secret slot (not a variable). */
   apiKeyFromProfile: boolean;
-  /** The variable that supplied this profile's key, when one did. A name, never a value. */
+  /**
+   * The variable that supplied this profile's key, or the one it named and
+   * found empty. A name, never a value.
+   */
   apiKeyVariable?: string;
+  /**
+   * This profile names a variable that is empty, and the lookup locked onto it
+   * (g-059): no fallback variable was consulted. Rendered as "named, but empty"
+   * rather than as "no key configured".
+   */
+  apiKeyLocked?: boolean;
   timeoutMs?: number;
   backend?: string;
   /** Whether this is the profile in force. */
@@ -300,16 +309,27 @@ export interface PanelSystemOneView {
    */
   apiKeyPresent: boolean;
   /**
-   * Where that key came from, so the page can say "from the configuration" or
-   * "from JEV_API_KEY" instead of guessing from `apiKeyEnv`. Absent when no key
-   * resolves at all.
+   * Where that key came from, so the page can say "from the configuration",
+   * "from JEV_API_KEY", or "from JEV_API_KEY (fallback)" instead of guessing
+   * from `apiKeyEnv`. Absent when no key resolves at all.
+   *
+   * `fallback` is an environment read reached through the documented variable
+   * list because the block named *no* variable (g-059) — marked as such so a
+   * deployment that meant to name one can tell it named nothing.
    */
-  apiKeySource?: 'profile' | 'env';
+  apiKeySource?: 'profile' | 'env' | 'fallback';
   /**
-   * The environment variable that supplied the key (present only when
-   * {@link apiKeySource} is `env`). A *name*; the value never travels.
+   * The environment variable that supplied the key (present when
+   * {@link apiKeySource} is `env` or `fallback`), or — when nothing resolved —
+   * the variable the block named and found empty. A *name*; no value travels.
    */
   apiKeyVariable?: string;
+  /**
+   * The block named a variable that is empty, and the lookup stopped there on
+   * purpose (g-059): no fallback variable was consulted. Distinct from a plain
+   * `apiKeyPresent: false`, which means nothing was named and nothing was found.
+   */
+  apiKeyLocked?: boolean;
   /** Whether the resolved configuration carries a literal key. Never the key. */
   apiKeyFromProfile: boolean;
   timeoutMs?: number;
@@ -401,12 +421,18 @@ export interface PanelRuntimeFacts {
   /** Whether an API key is currently reachable through the resolved key chain. */
   apiKeyPresent: boolean;
   /**
-   * Where that key came from: a literal in the settings document (`profile`) or
-   * an environment variable (`env`). Absent when no key resolves.
+   * Where that key came from: a literal in the settings document (`profile`), an
+   * environment variable the block named (`env`), or a documented fallback
+   * variable (`fallback`). Absent when no key resolves.
    */
-  apiKeySource?: 'profile' | 'env';
-  /** The variable that supplied the key, when {@link apiKeySource} is `env`. A name, never a value. */
+  apiKeySource?: 'profile' | 'env' | 'fallback';
+  /**
+   * The variable that supplied the key, or the named-but-empty one. A name,
+   * never a value.
+   */
   apiKeyVariable?: string;
+  /** The block named a variable that is empty, so no fallback was consulted. */
+  apiKeyLocked?: boolean;
   /**
    * Key *presence* per profile name — the only key fact the panel may receive.
    *
@@ -414,7 +440,7 @@ export interface PanelRuntimeFacts {
    * leak what it is not handed, and a test asserts the serialized snapshot
    * contains no key substring.
    */
-  profileKeys?: Record<string, { present: boolean; fromProfile: boolean; variable?: string }>;
+  profileKeys?: Record<string, { present: boolean; fromProfile: boolean; variable?: string; locked?: boolean }>;
   /** Health of the backend's gateway conversation, when it tracks one. */
   systemOneHealth?: PanelSystemOneHealth;
   /** Available physical model catalog from ctx.llm. */
@@ -605,7 +631,7 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
   const keyFacts = (
     name: string,
     profile: { apiKey?: string; apiKeyEnv?: string }
-  ): { present: boolean; fromProfile: boolean; variable?: string } => {
+  ): { present: boolean; fromProfile: boolean; variable?: string; locked?: boolean } => {
     const supplied = facts.profileKeys?.[name];
     if (supplied !== undefined) return supplied;
     const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
@@ -625,6 +651,7 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
       apiKeyPresent: keys.present,
       apiKeyFromProfile: keys.fromProfile,
       ...(keys.variable === undefined ? {} : { apiKeyVariable: keys.variable }),
+      ...(keys.locked === true ? { apiKeyLocked: true } : {}),
       ...(merged.baseUrl === undefined ? {} : { baseUrl: merged.baseUrl }),
       ...(merged.model === undefined ? {} : { model: merged.model }),
       ...(merged.apiKeyEnv === undefined ? {} : { apiKeyEnv: merged.apiKeyEnv }),
@@ -642,6 +669,7 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
     // resolved them through the one key chain and dropped the value there.
     ...(facts.apiKeySource === undefined ? {} : { apiKeySource: facts.apiKeySource }),
     ...(facts.apiKeyVariable === undefined ? {} : { apiKeyVariable: facts.apiKeyVariable }),
+    ...(facts.apiKeyLocked === true ? { apiKeyLocked: true } : {}),
     profiles,
     activeProfileMissing: systemOne.activeProfileMissing === true,
     ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),

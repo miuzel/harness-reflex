@@ -18,6 +18,22 @@ import { buildRouteContext } from './route-prompt.js';
 export interface SimpleJevConfig {
   vllmBaseUrl?: string;
   apiKey?: string;
+  /**
+   * The caller has already resolved the credential (g-059).
+   *
+   * `true` means `apiKey` is used **verbatim**, including "absent": the
+   * environment chain below (`SYSTEM_ONE_API_KEY` -> `VLLM_API_KEY` ->
+   * `OPENAI_API_KEY`) and the `dummy` placeholder are all skipped, so a caller
+   * that resolved "no key" gets a request with no `Authorization` header instead
+   * of one whose credential nobody configured. Default `false` keeps the
+   * historical chain for every bare construction.
+   *
+   * **Plugin-only extension.** The vendored backends are a manual port verified
+   * by behaviour (`vendor-contract.test.ts`), not a generated mirror, so this
+   * field lives here first; the root adapter does not have it yet and is not
+   * changed by this goal. Consolidating the two copies is g-060.
+   */
+  apiKeyResolved?: boolean;
   model?: string;
   timeoutMs?: number;
 }
@@ -43,12 +59,17 @@ export class LogitsSystemOneBackend implements DecisionBackend {
       process.env.OPENAI_BASE_URL ||
       'http://localhost:8000'
     ).replace(/\/$/, '');
+    // A caller that resolved the credential owns the answer, empty included
+    // (g-059); `dummy` in particular must not stand in for a key the caller
+    // decided is absent. See `SimpleJevConfig.apiKeyResolved`.
     this.apiKey =
-      config?.apiKey ||
-      process.env.SYSTEM_ONE_API_KEY ||
-      process.env.VLLM_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      'dummy';
+      config?.apiKeyResolved === true
+        ? config.apiKey ?? ''
+        : config?.apiKey ||
+          process.env.SYSTEM_ONE_API_KEY ||
+          process.env.VLLM_API_KEY ||
+          process.env.OPENAI_API_KEY ||
+          'dummy';
     this.model =
       config?.model ||
       process.env.SYSTEM_ONE_MODEL ||
@@ -69,7 +90,13 @@ export class LogitsSystemOneBackend implements DecisionBackend {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`
+          // An empty key sends no `Authorization` at all: `Bearer ` with nothing
+          // after it is a malformed header, not a credential, and a caller that
+          // resolved "no key" (g-059) must produce a request with no key rather
+          // than one the backend invented. Every non-empty key -- including the
+          // `dummy` placeholder of the environment chain -- is sent unchanged,
+          // so the historical behaviour is byte-identical.
+          ...(this.apiKey.length > 0 ? { Authorization: `Bearer ${this.apiKey}` } : {})
         },
         body: JSON.stringify({
           model: this.model,
