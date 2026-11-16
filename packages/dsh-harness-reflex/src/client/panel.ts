@@ -438,6 +438,28 @@ export function draftFromSnapshot(snapshot: PanelSnapshotLike | null, base: Pane
       minConfidence: snapshot.effort.minConfidence !== undefined ? String(snapshot.effort.minConfidence) : draft.effort.minConfidence
     };
   }
+  // Key *presence* comes from the live snapshot, never from the settings form:
+  // the form's secret slots are stripped before they reach this page, so the
+  // snapshot's `apiKeyPresent` is the only fact that can drive the placeholder.
+  // A pending (unsaved) key is left untouched, and so is a pending clear.
+  const presence = new Map(
+    (snapshot.systemOne?.profiles ?? []).flatMap((profile) => {
+      const name = typeof profile.name === 'string' ? profile.name : '';
+      return name.length === 0
+        ? []
+        : [[name, { present: profile.apiKeyPresent === true, fromProfile: profile.apiKeyFromProfile === true }] as const];
+    })
+  );
+  if (presence.size > 0) {
+    draft.backend = {
+      ...draft.backend,
+      profiles: draft.backend.profiles.map((row) => {
+        const fact = presence.get(row.name.trim());
+        if (fact === undefined) return row;
+        return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile };
+      })
+    };
+  }
   return draft;
 }
 
@@ -468,6 +490,36 @@ export function draftFromLayers(value: unknown, base: unknown): PanelDraft {
       capabilities: { ...baseDraft.interventions.capabilities, ...draft.interventions.capabilities }
     }
   };
+}
+
+/**
+ * Seed one editable row per authored profile.
+ *
+ * Tolerant like the rest of the seeding path: an entry that is not an object is
+ * dropped rather than rendered as a broken row.
+ * @param value - the authored `systemOne.profiles` dictionary.
+ * @returns the rows, in authored order, with empty pending keys.
+ */
+export function profileRowsFrom(value: unknown): ProfileDraft[] {
+  const profiles = asRecord(value);
+  return Object.entries(profiles).flatMap(([name, entry]) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const profile = asRecord(entry);
+    return [
+      {
+        name,
+        baseUrl: asText(profile.baseUrl),
+        model: asText(profile.model),
+        apiKeyEnv: asText(profile.apiKeyEnv),
+        timeoutMs: asText(profile.timeoutMs),
+        backend: asText(profile.backend),
+        apiKey: '',
+        apiKeyPresent: false,
+        apiKeyFromProfile: false,
+        clearKey: false
+      }
+    ];
+  });
 }
 
 /**
@@ -526,7 +578,13 @@ export function draftFromConfig(value: unknown): PanelDraft {
       baseUrl: asText(systemOne.baseUrl),
       model: asText(systemOne.model),
       apiKeyEnv: asText(systemOne.apiKeyEnv),
-      timeoutMs: asText(systemOne.timeoutMs)
+      timeoutMs: asText(systemOne.timeoutMs),
+      active: asText(systemOne.active),
+      // A row is seeded from the authored profile only. The key is NOT seeded:
+      // the Host never sends it, and `apiKeyPresent` is filled from the live
+      // snapshot (see `PanelStore.#applyProfilePresence`), which is the only
+      // place presence is known.
+      profiles: profileRowsFrom(systemOne.profiles)
     },
     runtime: {
       toolPrefix: asText(section.toolPrefix) || EMPTY_DRAFT.runtime.toolPrefix,
@@ -767,20 +825,59 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
           }
         }
       ];
-    case 'backend':
+    case 'backend': {
       // One page, two Host paths: the scalar backend choice and its own block.
-      return [
-        { path: ['backend'], value: present(draft.backend.backend) ?? 'auto' },
-        {
-          path: ['systemOne'],
-          value: {
-            ...(present(draft.backend.baseUrl) === undefined ? {} : { baseUrl: draft.backend.baseUrl.trim() }),
-            ...(present(draft.backend.model) === undefined ? {} : { model: draft.backend.model.trim() }),
-            ...(present(draft.backend.apiKeyEnv) === undefined ? {} : { apiKeyEnv: draft.backend.apiKeyEnv.trim() }),
-            ...(asNumber(draft.backend.timeoutMs) === undefined ? {} : { timeoutMs: asNumber(draft.backend.timeoutMs) })
-          }
+      //
+      // ## Why `systemOne` is written field by field, never as one group
+      //
+      // `systemOne.profiles.<name>.apiKey` is a `role('secret')` slot: the Host
+      // strips it before the value reaches this page and `applyPathOp` replaces a
+      // `set` path's subtree on the *stored* config. A whole-group write therefore
+      // deletes every stored key, and the page could not restate them (it never
+      // received them). Narrow paths only touch what the user actually edited.
+      const writes: GroupWrite[] = [{ path: ['backend'], value: present(draft.backend.backend) ?? 'auto' }];
+      const flat: Record<string, unknown> = {};
+      if (present(draft.backend.baseUrl) !== undefined) flat.baseUrl = draft.backend.baseUrl.trim();
+      if (present(draft.backend.model) !== undefined) flat.model = draft.backend.model.trim();
+      if (present(draft.backend.apiKeyEnv) !== undefined) flat.apiKeyEnv = draft.backend.apiKeyEnv.trim();
+      if (asNumber(draft.backend.timeoutMs) !== undefined) flat.timeoutMs = asNumber(draft.backend.timeoutMs);
+      // An empty name is an explicit "no active profile", which must be written
+      // as an unset rather than left as the previous name.
+      if (present(draft.backend.active) === undefined) writes.push({ path: ['systemOne', 'active'], value: undefined });
+      else writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });
+      for (const [key, value] of Object.entries(flat)) writes.push({ path: ['systemOne', key], value });
+
+      for (const profile of draft.backend.profiles) {
+        const name = profile.name.trim();
+        // A row the user has not named yet cannot be addressed by a path, so it is
+        // skipped rather than written under an empty segment.
+        if (name.length === 0) continue;
+        const row: Record<string, unknown> = {};
+        if (present(profile.baseUrl) !== undefined) row.baseUrl = profile.baseUrl.trim();
+        if (present(profile.model) !== undefined) row.model = profile.model.trim();
+        if (present(profile.apiKeyEnv) !== undefined) row.apiKeyEnv = profile.apiKeyEnv.trim();
+        if (asNumber(profile.timeoutMs) !== undefined) row.timeoutMs = asNumber(profile.timeoutMs);
+        if (present(profile.backend) !== undefined) row.backend = profile.backend.trim();
+        // Fields the user blanked are unset, so the row keeps inheriting the flat
+        // block instead of carrying an empty string that would override it.
+        for (const field of ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'backend']) {
+          if (row[field] === undefined) writes.push({ path: ['systemOne', 'profiles', name, field], value: undefined });
         }
-      ];
+        // The explicit clear wins over a pending value: clearing is a decision.
+        if (profile.clearKey) {
+          writes.push({ path: ['systemOne', 'profiles', name, 'apiKey'], value: undefined });
+        } else if (profile.apiKey.trim().length > 0) {
+          // A non-empty pending value is a real write. An *empty* one is not: the
+          // page cannot tell "unchanged" from "cleared", so only the explicit flag
+          // above may delete a stored key.
+          writes.push({ path: ['systemOne', 'profiles', name, 'apiKey'], value: profile.apiKey.trim() });
+        }
+        for (const [field, value] of Object.entries(row)) {
+          writes.push({ path: ['systemOne', 'profiles', name, field], value });
+        }
+      }
+      return writes;
+    }
     case 'interventions': {
       // Only the capability settings that were authored are written, so an
       // inherited capability stays inherited instead of being frozen to the
@@ -1167,7 +1264,25 @@ export interface PanelSnapshotLike {
     model?: string;
     apiKeyEnv?: string;
     apiKeyPresent?: boolean;
+    /** Whether the resolved block carries a literal key (never the key itself). */
+    apiKeyFromProfile?: boolean;
     timeoutMs?: number;
+    /** Every authored profile, non-secret fields only. */
+    profiles?: {
+      name?: string;
+      baseUrl?: string;
+      model?: string;
+      apiKeyEnv?: string;
+      apiKeyPresent?: boolean;
+      apiKeyFromProfile?: boolean;
+      timeoutMs?: number;
+      backend?: string;
+      active?: boolean;
+    }[];
+    /** The authored active name, when one was. */
+    activeProfile?: string;
+    /** The authored active name matches no profile. */
+    activeProfileMissing?: boolean;
     /**
      * Live gateway health. Absent for a backend that answers in-process; only
      * `available === false` means the decisions are degraded.

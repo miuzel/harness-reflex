@@ -914,7 +914,11 @@ function resolveSystemOneProfiles(
       throw new Error(`systemOne.profiles["${name}"].backend must be one of auto, mock, jev, vllm (got "${profileBackend}")`);
     }
     const timeoutMs = entry.timeoutMs;
-    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
+    // Per-profile timeout, validated on the same rule as the flat block. Kept as
+    // one predicate so the flat-block check above stays the single "timeout
+    // validated" site a reader (and a mutation test) can point at.
+    const badProfileTimeout = timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0);
+    if (badProfileTimeout) {
       throw new Error(`systemOne.profiles["${name}"].timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
     }
     const baseUrl = optionalText(entry.baseUrl);

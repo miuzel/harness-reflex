@@ -916,6 +916,88 @@ const MUTATIONS = [
     file: 'src/routing.ts',
     from: '  const config = resolveAdaptiveIntent(ctx, agent, base, (provider) => router.owns(provider));',
     to: '  const config: LlmCallConfig = base;'
+  },
+  // Multi-profile System One connections (g-057): the precedence chain, the
+  // write-only key, and the page's narrow-path write.
+  {
+    // The active profile is the whole point of the feature: resolving the flat
+    // block over it would silently ignore the user's selection.
+    name: 'active-profile-loses-to-the-flat-block',
+    area: 'the active profile wins over the flat connection block',
+    file: 'src/config.ts',
+    from: '  const baseUrl = optionalText(activeProfile?.baseUrl) ?? optionalText(authored?.baseUrl);',
+    to: '  const baseUrl = optionalText(authored?.baseUrl) ?? optionalText(activeProfile?.baseUrl);'
+  },
+  {
+    // A mistyped active name must be reported, not quietly resolved away.
+    name: 'missing-active-profile-is-swallowed',
+    area: 'an active name that matches no profile is reported',
+    file: 'src/config.ts',
+    from: '  const activeProfileMissing = active !== undefined && activeProfile === undefined;',
+    to: '  const activeProfileMissing = false;'
+  },
+  {
+    // A profile's own key must outrank the environment variable it names,
+    // otherwise a stored secret could never take effect on a host that also
+    // exports the variable.
+    name: 'profile-key-loses-to-the-environment',
+    area: 'a profile key wins over its apiKeyEnv',
+    file: 'src/config.ts',
+    from: "  if (typeof config.apiKey === 'string' && config.apiKey.length > 0) return config.apiKey;",
+    to: '  if (false) return undefined;'
+  },
+  {
+    // The declared role is the only thing that strips the key at the wire
+    // boundary; dropping it would publish every stored secret on the panel.
+    name: 'api-key-loses-its-secret-role',
+    area: 'apiKey is a schema-declared secret',
+    file: 'src/config.ts',
+    from: "  apiKey: z\n    .string()\n    .role('secret')",
+    to: "  apiKey: z\n    .string()"
+  },
+  {
+    // Write-only means the panel reports presence from facts it gathered, never
+    // by reading the value it was handed.
+    name: 'panel-projects-the-profile-key-value',
+    area: 'the panel projects key presence, never the key',
+    file: 'src/panel-api.ts',
+    from: '    const keys = keyFacts(name, profile);',
+    to: '    const keys = { present: profile.apiKey !== undefined, fromProfile: true };'
+  },
+  {
+    // A whole-group write deletes every stored secret the page never received;
+    // this is the exact fault the narrow-path write exists to prevent.
+    name: 'panel-writes-the-whole-system-one-group',
+    area: 'the page writes the connection block on narrow paths only',
+    file: 'src/client/panel.ts',
+    from: "      for (const [key, value] of Object.entries(flat)) writes.push({ path: ['systemOne', key], value });",
+    to: "      writes.push({ path: ['systemOne'], value: flat });"
+  },
+  {
+    // Empty input means "leave the stored key alone": treating it as a write
+    // would erase a key the user never saw.
+    name: 'empty-key-input-clears-the-stored-key',
+    area: 'an empty key input writes nothing',
+    file: 'src/client/panel.ts',
+    from: '        } else if (profile.apiKey.trim().length > 0) {',
+    to: '        } else if (true) {'
+  },
+  {
+    // A probe must classify a rejected key apart from an unreachable host.
+    name: 'probe-collapses-auth-failure-into-unreachable',
+    area: 'the connection probe distinguishes a rejected key from a dead endpoint',
+    file: 'src/systemone-probe.ts',
+    from: '  if (status === 401 || status === 403) {',
+    to: '  if (false) {'
+  },
+  {
+    // The probe's detail is redacted before it leaves; an unredacted echo would
+    // publish whatever the gateway reflected back.
+    name: 'probe-detail-is-not-redacted',
+    area: 'the probe redacts every credential-shaped substring',
+    file: 'src/systemone-probe.ts',
+    from: '  out = out.replace(/Bearer\\s+[^\\s\"\',;}]+/gi, \'Bearer ***\');',
+    to: '  out = out;'
   }
 ];
 

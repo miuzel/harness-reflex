@@ -775,6 +775,26 @@ test('no serialized panel answer contains a profile key, in any form', () => {
   const answer = answerPanelRequest(panelSource, request('GET', PANEL_ROUTES.snapshot));
   const body = JSON.stringify(answer.body);
   for (const secret of Object.values(PROFILE_SECRETS)) assert.equal(body.includes(secret), false);
+
+  // And over the bytes actually written to the socket, through the real
+  // serializer: a leak could also ride headers or a difference between the
+  // answer object and what `sendPanelAnswer` emits.
+  const wire = response();
+  sendPanelAnswer(request('GET', PANEL_ROUTES.snapshot), wire, answer);
+  for (const secret of Object.values(PROFILE_SECRETS)) {
+    assert.equal(wire.body.includes(secret), false, `leaked ${secret} onto the wire`);
+  }
+  assert.equal(wire.body.includes('sk-'), false, 'no key-shaped substring reaches the socket');
+  // The write-only inputs are still renderable: presence is on the wire, values are not.
+  const parsed = JSON.parse(wire.body) as { systemOne: { profiles: { name: string; apiKeyPresent: boolean }[] } };
+  assert.deepEqual(
+    parsed.systemOne.profiles.map((profile) => [profile.name, profile.apiKeyPresent]),
+    [
+      ['primary', true],
+      ['secondary', true]
+    ],
+    'presence is what the placeholder renders from'
+  );
 });
 
 test('a resolved config that carries a key still projects presence only', () => {

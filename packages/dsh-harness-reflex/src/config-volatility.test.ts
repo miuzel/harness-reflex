@@ -23,8 +23,10 @@ import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 
 /** The part of a schemastery node this audit walks. */
 interface SchemaNode {
-  meta: { volatile?: boolean };
+  meta: { volatile?: boolean; role?: string };
   dict?: Record<string, SchemaNode>;
+  /** Element schema of a `dict`/`array` node, which is where profiles live. */
+  inner?: SchemaNode;
 }
 
 /** The schema under test, narrowed to the shape the audit walks. */
@@ -59,11 +61,25 @@ test('the System 1 backend block is writable field by field', () => {
   // The block itself is volatile, which is what makes its every field writable —
   // including any field a later version adds. Naming each one keeps the audit
   // honest: a field that moves out of the block has to keep a volatile parent.
-  const fields = ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs'];
+  const fields = ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'profiles', 'active'];
   assert.deepEqual(Object.keys(root.dict?.systemOne?.dict ?? {}), fields, 'the System 1 block changed shape');
   for (const field of fields) {
     assert.ok(isVolatilePath(root, ['systemOne', field]), `systemOne.${field} is not writable`);
   }
+  // The multi-profile block (g-057): the panel writes each profile's fields on a
+  // narrow path, so every one of them must be writable — including `apiKey`,
+  // which is a `role('secret')` slot but is still an ordinary writable leaf. The
+  // role governs *reads*, not writes: the page has to be able to store a key.
+  const profileFields = ['baseUrl', 'model', 'apiKey', 'apiKeyEnv', 'timeoutMs', 'backend'];
+  const profileNode = root.dict?.systemOne?.dict?.profiles as (SchemaNode & { inner?: SchemaNode }) | undefined;
+  assert.deepEqual(Object.keys(profileNode?.inner?.dict ?? {}), profileFields, 'the profile shape changed');
+  for (const field of profileFields) {
+    assert.ok(
+      isVolatilePath(root, ['systemOne', 'profiles', 'primary', field]),
+      `systemOne.profiles.<name>.${field} is not writable`
+    );
+  }
+  assert.equal(profileNode?.inner?.dict?.apiKey?.meta.role, 'secret', 'apiKey must stay a declared secret');
   // Sibling blocks the panel writes, and the dynamic dictionaries inside them.
   for (const path of [
     ['routing'],

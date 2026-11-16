@@ -34,9 +34,10 @@ import {
   systemOneDegraded,
   type PanelDraft,
   type PanelStatusState,
+  type ProfileDraft,
   type ToolAdvice
 } from './panel';
-import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab } from './store';
+import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab, type ProbeState } from './store';
 import { renderMarkdown } from './markdown';
 import { guideFor, templateGuideFor } from './field-guide';
 
@@ -319,6 +320,17 @@ const S = {
   notice: { fontSize: '12px', color: token('--dsw-alias-state-success-primary', '#4ade80') },
   mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px' },
   empty: { color: token('--dsw-alias-label-dimmed', '#6b6b6b'), fontSize: '12px', padding: '6px 0' },
+  /** One profile row: a bordered block so several profiles stay visually apart. */
+  profileRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    border: `1px solid ${token('--dsw-alias-border-primary', 'rgba(255,255,255,.12)')}`,
+    borderRadius: '6px',
+    padding: '8px 10px'
+  },
+  profileHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+  profileName: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', fontWeight: 600 },
   swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 } as const;
 
@@ -883,6 +895,177 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
   );
 }
 
+/**
+ * One profile row: name, its connection fields, the write-only key input, the
+ * active switch, the connection test, and the remove action.
+ *
+ * The key input is the point of the whole feature: it is never seeded from the
+ * Host (no read carries the value), so it always renders empty with a
+ * placeholder. A stored key is communicated by {@link apiKeyPresent} — a *fact*,
+ * not the value — and can only be destroyed through the explicit Clear action.
+ */
+function ProfileRow(props: {
+  t: Translate;
+  index: number;
+  profile: ProfileDraft;
+  isActive: boolean;
+  probe: ProbeState | undefined;
+  disabled: boolean;
+  store: PanelStore;
+  onEdit: (patch: Partial<ProfileDraft>) => void;
+}): ReactNode {
+  const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+  const keyState = profile.apiKeyPresent
+    ? profile.apiKeyFromProfile
+      ? t('profileKeyStored')
+      : t('profileKeyFromEnv').replace('{name}', profile.apiKeyEnv || '—')
+    : t('profileKeyMissing');
+  const statusLabel = (status: string | undefined): string => {
+    switch (status) {
+      case 'ok':
+        return t('profileTestOk');
+      case 'auth-failed':
+        return t('profileTestAuth');
+      case 'unreachable':
+        return t('profileTestUnreachable');
+      case 'timeout':
+        return t('profileTestTimeout');
+      case 'bad-response':
+        return t('profileTestBadResponse');
+      case 'misconfigured':
+        return t('profileTestMisconfigured');
+      default:
+        return status ?? '—';
+    }
+  };
+  const name = profile.name.trim();
+  return h(
+    'div',
+    { style: S.profileRow, 'data-profile': name },
+    h(
+      'div',
+      { style: S.profileHead },
+      h('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name),
+      isActive
+        ? h('span', { style: { ...S.hint, color: token('--dsw-alias-state-success-primary', '#34d399') } }, t('profileActive'))
+        : Button({
+            label: t('profileActivate'),
+            small: true,
+            disabled: disabled,
+            onClick: () => store.edit((current) => ({ ...current, backend: { ...current.backend, active: name } }))
+          }),
+      // The test is a server-side probe: the button never carries the key.
+      Button({
+        label: probe?.phase === 'testing' ? t('profileTesting') : t('profileTest'),
+        small: true,
+        disabled: probe?.phase === 'testing' || name.length === 0,
+        onClick: () => void store.testSystemOne(name)
+      }),
+      probe?.phase === 'done' && probe.result !== undefined
+        ? h(
+            'span',
+            {
+              style: {
+                ...S.hint,
+                color: token(
+                  probe.result.ok === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary',
+                  probe.result.ok === true ? '#34d399' : '#fbbf24'
+                )
+              },
+              title: probe.result.detail ?? ''
+            },
+            `${statusLabel(probe.result.status)} · ${t('profileLatency').replace('{ms}', String(probe.result.latencyMs ?? 0))}`
+          )
+        : probe?.phase === 'error'
+          ? h('span', { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') } }, probe.error ?? '—')
+          : null,
+      Button({
+        label: t('profileRemove'),
+        kind: 'danger',
+        small: true,
+        disabled: disabled,
+        onClick: () => store.removeProfile(name)
+      })
+    ),
+    h(
+      'div',
+      { style: S.fieldRow },
+      GuidedField({
+        t,
+        path: 'systemOne.profiles.baseUrl',
+        label: t('labelBaseUrl'),
+        value: profile.baseUrl,
+        mono: true,
+        disabled,
+        placeholder: 'http://127.0.0.1:8000/v1',
+        onChange: (value) => onEdit({ baseUrl: value })
+      }),
+      GuidedField({
+        t,
+        path: 'systemOne.profiles.model',
+        label: t('labelModel'),
+        value: profile.model,
+        mono: true,
+        disabled,
+        onChange: (value) => onEdit({ model: value })
+      }),
+      GuidedField({
+        t,
+        path: 'systemOne.profiles.timeoutMs',
+        label: t('labelTimeoutMs'),
+        value: profile.timeoutMs,
+        disabled,
+        onChange: (value) => onEdit({ timeoutMs: value })
+      }),
+      GuidedField({
+        t,
+        path: 'systemOne.profiles.apiKeyEnv',
+        label: t('labelApiKeyEnv'),
+        value: profile.apiKeyEnv,
+        mono: true,
+        disabled,
+        onChange: (value) => onEdit({ apiKeyEnv: value })
+      })
+    ),
+    h(
+      'div',
+      { style: S.row },
+      // Always a placeholder: the stored value is never handed to this page.
+      h('input', {
+        type: 'password',
+        autocomplete: 'new-password',
+        'data-profile-key': name,
+        placeholder: t('profileKeyPlaceholder'),
+        value: profile.apiKey,
+        disabled: disabled || profile.clearKey,
+        style: { ...S.input, flex: '1 1 220px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+        onInput: (event: { target?: { value?: unknown } }) => {
+          const value = typeof event.target?.value === 'string' ? event.target.value : '';
+          onEdit({ apiKey: value });
+        }
+      }),
+      h('span', { style: S.hint }, keyState),
+      profile.apiKeyPresent
+        ? Button({
+            label: profile.clearKey ? t('profileClearConfirm') : t('profileClearKey'),
+            kind: 'danger',
+            small: true,
+            disabled,
+            // Clearing is explicit and two-step: an accidental click arms the
+            // button, the second click performs the unset.
+            onClick: () => {
+              if (!profile.clearKey) onEdit({ clearKey: true });
+              else onEdit({ clearKey: false, apiKeyPresent: false });
+            }
+          })
+        : null,
+      profile.clearKey
+        ? Button({ label: t('profileRemove'), small: true, onClick: () => onEdit({ clearKey: false }) })
+        : null
+    )
+  );
+}
+
 /** Backend page: the System 1 connection and the runtime-level fields. */
 function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore }): ReactNode {
   const { t, state, store } = props;
@@ -895,9 +1078,57 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   const setRuntime = (patch: Partial<PanelDraft['runtime']>): void => {
     store.edit((current) => ({ ...current, runtime: { ...current.runtime, ...patch } }));
   };
+  const profiles = draft.backend.profiles;
+  const activeName = draft.backend.active.trim();
+  const activeMissing = systemOne?.activeProfileMissing === true;
+  const setProfile = (index: number, patch: Partial<ProfileDraft>): void => {
+    store.edit((current) => ({
+      ...current,
+      backend: {
+        ...current.backend,
+        profiles: current.backend.profiles.map((row, position) => (position === index ? { ...row, ...patch } : row))
+      }
+    }));
+  };
   return h(
     'div',
     { style: S.root },
+    Card({
+      title: t('profilesTitle'),
+      children: h(
+        'div',
+        { style: S.field },
+        h('span', { style: S.hint }, t('profilesHint')),
+        // A typo in the active name must not look like a working configuration.
+        activeMissing
+          ? h(
+              'div',
+              { style: S.banner },
+              t('activeProfileMissing').replace('{name}', activeName)
+            )
+          : null,
+        profiles.length === 0
+          ? h('div', { style: S.empty }, t('profilesEmpty'))
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+              ...profiles.map((profile, index) =>
+                h(ProfileRow, {
+                  key: `${profile.name}:${String(index)}`,
+                  t,
+                  index,
+                  profile,
+                  isActive: activeName.length > 0 && profile.name.trim() === activeName,
+                  probe: state.probes[profile.name.trim()],
+                  disabled,
+                  store,
+                  onEdit: (patch: Partial<ProfileDraft>) => setProfile(index, patch)
+                })
+              )
+            ),
+        Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() })
+      )
+    }),
     Card({
       title: t('groupBackend'),
       children: h(

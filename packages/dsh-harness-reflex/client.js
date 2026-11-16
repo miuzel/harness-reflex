@@ -873,10 +873,35 @@ window.__ModuleLoader__.load({
 			    labelModel: '模型 ID',
 			    labelApiKeyEnv: 'API Key 环境变量名',
 			    labelTimeoutMs: '超时（毫秒）',
-			    backendHint: 'API Key 只以环境变量名记录，密钥本身不进入设置文档。',
+			    backendHint: '可填环境变量名，或在上方连接配置里直接保存 API Key（只写不读）。',
 			    backendActive: '当前生效实现',
 			    apiKeyPresent: '环境变量已就绪',
 			    apiKeyMissing: '环境变量为空',
+			    profilesTitle: '连接配置（可多套）',
+			    profilesHint: '每套配置一个连接；选一套为当前激活。API Key 只写不读：保存后立即写入设置文档，页面只显示占位符。',
+			    profilesEmpty: '还没有连接配置。新增一套即可填写 baseURL、模型与 API Key。',
+			    profileActive: '已激活',
+			    profileInactive: '未激活',
+			    profileActivate: '设为激活',
+			    profileRemove: '删除',
+			    profileAdd: '新增配置',
+			    profileName: '配置名',
+			    profileKeyPlaceholder: '粘贴 API Key（留空表示不改动）',
+			    profileKeyStored: '已保存（只写，不回显）',
+			    profileKeyFromEnv: '来自环境变量 {name}',
+			    profileKeyMissing: '未设置',
+			    profileClearKey: '清除已存 Key',
+			    profileClearConfirm: '确认清除？',
+			    profileTest: '测试',
+			    profileTesting: '测试中…',
+			    profileTestOk: '连接正常',
+			    profileTestAuth: '密钥被拒绝',
+			    profileTestUnreachable: '无法连接',
+			    profileTestTimeout: '超时',
+			    profileTestBadResponse: '响应异常',
+			    profileTestMisconfigured: '配置不完整',
+			    profileLatency: '{ms} ms',
+			    activeProfileMissing: '激活的配置「{name}」不存在，当前使用扁平字段的回落配置。',
 			    labelToolPrefix: '工具名前缀',
 			    labelLedgerPath: '账本 JSONL 路径',
 			    labelPruneThreshold: '裁剪阈值（字符）',
@@ -1167,10 +1192,35 @@ window.__ModuleLoader__.load({
 			    labelModel: 'Model id',
 			    labelApiKeyEnv: 'API key environment variable',
 			    labelTimeoutMs: 'Timeout (ms)',
-			    backendHint: 'The API key is referenced by environment variable name; the secret never enters the settings document.',
+			    backendHint: 'Name an environment variable here, or store the API key directly in a connection profile above (write-only).',
 			    backendActive: 'Effective implementation',
 			    apiKeyPresent: 'Variable is set',
 			    apiKeyMissing: 'Variable is empty',
+			    profilesTitle: 'Connections (multiple)',
+			    profilesHint: 'One connection per profile; pick one as active. The API key is write-only: it is stored on save and the page only ever shows a placeholder.',
+			    profilesEmpty: 'No connection profile yet. Add one to fill in its baseURL, model, and API key.',
+			    profileActive: 'Active',
+			    profileInactive: 'Inactive',
+			    profileActivate: 'Set active',
+			    profileRemove: 'Remove',
+			    profileAdd: 'Add profile',
+			    profileName: 'Name',
+			    profileKeyPlaceholder: 'Paste the API key (empty = leave unchanged)',
+			    profileKeyStored: 'Stored (write-only, never shown)',
+			    profileKeyFromEnv: 'From environment variable {name}',
+			    profileKeyMissing: 'Not set',
+			    profileClearKey: 'Clear stored key',
+			    profileClearConfirm: 'Confirm clear?',
+			    profileTest: 'Test',
+			    profileTesting: 'Testing…',
+			    profileTestOk: 'Connected',
+			    profileTestAuth: 'Key rejected',
+			    profileTestUnreachable: 'Unreachable',
+			    profileTestTimeout: 'Timed out',
+			    profileTestBadResponse: 'Bad response',
+			    profileTestMisconfigured: 'Incomplete configuration',
+			    profileLatency: '{ms} ms',
+			    activeProfileMissing: 'The active profile "{name}" does not exist; the flat fallback settings are in use.',
 			    labelToolPrefix: 'Tool-name prefix',
 			    labelLedgerPath: 'Ledger JSONL path',
 			    labelPruneThreshold: 'Prune threshold (characters)',
@@ -1616,6 +1666,7 @@ window.__ModuleLoader__.load({
 			exports.textToTags = textToTags;
 			exports.draftFromSnapshot = draftFromSnapshot;
 			exports.draftFromLayers = draftFromLayers;
+			exports.profileRowsFrom = profileRowsFrom;
 			exports.draftFromConfig = draftFromConfig;
 			exports.splitTarget = splitTarget;
 			exports.validateDraft = validateDraft;
@@ -1755,7 +1806,7 @@ window.__ModuleLoader__.load({
 			exports.EMPTY_DRAFT = {
 			    routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
 			    effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
-			    backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '' },
+			    backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '', active: '', profiles: [] },
 			    runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
 			    interventions: {
 			        mode: 'observe',
@@ -1878,6 +1929,27 @@ window.__ModuleLoader__.load({
 			            minConfidence: snapshot.effort.minConfidence !== undefined ? String(snapshot.effort.minConfidence) : draft.effort.minConfidence
 			        };
 			    }
+			    // Key *presence* comes from the live snapshot, never from the settings form:
+			    // the form's secret slots are stripped before they reach this page, so the
+			    // snapshot's `apiKeyPresent` is the only fact that can drive the placeholder.
+			    // A pending (unsaved) key is left untouched, and so is a pending clear.
+			    const presence = new Map((snapshot.systemOne?.profiles ?? []).flatMap((profile) => {
+			        const name = typeof profile.name === 'string' ? profile.name : '';
+			        return name.length === 0
+			            ? []
+			            : [[name, { present: profile.apiKeyPresent === true, fromProfile: profile.apiKeyFromProfile === true }]];
+			    }));
+			    if (presence.size > 0) {
+			        draft.backend = {
+			            ...draft.backend,
+			            profiles: draft.backend.profiles.map((row) => {
+			                const fact = presence.get(row.name.trim());
+			                if (fact === undefined)
+			                    return row;
+			                return { ...row, apiKeyPresent: fact.present, apiKeyFromProfile: fact.fromProfile };
+			            })
+			        };
+			    }
 			    return draft;
 			}
 			/**
@@ -1907,6 +1979,36 @@ window.__ModuleLoader__.load({
 			            capabilities: { ...baseDraft.interventions.capabilities, ...draft.interventions.capabilities }
 			        }
 			    };
+			}
+			/**
+			 * Seed one editable row per authored profile.
+			 *
+			 * Tolerant like the rest of the seeding path: an entry that is not an object is
+			 * dropped rather than rendered as a broken row.
+			 * @param value - the authored `systemOne.profiles` dictionary.
+			 * @returns the rows, in authored order, with empty pending keys.
+			 */
+			function profileRowsFrom(value) {
+			    const profiles = asRecord(value);
+			    return Object.entries(profiles).flatMap(([name, entry]) => {
+			        if (entry === null || typeof entry !== 'object' || Array.isArray(entry))
+			            return [];
+			        const profile = asRecord(entry);
+			        return [
+			            {
+			                name,
+			                baseUrl: asText(profile.baseUrl),
+			                model: asText(profile.model),
+			                apiKeyEnv: asText(profile.apiKeyEnv),
+			                timeoutMs: asText(profile.timeoutMs),
+			                backend: asText(profile.backend),
+			                apiKey: '',
+			                apiKeyPresent: false,
+			                apiKeyFromProfile: false,
+			                clearKey: false
+			            }
+			        ];
+			    });
 			}
 			/**
 			 * Merge two virtual-model pool lists, keeping both sides.
@@ -1963,7 +2065,13 @@ window.__ModuleLoader__.load({
 			            baseUrl: asText(systemOne.baseUrl),
 			            model: asText(systemOne.model),
 			            apiKeyEnv: asText(systemOne.apiKeyEnv),
-			            timeoutMs: asText(systemOne.timeoutMs)
+			            timeoutMs: asText(systemOne.timeoutMs),
+			            active: asText(systemOne.active),
+			            // A row is seeded from the authored profile only. The key is NOT seeded:
+			            // the Host never sends it, and `apiKeyPresent` is filled from the live
+			            // snapshot (see `PanelStore.#applyProfilePresence`), which is the only
+			            // place presence is known.
+			            profiles: profileRowsFrom(systemOne.profiles)
 			        },
 			        runtime: {
 			            toolPrefix: asText(section.toolPrefix) || exports.EMPTY_DRAFT.runtime.toolPrefix,
@@ -2192,20 +2300,73 @@ window.__ModuleLoader__.load({
 			                    }
 			                }
 			            ];
-			        case 'backend':
+			        case 'backend': {
 			            // One page, two Host paths: the scalar backend choice and its own block.
-			            return [
-			                { path: ['backend'], value: present(draft.backend.backend) ?? 'auto' },
-			                {
-			                    path: ['systemOne'],
-			                    value: {
-			                        ...(present(draft.backend.baseUrl) === undefined ? {} : { baseUrl: draft.backend.baseUrl.trim() }),
-			                        ...(present(draft.backend.model) === undefined ? {} : { model: draft.backend.model.trim() }),
-			                        ...(present(draft.backend.apiKeyEnv) === undefined ? {} : { apiKeyEnv: draft.backend.apiKeyEnv.trim() }),
-			                        ...(asNumber(draft.backend.timeoutMs) === undefined ? {} : { timeoutMs: asNumber(draft.backend.timeoutMs) })
-			                    }
+			            //
+			            // ## Why `systemOne` is written field by field, never as one group
+			            //
+			            // `systemOne.profiles.<name>.apiKey` is a `role('secret')` slot: the Host
+			            // strips it before the value reaches this page and `applyPathOp` replaces a
+			            // `set` path's subtree on the *stored* config. A whole-group write therefore
+			            // deletes every stored key, and the page could not restate them (it never
+			            // received them). Narrow paths only touch what the user actually edited.
+			            const writes = [{ path: ['backend'], value: present(draft.backend.backend) ?? 'auto' }];
+			            const flat = {};
+			            if (present(draft.backend.baseUrl) !== undefined)
+			                flat.baseUrl = draft.backend.baseUrl.trim();
+			            if (present(draft.backend.model) !== undefined)
+			                flat.model = draft.backend.model.trim();
+			            if (present(draft.backend.apiKeyEnv) !== undefined)
+			                flat.apiKeyEnv = draft.backend.apiKeyEnv.trim();
+			            if (asNumber(draft.backend.timeoutMs) !== undefined)
+			                flat.timeoutMs = asNumber(draft.backend.timeoutMs);
+			            // An empty name is an explicit "no active profile", which must be written
+			            // as an unset rather than left as the previous name.
+			            if (present(draft.backend.active) === undefined)
+			                writes.push({ path: ['systemOne', 'active'], value: undefined });
+			            else
+			                writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });
+			            for (const [key, value] of Object.entries(flat))
+			                writes.push({ path: ['systemOne', key], value });
+			            for (const profile of draft.backend.profiles) {
+			                const name = profile.name.trim();
+			                // A row the user has not named yet cannot be addressed by a path, so it is
+			                // skipped rather than written under an empty segment.
+			                if (name.length === 0)
+			                    continue;
+			                const row = {};
+			                if (present(profile.baseUrl) !== undefined)
+			                    row.baseUrl = profile.baseUrl.trim();
+			                if (present(profile.model) !== undefined)
+			                    row.model = profile.model.trim();
+			                if (present(profile.apiKeyEnv) !== undefined)
+			                    row.apiKeyEnv = profile.apiKeyEnv.trim();
+			                if (asNumber(profile.timeoutMs) !== undefined)
+			                    row.timeoutMs = asNumber(profile.timeoutMs);
+			                if (present(profile.backend) !== undefined)
+			                    row.backend = profile.backend.trim();
+			                // Fields the user blanked are unset, so the row keeps inheriting the flat
+			                // block instead of carrying an empty string that would override it.
+			                for (const field of ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'backend']) {
+			                    if (row[field] === undefined)
+			                        writes.push({ path: ['systemOne', 'profiles', name, field], value: undefined });
 			                }
-			            ];
+			                // The explicit clear wins over a pending value: clearing is a decision.
+			                if (profile.clearKey) {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'apiKey'], value: undefined });
+			                }
+			                else if (profile.apiKey.trim().length > 0) {
+			                    // A non-empty pending value is a real write. An *empty* one is not: the
+			                    // page cannot tell "unchanged" from "cleared", so only the explicit flag
+			                    // above may delete a stored key.
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'apiKey'], value: profile.apiKey.trim() });
+			                }
+			                for (const [field, value] of Object.entries(row)) {
+			                    writes.push({ path: ['systemOne', 'profiles', name, field], value });
+			                }
+			            }
+			            return writes;
+			        }
 			        case 'interventions': {
 			            // Only the capability settings that were authored are written, so an
 			            // inherited capability stays inherited instead of being frozen to the
@@ -2691,7 +2852,7 @@ window.__ModuleLoader__.load({
 		"store": function (module, exports, require) {
 			"use strict";
 			Object.defineProperty(exports, "__esModule", { value: true });
-			exports.PanelStore = exports.DEFAULT_POLL_MS = exports.DELEGATION_PATH = exports.CLEAR_PATH = exports.SNAPSHOT_PATH = exports.PANEL_TABS = void 0;
+			exports.PanelStore = exports.DEFAULT_POLL_MS = exports.SYSTEMONE_TEST_PATH = exports.DELEGATION_PATH = exports.CLEAR_PATH = exports.SNAPSHOT_PATH = exports.PANEL_TABS = void 0;
 			exports.draftFromForm = draftFromForm;
 			/**
 			 * Stateful core of the Reflex settings page.
@@ -2737,6 +2898,13 @@ window.__ModuleLoader__.load({
 			 * so it may not be fired by an accidental GET.
 			 */
 			exports.DELEGATION_PATH = '/dsh-reflex/api/delegation?confirm=delegation';
+			/**
+			 * Route that probes one System One profile.
+			 *
+			 * A `POST` because it makes the Host perform outbound work; the body names the
+			 * profile, and an empty name asks for the active one.
+			 */
+			exports.SYSTEMONE_TEST_PATH = '/dsh-reflex/api/systemone/test';
 			/** Default poll period, in milliseconds. */
 			exports.DEFAULT_POLL_MS = 4000;
 			/** Read a nested error message out of an unknown failure. */
@@ -2806,7 +2974,8 @@ window.__ModuleLoader__.load({
 			            notice: null,
 			            noticeValues: null,
 			            confirmingClear: false,
-			            delegationWrite: null
+			            delegationWrite: null,
+			            probes: {}
 			        };
 			    }
 			    /** @returns the current immutable state. */
@@ -2834,6 +3003,47 @@ window.__ModuleLoader__.load({
 			        void this.refresh();
 			    }
 			    /** Stop polling and release the form subscription. */
+			    /**
+			     * Probe one profile's connection from the Host and record the answer.
+			     *
+			     * The key never travels with this request: the server reads it from the
+			     * resolved profile and only returns a classification. Each row owns its own
+			     * state slot, so a slow row cannot overwrite the answer a fast row just got.
+			     *
+			     * @param profile - profile name, or `''` to probe the flat block / active profile.
+			     * @returns whether a result was recorded.
+			     */
+			    async testSystemOne(profile) {
+			        const key = profile;
+			        this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'testing' } } });
+			        try {
+			            const response = await this.#options.fetch(`${this.#basePath}${exports.SYSTEMONE_TEST_PATH}`, {
+			                method: 'POST',
+			                headers: { 'content-type': 'application/json' },
+			                // An empty name is simply omitted, which the Host reads as "the active one".
+			                body: JSON.stringify(key.length === 0 ? {} : { profile: key })
+			            });
+			            const body = (await response.json().catch(() => ({})));
+			            if (this.#disposed)
+			                return false;
+			            if (!response.ok) {
+			                // A refused request (403/405/501/413) is not a connection verdict, so it
+			                // is reported as an error rather than as "unreachable".
+			                this.#set({
+			                    probes: { ...this.#state.probes, [key]: { phase: 'error', error: body.detail ?? body.error ?? `HTTP ${String(response.status)}` } }
+			                });
+			                return false;
+			            }
+			            this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'done', result: body } } });
+			            return true;
+			        }
+			        catch (error) {
+			            if (this.#disposed)
+			                return false;
+			            this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'error', error: messageOf(error) } } });
+			            return false;
+			        }
+			    }
 			    dispose() {
 			        this.#disposed = true;
 			        if (this.#timer !== undefined) {
@@ -2942,6 +3152,51 @@ window.__ModuleLoader__.load({
 			     */
 			    moveCandidate(index, entry, delta) {
 			        this.editPools((pools) => (0, panel_1.movePoolEntry)(pools, index, entry, delta));
+			    }
+			    /**
+			     * Append one empty profile row, so the user has something to name and fill.
+			     *
+			     * The row carries no name yet: an unnamed row cannot become a settings path,
+			     * so {@link groupWrites} skips it until the user names it. A default name is
+			     * *not* invented — two clicks would then collide on it.
+			     */
+			    addProfile() {
+			        this.edit((draft) => ({
+			            ...draft,
+			            backend: {
+			                ...draft.backend,
+			                profiles: [
+			                    ...draft.backend.profiles,
+			                    {
+			                        name: '',
+			                        baseUrl: '',
+			                        model: '',
+			                        apiKeyEnv: '',
+			                        timeoutMs: '',
+			                        backend: '',
+			                        apiKey: '',
+			                        apiKeyPresent: false,
+			                        apiKeyFromProfile: false,
+			                        clearKey: false
+			                    }
+			                ]
+			            }
+			        }));
+			    }
+			    /**
+			     * Remove one profile row by name.
+			     *
+			     * Removing the active profile also clears `active`, so the settings document
+			     * never names a profile the user just deleted (which would resolve as the
+			     * `activeProfileMissing` fallback until the next save).
+			     * @param name - the row's profile name.
+			     */
+			    removeProfile(name) {
+			        this.edit((draft) => {
+			            const profiles = draft.backend.profiles.filter((row) => row.name.trim() !== name);
+			            const active = draft.backend.active.trim() === name ? '' : draft.backend.active;
+			            return { ...draft, backend: { ...draft.backend, profiles, active } };
+			        });
 			    }
 			    /** Discard unsaved edits and re-seed from the Host. */
 			    reset() {
@@ -3402,6 +3657,17 @@ window.__ModuleLoader__.load({
 			    notice: { fontSize: '12px', color: token('--dsw-alias-state-success-primary', '#4ade80') },
 			    mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px' },
 			    empty: { color: token('--dsw-alias-label-dimmed', '#6b6b6b'), fontSize: '12px', padding: '6px 0' },
+			    /** One profile row: a bordered block so several profiles stay visually apart. */
+			    profileRow: {
+			        display: 'flex',
+			        flexDirection: 'column',
+			        gap: '6px',
+			        border: `1px solid ${token('--dsw-alias-border-primary', 'rgba(255,255,255,.12)')}`,
+			        borderRadius: '6px',
+			        padding: '8px 10px'
+			    },
+			    profileHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+			    profileName: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', fontWeight: 600 },
 			    swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 			};
 			/** One read-only metric card. */
@@ -3721,6 +3987,136 @@ window.__ModuleLoader__.load({
 			            ].map(([label, value]) => (0, react_1.createElement)('tr', { key: label }, (0, react_1.createElement)('td', { style: { ...S.td, ...S.label, width: '140px' } }, label), (0, react_1.createElement)('td', { style: S.td }, value)))))
 			    }));
 			}
+			/**
+			 * One profile row: name, its connection fields, the write-only key input, the
+			 * active switch, the connection test, and the remove action.
+			 *
+			 * The key input is the point of the whole feature: it is never seeded from the
+			 * Host (no read carries the value), so it always renders empty with a
+			 * placeholder. A stored key is communicated by {@link apiKeyPresent} — a *fact*,
+			 * not the value — and can only be destroyed through the explicit Clear action.
+			 */
+			function ProfileRow(props) {
+			    const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+			    const keyState = profile.apiKeyPresent
+			        ? profile.apiKeyFromProfile
+			            ? t('profileKeyStored')
+			            : t('profileKeyFromEnv').replace('{name}', profile.apiKeyEnv || '—')
+			        : t('profileKeyMissing');
+			    const statusLabel = (status) => {
+			        switch (status) {
+			            case 'ok':
+			                return t('profileTestOk');
+			            case 'auth-failed':
+			                return t('profileTestAuth');
+			            case 'unreachable':
+			                return t('profileTestUnreachable');
+			            case 'timeout':
+			                return t('profileTestTimeout');
+			            case 'bad-response':
+			                return t('profileTestBadResponse');
+			            case 'misconfigured':
+			                return t('profileTestMisconfigured');
+			            default:
+			                return status ?? '—';
+			        }
+			    };
+			    const name = profile.name.trim();
+			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': name }, (0, react_1.createElement)('div', { style: S.profileHead }, (0, react_1.createElement)('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name), isActive
+			        ? (0, react_1.createElement)('span', { style: { ...S.hint, color: token('--dsw-alias-state-success-primary', '#34d399') } }, t('profileActive'))
+			        : Button({
+			            label: t('profileActivate'),
+			            small: true,
+			            disabled: disabled,
+			            onClick: () => store.edit((current) => ({ ...current, backend: { ...current.backend, active: name } }))
+			        }), 
+			    // The test is a server-side probe: the button never carries the key.
+			    Button({
+			        label: probe?.phase === 'testing' ? t('profileTesting') : t('profileTest'),
+			        small: true,
+			        disabled: probe?.phase === 'testing' || name.length === 0,
+			        onClick: () => void store.testSystemOne(name)
+			    }), probe?.phase === 'done' && probe.result !== undefined
+			        ? (0, react_1.createElement)('span', {
+			            style: {
+			                ...S.hint,
+			                color: token(probe.result.ok === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary', probe.result.ok === true ? '#34d399' : '#fbbf24')
+			            },
+			            title: probe.result.detail ?? ''
+			        }, `${statusLabel(probe.result.status)} · ${t('profileLatency').replace('{ms}', String(probe.result.latencyMs ?? 0))}`)
+			        : probe?.phase === 'error'
+			            ? (0, react_1.createElement)('span', { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') } }, probe.error ?? '—')
+			            : null, Button({
+			        label: t('profileRemove'),
+			        kind: 'danger',
+			        small: true,
+			        disabled: disabled,
+			        onClick: () => store.removeProfile(name)
+			    })), (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
+			        t,
+			        path: 'systemOne.profiles.baseUrl',
+			        label: t('labelBaseUrl'),
+			        value: profile.baseUrl,
+			        mono: true,
+			        disabled,
+			        placeholder: 'http://127.0.0.1:8000/v1',
+			        onChange: (value) => onEdit({ baseUrl: value })
+			    }), GuidedField({
+			        t,
+			        path: 'systemOne.profiles.model',
+			        label: t('labelModel'),
+			        value: profile.model,
+			        mono: true,
+			        disabled,
+			        onChange: (value) => onEdit({ model: value })
+			    }), GuidedField({
+			        t,
+			        path: 'systemOne.profiles.timeoutMs',
+			        label: t('labelTimeoutMs'),
+			        value: profile.timeoutMs,
+			        disabled,
+			        onChange: (value) => onEdit({ timeoutMs: value })
+			    }), GuidedField({
+			        t,
+			        path: 'systemOne.profiles.apiKeyEnv',
+			        label: t('labelApiKeyEnv'),
+			        value: profile.apiKeyEnv,
+			        mono: true,
+			        disabled,
+			        onChange: (value) => onEdit({ apiKeyEnv: value })
+			    })), (0, react_1.createElement)('div', { style: S.row }, 
+			    // Always a placeholder: the stored value is never handed to this page.
+			    (0, react_1.createElement)('input', {
+			        type: 'password',
+			        autocomplete: 'new-password',
+			        'data-profile-key': name,
+			        placeholder: t('profileKeyPlaceholder'),
+			        value: profile.apiKey,
+			        disabled: disabled || profile.clearKey,
+			        style: { ...S.input, flex: '1 1 220px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+			        onInput: (event) => {
+			            const value = typeof event.target?.value === 'string' ? event.target.value : '';
+			            onEdit({ apiKey: value });
+			        }
+			    }), (0, react_1.createElement)('span', { style: S.hint }, keyState), profile.apiKeyPresent
+			        ? Button({
+			            label: profile.clearKey ? t('profileClearConfirm') : t('profileClearKey'),
+			            kind: 'danger',
+			            small: true,
+			            disabled,
+			            // Clearing is explicit and two-step: an accidental click arms the
+			            // button, the second click performs the unset.
+			            onClick: () => {
+			                if (!profile.clearKey)
+			                    onEdit({ clearKey: true });
+			                else
+			                    onEdit({ clearKey: false, apiKeyPresent: false });
+			            }
+			        })
+			        : null, profile.clearKey
+			        ? Button({ label: t('profileRemove'), small: true, onClick: () => onEdit({ clearKey: false }) })
+			        : null));
+			}
 			/** Backend page: the System 1 connection and the runtime-level fields. */
 			function BackendTab(props) {
 			    const { t, state, store } = props;
@@ -3733,7 +4129,38 @@ window.__ModuleLoader__.load({
 			    const setRuntime = (patch) => {
 			        store.edit((current) => ({ ...current, runtime: { ...current.runtime, ...patch } }));
 			    };
+			    const profiles = draft.backend.profiles;
+			    const activeName = draft.backend.active.trim();
+			    const activeMissing = systemOne?.activeProfileMissing === true;
+			    const setProfile = (index, patch) => {
+			        store.edit((current) => ({
+			            ...current,
+			            backend: {
+			                ...current.backend,
+			                profiles: current.backend.profiles.map((row, position) => (position === index ? { ...row, ...patch } : row))
+			            }
+			        }));
+			    };
 			    return (0, react_1.createElement)('div', { style: S.root }, Card({
+			        title: t('profilesTitle'),
+			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('span', { style: S.hint }, t('profilesHint')), 
+			        // A typo in the active name must not look like a working configuration.
+			        activeMissing
+			            ? (0, react_1.createElement)('div', { style: S.banner }, t('activeProfileMissing').replace('{name}', activeName))
+			            : null, profiles.length === 0
+			            ? (0, react_1.createElement)('div', { style: S.empty }, t('profilesEmpty'))
+			            : (0, react_1.createElement)('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, ...profiles.map((profile, index) => (0, react_1.createElement)(ProfileRow, {
+			                key: `${profile.name}:${String(index)}`,
+			                t,
+			                index,
+			                profile,
+			                isActive: activeName.length > 0 && profile.name.trim() === activeName,
+			                probe: state.probes[profile.name.trim()],
+			                disabled,
+			                store,
+			                onEdit: (patch) => setProfile(index, patch)
+			            }))), Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() }))
+			    }), Card({
 			        title: t('groupBackend'),
 			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			            t,

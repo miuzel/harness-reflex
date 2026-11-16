@@ -86,6 +86,10 @@ export interface FetchResponseLike {
 /** Request options this store passes; the panel only ever reads and clears. */
 export interface FetchInitLike {
   method?: string;
+  /** Request headers; the probe route needs a JSON content type. */
+  headers?: Record<string, string>;
+  /** Request body; the probe route names the profile here. */
+  body?: string;
 }
 
 /** Injection seams of {@link PanelStore}. */
@@ -130,6 +134,37 @@ export interface PanelState {
   confirmingClear: boolean;
   /** Outcome of the last host-patch write, as the host reported it. */
   delegationWrite: DelegationWriteState | null;
+  /**
+   * Connection-test results, keyed by profile name (empty string = the flat
+   * block). One entry per row, replaced as its own probe answers, so concurrent
+   * tests of different rows cannot overwrite each other's result.
+   */
+  probes: Record<string, ProbeState>;
+}
+
+/**
+ * What one row's test button shows.
+ *
+ * `testing` is a distinct phase rather than "the last result is stale": a row
+ * that is being probed must look busy, not keep showing an old green tick.
+ */
+export interface ProbeState {
+  phase: 'testing' | 'done' | 'error';
+  result?: ProbeResultLike;
+  /** Why the request itself failed (a non-2xx panel answer). */
+  error?: string;
+}
+
+/** The classification one probe answered, as the page renders it. */
+export interface ProbeResultLike {
+  ok?: boolean;
+  status?: string;
+  latencyMs?: number;
+  profile?: string | null;
+  httpStatus?: number;
+  detail?: string;
+  model?: string;
+  endpoint?: string;
 }
 
 /** What the last host-profile-patch write returned. */
@@ -158,6 +193,14 @@ export const CLEAR_PATH = '/dsh-reflex/api/ledger/clear?confirm=clear';
  * so it may not be fired by an accidental GET.
  */
 export const DELEGATION_PATH = '/dsh-reflex/api/delegation?confirm=delegation';
+
+/**
+ * Route that probes one System One profile.
+ *
+ * A `POST` because it makes the Host perform outbound work; the body names the
+ * profile, and an empty name asks for the active one.
+ */
+export const SYSTEMONE_TEST_PATH = '/dsh-reflex/api/systemone/test';
 
 /** Default poll period, in milliseconds. */
 export const DEFAULT_POLL_MS = 4000;
@@ -231,7 +274,8 @@ export class PanelStore {
       notice: null,
       noticeValues: null,
       confirmingClear: false,
-      delegationWrite: null
+      delegationWrite: null,
+      probes: {}
     };
   }
 
@@ -262,6 +306,45 @@ export class PanelStore {
   }
 
   /** Stop polling and release the form subscription. */
+  /**
+   * Probe one profile's connection from the Host and record the answer.
+   *
+   * The key never travels with this request: the server reads it from the
+   * resolved profile and only returns a classification. Each row owns its own
+   * state slot, so a slow row cannot overwrite the answer a fast row just got.
+   *
+   * @param profile - profile name, or `''` to probe the flat block / active profile.
+   * @returns whether a result was recorded.
+   */
+  async testSystemOne(profile: string): Promise<boolean> {
+    const key = profile;
+    this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'testing' } } });
+    try {
+      const response = await this.#options.fetch(`${this.#basePath}${SYSTEMONE_TEST_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // An empty name is simply omitted, which the Host reads as "the active one".
+        body: JSON.stringify(key.length === 0 ? {} : { profile: key })
+      });
+      const body = (await response.json().catch(() => ({}))) as ProbeResultLike & { error?: string; detail?: string };
+      if (this.#disposed) return false;
+      if (!response.ok) {
+        // A refused request (403/405/501/413) is not a connection verdict, so it
+        // is reported as an error rather than as "unreachable".
+        this.#set({
+          probes: { ...this.#state.probes, [key]: { phase: 'error', error: body.detail ?? body.error ?? `HTTP ${String(response.status)}` } }
+        });
+        return false;
+      }
+      this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'done', result: body } } });
+      return true;
+    } catch (error) {
+      if (this.#disposed) return false;
+      this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'error', error: messageOf(error) } } });
+      return false;
+    }
+  }
+
   dispose(): void {
     this.#disposed = true;
     if (this.#timer !== undefined) {
@@ -371,6 +454,53 @@ export class PanelStore {
    */
   moveCandidate(index: number, entry: number, delta: number): void {
     this.editPools((pools) => movePoolEntry(pools, index, entry, delta));
+  }
+
+  /**
+   * Append one empty profile row, so the user has something to name and fill.
+   *
+   * The row carries no name yet: an unnamed row cannot become a settings path,
+   * so {@link groupWrites} skips it until the user names it. A default name is
+   * *not* invented — two clicks would then collide on it.
+   */
+  addProfile(): void {
+    this.edit((draft) => ({
+      ...draft,
+      backend: {
+        ...draft.backend,
+        profiles: [
+          ...draft.backend.profiles,
+          {
+            name: '',
+            baseUrl: '',
+            model: '',
+            apiKeyEnv: '',
+            timeoutMs: '',
+            backend: '',
+            apiKey: '',
+            apiKeyPresent: false,
+            apiKeyFromProfile: false,
+            clearKey: false
+          }
+        ]
+      }
+    }));
+  }
+
+  /**
+   * Remove one profile row by name.
+   *
+   * Removing the active profile also clears `active`, so the settings document
+   * never names a profile the user just deleted (which would resolve as the
+   * `activeProfileMissing` fallback until the next save).
+   * @param name - the row's profile name.
+   */
+  removeProfile(name: string): void {
+    this.edit((draft) => {
+      const profiles = draft.backend.profiles.filter((row) => row.name.trim() !== name);
+      const active = draft.backend.active.trim() === name ? '' : draft.backend.active;
+      return { ...draft, backend: { ...draft.backend, profiles, active } };
+    });
   }
 
   /** Discard unsaved edits and re-seed from the Host. */

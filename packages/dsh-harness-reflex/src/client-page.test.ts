@@ -410,6 +410,8 @@ interface Observed {
   calls: { url: string; method: string }[];
   clears: number[];
   timers: { id: number; ms: number }[];
+  /** Profiles the page asked the Host to probe, in order. */
+  probes: (string | null)[];
 }
 
 /** A deterministic clock whose live timers are inspectable. */
@@ -456,14 +458,27 @@ function makeClock(observed: Observed): Clock {
 }
 
 /** Serve `/api/dsh-reflex/*` from a real source, over a loopback socket shape. */
-function makeTransport(panelFacts: PanelRuntimeFacts, observed: Observed): (input: string, init?: { method?: string }) => Promise<unknown> {
+function makeTransport(panelFacts: PanelRuntimeFacts, observed: Observed): (input: string, init?: { method?: string; body?: string }) => Promise<unknown> {
   const source: PanelSource = {
     snapshot: (limit) => buildPanelSnapshot(panelFacts, limit),
     clearLedger: () => {
       observed.clears.push(1);
       return 2;
     },
-    allows: (request) => isPanelRequestAllowed(request, {})
+    allows: (request) => isPanelRequestAllowed(request, {}),
+    // A deterministic probe: the page's own behaviour is what these tests cover,
+    // not the network. The classification varies by profile so a test can tell
+    // two rows' results apart.
+    testSystemOne: async (profile) => {
+      observed.probes.push(profile ?? '');
+      return {
+        ok: profile !== 'secondary',
+        status: profile === 'secondary' ? 'auth-failed' : 'ok',
+        latencyMs: profile === 'secondary' ? 42 : 7,
+        profile: profile ?? null,
+        detail: profile === 'secondary' ? 'the gateway rejected the API key' : undefined
+      } as never;
+    }
   };
   const routes = makePanelRoutes(source);
   return async (input, init) => {
@@ -474,17 +489,35 @@ function makeTransport(panelFacts: PanelRuntimeFacts, observed: Observed): (inpu
     assert.ok(route !== undefined, `no panel route for ${path}`);
     let status = 0;
     let body = '';
-    route.handler(
-      { method, url: input, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } } as never,
-      {
-        writeHead: (code: number) => {
-          status = code;
-        },
-        end: (chunk?: string) => {
-          body = chunk ?? '';
-        }
-      } as never
-    );
+    // The route handler resolves asynchronously (it may read a request body and
+    // probe a connection), so the stub has to wait for it to settle before it can
+    // report a status — reading `status` on the same tick would always yield 0.
+    const request = {
+      method,
+      url: input,
+      headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+      socket: { remoteAddress: '127.0.0.1' },
+      once: () => request,
+      async *[Symbol.asyncIterator]() {
+        if (init?.body !== undefined) yield Buffer.from(String(init.body), 'utf8');
+      }
+    };
+    let settle: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    route.handler(request as never, {
+      writeHead: (code: number) => {
+        status = code;
+      },
+      end: (chunk?: string) => {
+        body = chunk ?? '';
+        settle();
+      }
+    } as never);
+    // Drain the handler's promise chain, then wait for its answer (if any).
+    for (let turn = 0; turn < 8 && status === 0; turn += 1) await Promise.resolve();
+    await Promise.race([done, Promise.resolve()]);
     return { ok: status >= 200 && status < 300, status, json: async (): Promise<unknown> => JSON.parse(body) as unknown };
   };
 }
@@ -576,7 +609,7 @@ async function mountPanel(options: {
   language?: 'zh' | 'en';
 }): Promise<Mounted> {
   const language = options.language ?? 'zh';
-  const observed: Observed = { calls: [], clears: [], timers: [] };
+  const observed: Observed = { calls: [], clears: [], timers: [], probes: [] };
   const fetchImpl = makeTransport(options.facts, observed);
   const registered: Mounted['registered'] = [];
   const dictionaries: Record<string, Record<string, string>> = {};
@@ -1306,6 +1339,135 @@ test('the backend page reports a missing key variable', async () => {
   mounted.unmount();
 });
 
+//#region connection profiles (g-057)
+
+/** The secret one profile carries; it must never be rendered by the page. */
+const PROFILE_SECRET = 'sk-ui-profile-never-rendered-4d21';
+
+/** A configuration with two profiles, one active and one carrying a stored key. */
+const PROFILED = {
+  ...AUTHORED,
+  systemOne: {
+    baseUrl: 'http://flat.example',
+    model: 'flat-model',
+    apiKeyEnv: 'REFLEX_TEST_KEY',
+    timeoutMs: 4000,
+    active: 'primary',
+    profiles: {
+      primary: { model: 'primary-model' },
+      secondary: { baseUrl: 'http://secondary.example', model: 'secondary-model' }
+    }
+  }
+} as unknown as ReflexConfig;
+
+/** Facts whose snapshot reports profile key presence (never a value). */
+function profiledFacts(): PanelRuntimeFacts {
+  const base = facts(false);
+  return {
+    ...base,
+    config: resolveConfig(PROFILED),
+    profileKeys: {
+      primary: { present: true, fromProfile: true },
+      secondary: { present: false, fromProfile: false }
+    }
+  };
+}
+
+test('the connection page lists every profile with its non-secret fields and the active marker', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  const tree = await mounted.runtime.flush();
+  const text = textOf(tree);
+
+  // Both rows are listed by name, with their effective connection fields.
+  assert.ok(text.includes('primary'), 'the active profile row is missing');
+  assert.ok(text.includes('secondary'), 'the inactive profile row is missing');
+  assert.ok(text.includes('已激活'), 'the active marker is missing');
+  assert.ok(text.includes('设为激活'), 'the activation switch is missing');
+  // Presence is reported as a fact, and the key is never rendered.
+  assert.ok(text.includes('已保存'), 'a stored key is not reported as present');
+  assert.ok(text.includes('未设置'), 'an absent key is not reported as absent');
+  assert.ok(!valuesOf(tree).includes(PROFILE_SECRET), 'the page rendered a key value');
+
+  // Each row has a write-only key input: always empty, always a placeholder.
+  const keyInputs = elements(tree).filter((element) => typeof element.props['data-profile-key'] === 'string');
+  assert.equal(keyInputs.length, 2, 'one key input per profile');
+  for (const input of keyInputs) {
+    assert.equal(input.props.value, '', 'a key input must never be seeded with a value');
+    assert.equal(input.props.type, 'password');
+    assert.ok(String(input.props.placeholder).length > 0, 'a key input needs a placeholder');
+  }
+  // Each row has a test button and a remove button.
+  const buttons = elements(tree).filter((element) => element.type === 'button');
+  assert.ok(buttons.some((button) => textOf(button) === '测试'), 'no test button');
+  assert.ok(buttons.filter((button) => textOf(button) === '删除').length >= 2, 'a remove action per row');
+  mounted.unmount();
+});
+
+test('testing a profile asks the Host to probe it and shows the status and latency', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  const testButton = elements(tree).find((element) => element.type === 'button' && textOf(element) === '测试');
+  assert.ok(testButton !== undefined, 'no test button to press');
+  (testButton.props.onClick as () => void)();
+  tree = await mounted.runtime.flush();
+
+  // The request went to the probe route as a POST naming the profile.
+  const probe = mounted.observed.calls.find((call) => call.url.includes('/systemone/test'));
+  assert.ok(probe !== undefined, 'the page did not call the probe route');
+  assert.equal(probe.method, 'POST');
+
+  // The pressed row is the row probed, and it shows its own classification.
+  assert.deepEqual(mounted.observed.probes, ['primary'], 'the page probed a different row than the one pressed');
+  const text = textOf(tree);
+  assert.ok(text.includes('连接正常'), `the status is not shown: ${text.slice(0, 400)}`);
+  assert.ok(text.includes('7 ms'), `the measured latency is not shown: ${text.slice(0, 400)}`);
+  // And the key value still never appears.
+  assert.ok(!valuesOf(tree).includes(PROFILE_SECRET));
+  mounted.unmount();
+});
+
+test('a rejected key is shown as its own class, not as a generic failure', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  // Press the *second* row's test button: it is the one the fixture fails.
+  const testButtons = elements(tree).filter((element) => element.type === 'button' && textOf(element) === '测试');
+  assert.equal(testButtons.length, 2, 'one test button per profile');
+  (testButtons[1]!.props.onClick as () => void)();
+  tree = await mounted.runtime.flush();
+
+  assert.deepEqual(mounted.observed.probes, ['secondary'], 'the pressed row is the row probed');
+  const text = textOf(tree);
+  assert.ok(text.includes('密钥被拒绝'), `the auth failure is not classified: ${text.slice(0, 400)}`);
+  assert.ok(text.includes('42 ms'), 'the measured latency is not shown for the failing row');
+  // The other row keeps its own state: results do not cross.
+  assert.ok(!text.includes('连接正常'), 'a failed probe must not render as a healthy one');
+  mounted.unmount();
+});
+
+test('an active name that matches no profile is shown as a warning', async () => {
+  const broken = {
+    ...AUTHORED,
+    systemOne: { ...PROFILED.systemOne, active: 'prod' }
+  } as unknown as ReflexConfig;
+  const { form } = settingsForm(broken);
+  const mounted = await mountPanel({ facts: { ...facts(false), config: resolveConfig(broken) }, form });
+  openTab(mounted.tree, 'System 1 后端');
+  const text = textOf(await mounted.runtime.flush());
+  assert.ok(text.includes('prod'), 'the mistyped name must be named');
+  assert.ok(text.includes('不存在'), 'a missing active profile must be called out');
+  mounted.unmount();
+});
+
+//#endregion
+
 //#region header status icon
 
 /** The single status button of the rendered header, if any. */
@@ -1694,19 +1856,33 @@ test('the System 1 backend page writes the scalar and its block, on the paths th
     [
       // Unsets are emitted first so the operation list is stable; the sets then
       // follow in page order.
+      // Every unset is emitted before every set (a stable, order-independent list).
+      ['unset', ['systemOne', 'active']],
       ['unset', ['ledgerPath']],
       ['unset', ['calibrationPath']],
+      // g-057: the connection block is written field by field, never as one
+      // group. A group `set` replaces the stored subtree, which would silently
+      // delete every `role('secret')` key the page never received.
       ['set', ['backend']],
-      ['set', ['systemOne']],
+      ['set', ['systemOne', 'baseUrl']],
+      ['set', ['systemOne', 'model']],
+      ['set', ['systemOne', 'apiKeyEnv']],
+      ['set', ['systemOne', 'timeoutMs']],
       ['set', ['toolPrefix']],
       ['set', ['pruneThreshold']]
     ],
     'the backend page must address the fields the Host declares, never its own group name'
   );
-  assert.equal(ops[2]?.value, 'jev', '`backend` is a scalar union, never a block');
-  const systemOne = (ops[3]?.value ?? {}) as Record<string, unknown>;
-  assert.equal(systemOne.timeoutMs, 9000);
-  assert.equal(systemOne.baseUrl, 'http://127.0.0.1:8000/v1', 'an untouched field must round-trip');
+  const backendOp = ops.find((op) => op.path.length === 1 && op.path[0] === 'backend');
+  assert.equal(backendOp?.value, 'jev', '`backend` is a scalar union, never a block');
+  assert.equal(
+    ops.some((op) => op.path.length === 1 && op.path[0] === 'systemOne'),
+    false,
+    'a whole-group systemOne write would delete stored secrets'
+  );
+  const fieldValue = (name: string): unknown => ops.find((op) => op.path[1] === name && op.path[0] === 'systemOne')?.value;
+  assert.equal(fieldValue('timeoutMs'), 9000);
+  assert.equal(fieldValue('baseUrl'), 'http://127.0.0.1:8000/v1', 'an untouched field must round-trip');
 
   // The Host accepts what the page wrote, and each field lands where it belongs.
   const resolved = resolveConfig({ ...AUTHORED, ...applyOps(ops) } as ReflexConfig);
@@ -1759,7 +1935,26 @@ test('every path the panel writes is a path the Host declares volatile', async (
   }
   assert.deepEqual(
     [...paths].sort(),
-    ['backend', 'calibrationPath', 'delegation', 'effort', 'interventions', 'ledgerPath', 'pruneThreshold', 'routing', 'systemOne', 'toolPrefix', 'tools'],
+    [
+      'backend',
+      'calibrationPath',
+      'delegation',
+      'effort',
+      'interventions',
+      'ledgerPath',
+      'pruneThreshold',
+      'routing',
+      // g-057 writes the connection block field by field rather than as one
+      // group (a group `set` would delete stored secrets), so the inventory names
+      // the leaves instead of `systemOne`.
+      'systemOne.active',
+      'systemOne.apiKeyEnv',
+      'systemOne.baseUrl',
+      'systemOne.model',
+      'systemOne.timeoutMs',
+      'toolPrefix',
+      'tools'
+    ],
     'the pages stopped covering every writable field, so this fence is no longer checking them all'
   );
 });
