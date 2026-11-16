@@ -253,7 +253,8 @@ test('the mount registers the route family on the Web server only when it exists
     PANEL_ROUTES.snapshot,
     PANEL_ROUTES.health,
     PANEL_ROUTES.clearLedger,
-    PANEL_ROUTES.delegation
+    PANEL_ROUTES.delegation,
+    PANEL_ROUTES.systemOneTest
   ]);
   assert.deepEqual([...new Set(context.routes.map((route) => route.kind))], ['exact']);
 
@@ -262,12 +263,13 @@ test('the mount registers the route family on the Web server only when it exists
     PANEL_ROUTES.snapshot,
     PANEL_ROUTES.health,
     PANEL_ROUTES.clearLedger,
-    PANEL_ROUTES.delegation
+    PANEL_ROUTES.delegation,
+    PANEL_ROUTES.systemOneTest
   ]);
   dispose();
 });
 
-test('a registered route answers from the activation it was mounted for', () => {
+test('a registered route answers from the activation it was mounted for', async () => {
   const runtime = runtimeOf();
   runtime.ledger.record({ type: 'model-route', backend: 'auto', latencyMs: 4, tokensSaved: 128 });
   const context = fakeContext();
@@ -284,7 +286,9 @@ test('a registered route answers from the activation it was mounted for', () => 
     end: (chunk?: string) => {
       written.body = chunk ?? '';
     }
-  });
+  } as never);
+  // The handler dispatches through the async resolver, so let a microtask turn.
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
 
   assert.equal(written.status, 200);
   const body = JSON.parse(written.body) as { routing: { candidates: number }; ledger: { recent: { tokensSaved?: number }[] } };
@@ -298,7 +302,8 @@ test('a registered route answers from the activation it was mounted for', () => 
       refused.status = status;
     },
     end: () => undefined
-  });
+  } as never);
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
   assert.equal(refused.status, 403);
 });
 
@@ -311,7 +316,7 @@ test('one activation owns the panel and a second is reported and ignored', () =>
   context.activate();
   assert.deepEqual(
     context.routes.map((route) => route.path),
-    [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger, PANEL_ROUTES.delegation],
+    [PANEL_ROUTES.snapshot, PANEL_ROUTES.health, PANEL_ROUTES.clearLedger, PANEL_ROUTES.delegation, PANEL_ROUTES.systemOneTest],
     'the second activation registered routes'
   );
 

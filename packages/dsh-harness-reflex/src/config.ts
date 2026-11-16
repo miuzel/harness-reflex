@@ -50,13 +50,56 @@ export interface ReflexRoutingConfig {
 }
 
 /**
+ * One named System One connection profile.
+ *
+ * A profile is the same connection block as the flat fields below, plus a
+ * write-only `apiKey`. The panel lists profiles, picks one as active, and tests
+ * each connection without ever receiving the key: `apiKey` is a schema-declared
+ * `role('secret')` slot, so DSH's structural redaction removes it from every
+ * wire-boundary value and reports its *presence* through a sidecar instead.
+ *
+ * Legality: a profile name is a key of `systemOne.profiles`, so it may not be
+ * empty, may not contain `.` (the settings-route path separator), and may not
+ * collide after case folding — the panel shows these names as identifiers.
+ */
+export interface ReflexSystemOneProfile {
+  /** Base URL of the Jev gateway or the OpenAI-compatible logits endpoint. */
+  baseUrl?: string;
+  /** Model id the backend asks for. */
+  model?: string;
+  /**
+   * The API key itself.
+   *
+   * Write-only: schemastery declares it `role('secret')`, so it never crosses a
+   * wire boundary and no response can echo it. Absent means "no key stated by
+   * this profile" — the resolution chain then falls through to `apiKeyEnv`.
+   */
+  apiKey?: string;
+  /**
+   * Name of the environment variable holding the API key. Never the key itself.
+   *
+   * Kept beside {@link apiKey} on purpose: a profile may name an environment
+   * variable instead of carrying a secret, and the flat block still supports it.
+   */
+  apiKeyEnv?: string;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Backend override for this profile (`auto`/`mock`/`jev`/`vllm`). */
+  backend?: string;
+}
+
+/**
  * Authored connection settings of the System One decision backend.
  *
- * The Settings panel edits this block, so it is deliberately secret-free: the
- * API key never enters the settings document. `apiKeyEnv` names the environment
- * variable that holds the key, which keeps the credential in the deployment's
- * own environment (and out of every `settings.describe` answer, whose redaction
- * only covers schema-declared secret slots).
+ * Historically this block was deliberately secret-free: `apiKeyEnv` named the
+ * environment variable holding the key, keeping the credential out of the
+ * settings document. That remains a fully supported way to configure a
+ * deployment, and every flat field below keeps its meaning.
+ *
+ * `profiles` adds *multiple* named connections beside the flat block, each able
+ * to carry a write-only `apiKey` (g-057). The flat fields stay the fallback of
+ * last resort, so a deployment that never authors `profiles` resolves exactly as
+ * it did before.
  *
  * Every field is optional and *overrides* the environment for this plugin
  * instance only. An omitted field keeps the environment/environment-default
@@ -75,6 +118,19 @@ export interface ReflexSystemOneConfig {
   apiKeyEnv?: string;
   /** Per-request timeout in milliseconds. */
   timeoutMs?: number;
+  /** Named connection profiles, keyed by the name the panel shows. */
+  profiles?: Record<string, ReflexSystemOneProfile>;
+  /**
+   * Name of the profile in force.
+   *
+   * A name that matches no authored profile is *not* silently ignored: the
+   * resolution falls back through the flat block and reports
+   * `activeProfileMissing`, which the panel shows as a warning. Failing the whole
+   * activation was the alternative and was rejected: a single mistyped name
+   * would take every reflex tool down, and the fallback is exactly the behaviour
+   * a deployment had before it authored `profiles`.
+   */
+  active?: string;
 }
 
 /**
@@ -333,6 +389,40 @@ export interface ResolvedSystemOneConfig {
   apiKeyEnv?: string;
   /** Per-request timeout override in milliseconds. */
   timeoutMs?: number;
+  /**
+   * The API key of the *resolved* profile, when the chain found one.
+   *
+   * Never serialized to a panel or route: {@link ResolvedSystemOneConfig} is only
+   * handed to {@link createBackend} and to the connection probe. The flat block
+   * has no such field, so a deployment that does not use profiles carries no key
+   * through this type at all.
+   */
+  apiKey?: string;
+  /** Active profile name as authored, when one was. */
+  active?: string;
+  /**
+   * Every profile, normalized, in authored order. Keys are the panel's row ids.
+   *
+   * Absent when the block authors no `profiles` at all, so a deployment that
+   * never authorized one keeps the exact resolved shape it had before g-057.
+   */
+  profiles?: Record<string, ResolvedSystemOneProfile>;
+  /**
+   * The authored `active` name matched no profile. The panel shows this as a
+   * warning: falling back silently would hide a typo behind a working page.
+   */
+  activeProfileMissing?: boolean;
+}
+
+/** One profile after defaults and validation. */
+export interface ResolvedSystemOneProfile {
+  baseUrl?: string;
+  model?: string;
+  /** The key this profile carries. Write-only; see {@link ReflexSystemOneProfile}. */
+  apiKey?: string;
+  apiKeyEnv?: string;
+  timeoutMs?: number;
+  backend?: 'auto' | 'mock' | 'jev' | 'vllm';
 }
 
 /** Effort configuration after defaults and validation have been applied. */
@@ -464,6 +554,36 @@ const EffortSchema = z.object({
     .description('Minimum System 1 confidence for its answer to be trusted over the cue classifier.')
 }).volatile();
 
+/**
+ * Schemastery schema for one System One connection profile.
+ *
+ * `apiKey` is the one field of this plugin declared `role('secret')`. That role
+ * is the whole mechanism behind the panel's write-only input: DSH's structural
+ * redaction (`dsh-settings` `redactSecrets`) walks the schema — through
+ * `z.dict()` entries, by `node.inner` — drops every secret slot from a value
+ * before it crosses a wire boundary, and records `{path, set}` in a sidecar so a
+ * configuration surface can render a placeholder without ever holding the value.
+ *
+ * Deliberately no `default`: a secret slot with a default would materialize a
+ * value nobody typed, and `plainSchema` strips `default`/`required` from secret
+ * slots anyway.
+ */
+const SystemOneProfileSchema = z.object({
+  baseUrl: z.string().description('Jev gateway or OpenAI-compatible logits endpoint; omit to inherit the flat block.'),
+  model: z.string().description('Model id this profile asks for; omit to inherit the flat block.'),
+  apiKey: z
+    .string()
+    .role('secret')
+    .description(
+      'API key of this profile, write-only: stored on save, never returned by any read. Empty = leave unchanged; clear it with the explicit Clear action.'
+    ),
+  apiKeyEnv: z.string().description('Name of the environment variable holding this profile’s API key — never the key itself.'),
+  timeoutMs: z.natural().description('Per-request timeout in milliseconds; omit to inherit the flat block.'),
+  backend: z
+    .union(['auto', 'mock', 'jev', 'vllm'])
+    .description('Backend override for this profile; omit to inherit the top-level backend.')
+});
+
 /** Schemastery schema for the System One backend connection block. */
 const SystemOneSchema = z.object({
   baseUrl: z.string().description('Jev gateway or OpenAI-compatible logits endpoint; omit to use the environment.'),
@@ -471,7 +591,12 @@ const SystemOneSchema = z.object({
   apiKeyEnv: z
     .string()
     .description('Name of the environment variable holding the API key — never the key itself.'),
-  timeoutMs: z.natural().description('Per-request timeout in milliseconds; omit for the backend default.')
+  timeoutMs: z.natural().description('Per-request timeout in milliseconds; omit for the backend default.'),
+  profiles: z
+    .dict(SystemOneProfileSchema)
+    .default({})
+    .description('Named connection profiles; each may carry its own write-only apiKey.'),
+  active: z.string().description('Name of the profile in force; a name no profile declares is reported, not hidden.')
 }).volatile();
 
 /**
@@ -681,6 +806,31 @@ function optionalText(value: string | undefined): string | undefined {
 
 /**
  * Validate the System One connection block and fill in every default.
+ *
+ * ## The resolution chain (highest precedence first)
+ *
+ * For every connection field — `baseUrl`, `model`, `apiKey`, `apiKeyEnv`,
+ * `timeoutMs`, `backend`:
+ *
+ * 1. the **active profile**, when `active` names one;
+ * 2. the **flat block** (`systemOne.baseUrl`, …) — the pre-g-057 shape;
+ * 3. the **environment** (`SYSTEM_ONE_BASE_URL`, `SYSTEM_ONE_API_KEY`, …),
+ *    which the backend implementations read for any field left `undefined`;
+ * 4. the **documented default** of that backend.
+ *
+ * Steps 3 and 4 stay where they were — inside the backends — because moving them
+ * here would change what an env-configured deployment resolves to. This function
+ * therefore *merges* 1 over 2 and leaves the rest `undefined`, which is exactly
+ * "the environment decides".
+ *
+ * `apiKey` and `apiKeyEnv` are resolved independently, so a profile may carry a
+ * literal key while inheriting the flat `apiKeyEnv` *name*, or vice versa;
+ * {@link resolveApiKey} decides which of the two a profile ultimately uses.
+ *
+ * `active` naming no profile is reported as `activeProfileMissing` and the chain
+ * continues at step 2 — see {@link ReflexSystemOneConfig.active} for why this is
+ * a warning rather than a failure.
+ *
  * @param backend - the top-level backend selector.
  * @param authored - the authored `systemOne` block.
  * @returns the resolved connection settings.
@@ -694,39 +844,179 @@ export function resolveSystemOneConfig(
   if (!(['auto', 'mock', 'jev', 'vllm'] as const).includes(selected)) {
     throw new Error(`backend must be one of auto, mock, jev, vllm (got "${String(backend)}")`);
   }
-  const baseUrl = optionalText(authored?.baseUrl);
-  const model = optionalText(authored?.model);
-  const apiKeyEnv = optionalText(authored?.apiKeyEnv);
-  const timeoutMs = authored?.timeoutMs;
+  const profiles = resolveSystemOneProfiles(authored?.profiles);
+  const hasProfiles = Object.keys(profiles).length > 0;
+  const active = optionalText(authored?.active);
+  const activeProfile = active === undefined ? undefined : profiles[active];
+  const activeProfileMissing = active !== undefined && activeProfile === undefined;
+
+  // Flat block first (step 2), then the active profile over it (step 1).
+  const baseUrl = optionalText(activeProfile?.baseUrl) ?? optionalText(authored?.baseUrl);
+  const model = optionalText(activeProfile?.model) ?? optionalText(authored?.model);
+  const apiKeyEnv = optionalText(activeProfile?.apiKeyEnv) ?? optionalText(authored?.apiKeyEnv);
+  const apiKey = optionalText(activeProfile?.apiKey);
+  const timeoutMs = activeProfile?.timeoutMs ?? authored?.timeoutMs;
+  const profileBackend = activeProfile?.backend;
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
     throw new Error(`systemOne.timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
   }
   return {
-    backend: selected,
+    backend: profileBackend ?? selected,
+    ...(hasProfiles ? { profiles } : {}),
+    ...(active === undefined ? {} : { active }),
+    ...(activeProfileMissing ? { activeProfileMissing: true } : {}),
     ...(baseUrl === undefined ? {} : { baseUrl }),
     ...(model === undefined ? {} : { model }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+    ...(apiKey === undefined ? {} : { apiKey }),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   };
 }
 
 /**
+ * Normalize every authored profile, rejecting names the panel cannot address.
+ *
+ * A name becomes both a `z.dict` key and a segment of a settings `set` path, so
+ * the rules are the ones those two consumers impose: non-blank, no `.` (the path
+ * separator) and unique after case folding (the panel shows names as identifiers
+ * and two rows differing only in case would be indistinguishable).
+ *
+ * @param authored - the authored `profiles` dictionary.
+ * @returns the normalized profiles, in authored order.
+ * @throws Error when a name or a field is unusable.
+ */
+function resolveSystemOneProfiles(
+  authored: Record<string, ReflexSystemOneProfile> | undefined
+): Record<string, ResolvedSystemOneProfile> {
+  if (authored === undefined) return {};
+  if (authored === null || typeof authored !== 'object' || Array.isArray(authored)) {
+    throw new Error('systemOne.profiles must be a dictionary of profile name → connection settings');
+  }
+  const profiles: Record<string, ResolvedSystemOneProfile> = {};
+  const seen = new Map<string, string>();
+  for (const [rawName, entry] of Object.entries(authored)) {
+    const name = optionalText(rawName);
+    if (name === undefined) throw new Error('systemOne.profiles keys must be non-empty profile names');
+    if (name.includes('.')) {
+      throw new Error(`systemOne.profiles name must not contain "." (got "${name}"): it is the settings path separator`);
+    }
+    const folded = name.toLowerCase();
+    const clash = seen.get(folded);
+    if (clash !== undefined) {
+      throw new Error(`systemOne.profiles has two names differing only in case ("${clash}" and "${name}")`);
+    }
+    seen.set(folded, name);
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`systemOne.profiles["${name}"] must be an object of connection settings`);
+    }
+    const profileBackend = optionalText(entry.backend);
+    if (profileBackend !== undefined && !(['auto', 'mock', 'jev', 'vllm'] as const).includes(profileBackend as never)) {
+      throw new Error(`systemOne.profiles["${name}"].backend must be one of auto, mock, jev, vllm (got "${profileBackend}")`);
+    }
+    const timeoutMs = entry.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
+      throw new Error(`systemOne.profiles["${name}"].timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
+    }
+    const baseUrl = optionalText(entry.baseUrl);
+    const model = optionalText(entry.model);
+    const apiKey = optionalText(entry.apiKey);
+    const apiKeyEnv = optionalText(entry.apiKeyEnv);
+    profiles[name] = {
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+      ...(model === undefined ? {} : { model }),
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(profileBackend === undefined ? {} : { backend: profileBackend as 'auto' | 'mock' | 'jev' | 'vllm' })
+    };
+  }
+  return profiles;
+}
+
+/**
  * Read the API key a resolved connection block points at.
  *
- * The indirection is the point: the settings document carries the variable's
- * *name*, so a panel write can never leak the credential into a file the Host
- * then renders back to every client.
+ * Two indirections, in this order:
+ *
+ * 1. **A literal key** — `apiKey`, only ever populated by an active profile. It
+ *    comes straight from the settings document, where it is a declared
+ *    `role('secret')` slot; no read path can hand it back out.
+ * 2. **An environment variable name** — `apiKeyEnv`. The settings document then
+ *    carries the variable's *name*, so a panel write can never leak the
+ *    credential into a file the Host renders back to every client.
+ *
+ * A profile that states both uses its key, which is the precedence the panel
+ * documents ("profile key first, environment name second").
+ *
  * @param config - resolved System One connection settings.
  * @param env - environment to read; defaults to `process.env`.
- * @returns the key, or `undefined` when the variable is unset or empty.
+ * @returns the key, or `undefined` when neither source holds one.
  */
 export function resolveApiKey(
-  config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv'>,
+  config: Pick<ResolvedSystemOneConfig, 'apiKeyEnv' | 'apiKey'>,
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
+  if (typeof config.apiKey === 'string' && config.apiKey.length > 0) return config.apiKey;
   if (config.apiKeyEnv === undefined) return undefined;
   const value = env[config.apiKeyEnv];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** The connection facts one probe target carries (never a value it can echo). */
+export interface ConnectionTarget {
+  /** Profile name this target was projected from. */
+  name: string;
+  /** Backend that would serve this target. */
+  backend: 'auto' | 'mock' | 'jev' | 'vllm';
+  baseUrl?: string;
+  model?: string;
+  apiKeyEnv?: string;
+  /** The key to present. Stays in this process; never serialized. */
+  apiKey?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Project one profile's connection facts, merged over the flat block.
+ *
+ * Used by the connection test: probing a profile that inherits `baseUrl` from the
+ * flat block must send the request the runtime itself would send, so the same
+ * "profile over flat over environment" merge is applied here instead of being
+ * re-derived (and eventually mis-derived) by the caller.
+ *
+ * `flat` must be the block as *authored*, not an active-profile-resolved config:
+ * resolving "bare profile over the block" against a block that already folded in
+ * another profile's values would silently borrow that profile's address. The
+ * caller gets it from {@link resolveSystemOneConfig} with `active` removed.
+ *
+ * @param flat - the resolved block with no profile folded in.
+ * @param name - profile name, or the placeholder the caller reports for "block".
+ * @param profile - the profile to project; `undefined` projects the flat block.
+ * @returns the target's connection facts.
+ */
+export function connectionTarget(
+  flat: Pick<ResolvedSystemOneConfig, 'backend' | 'baseUrl' | 'model' | 'apiKeyEnv' | 'apiKey' | 'timeoutMs'>,
+  name: string,
+  profile: ResolvedSystemOneProfile | undefined
+): ConnectionTarget {
+  // Profile first, then the flat block. Whatever neither names stays absent, so
+  // the backend falls through to the environment exactly as it did before g-057.
+  const first = <T>(profileValue: T | undefined, flatValue: T | undefined): T | undefined =>
+    profileValue === undefined ? flatValue : profileValue;
+  const baseUrl = optionalText(first(profile?.baseUrl, flat.baseUrl));
+  const model = optionalText(first(profile?.model, flat.model));
+  const apiKeyEnv = optionalText(first(profile?.apiKeyEnv, flat.apiKeyEnv));
+  const apiKey = optionalText(first(profile?.apiKey, flat.apiKey));
+  const timeoutMs = first(profile?.timeoutMs, flat.timeoutMs);
+  return {
+    name,
+    backend: first(profile?.backend, flat.backend) ?? 'auto',
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(model === undefined ? {} : { model }),
+    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs })
+  };
 }
 
 /**

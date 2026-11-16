@@ -231,6 +231,40 @@ export interface BackendDraft {
   model: string;
   apiKeyEnv: string;
   timeoutMs: string;
+  /** Name of the profile in force; empty means "no active profile". */
+  active: string;
+  /** One editable row per authored profile, in authored order. */
+  profiles: ProfileDraft[];
+}
+
+/**
+ * Editable draft of one connection profile.
+ *
+ * `apiKey` is the *pending* value of a write-only field: it is seeded empty on
+ * every read, because no read ever returns the stored key. A non-empty value is a
+ * new key to store; an empty one means "leave the stored key alone". Clearing is a
+ * separate, explicit flag rather than "empty string", so a user who pastes nothing
+ * can never destroy a working key by saving an unrelated field.
+ */
+export interface ProfileDraft {
+  /** Stable key of this row: the profile name as seeded (empty for a new row). */
+  name: string;
+  baseUrl: string;
+  model: string;
+  apiKeyEnv: string;
+  timeoutMs: string;
+  backend: string;
+  /** Pending key to write; never seeded from the Host. */
+  apiKey: string;
+  /**
+   * Whether this row's stored key is present right now (from the Host), so the
+   * page can show a "stored" placeholder instead of an empty-looking input.
+   */
+  apiKeyPresent: boolean;
+  /** Whether the key comes from the named environment variable rather than the store. */
+  apiKeyFromProfile: boolean;
+  /** Set by the explicit clear action; makes the write unset the secret slot. */
+  clearKey: boolean;
 }
 
 /** Editable draft of the runtime-level fields. */
@@ -277,7 +311,7 @@ function allCapabilitiesInherit(): Record<string, string> {
 export const EMPTY_DRAFT: PanelDraft = {
   routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
   effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
-  backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '' },
+  backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '', active: '', profiles: [] },
   runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
   interventions: {
     mode: 'observe',

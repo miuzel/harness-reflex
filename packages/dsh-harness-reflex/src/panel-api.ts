@@ -28,7 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DecisionLedger, LedgerEntry } from './vendor/harness-reflex/index.js';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 
-import type { ResolvedReflexConfig } from './config.js';
+import { connectionTarget, type ResolvedReflexConfig } from './config.js';
 import { INTERVENTION_CAPABILITIES } from './config.js';
 import type { ReflexEffortStatus } from './effort.js';
 import type { DelegationHealthState } from './delegation-health.js';
@@ -50,7 +50,15 @@ export const PANEL_ROUTES = {
    * A route of its own, and a `POST`, because it is the only request in this
    * family that changes a file outside this plugin's own settings section.
    */
-  delegation: `${PANEL_BASE}/delegation`
+  delegation: `${PANEL_BASE}/delegation`,
+  /**
+   * Probes one System One profile from the server.
+   *
+   * A `POST` with a JSON body naming the profile, and not a `GET`: it performs
+   * outbound work on the user's behalf, and a cached or prefetched GET must never
+   * be able to trigger a connection attempt.
+   */
+  systemOneTest: `${PANEL_BASE}/systemone/test`
 } as const;
 
 /** How many recent ledger entries one snapshot carries. Default 25, cap 200. */
@@ -247,6 +255,33 @@ export interface PanelSystemOneHealth {
   consecutiveFailures: number;
 }
 
+/**
+ * One connection profile, as the panel renders it.
+ *
+ * Every field here is a *non-secret* one. The key never appears: the panel learns
+ * only {@link apiKeyPresent}, which is what lets it draw a write-only input with
+ * a placeholder without ever holding the value.
+ */
+export interface PanelSystemOneProfileView {
+  /** Profile name; also the row id and the settings path segment. */
+  name: string;
+  baseUrl?: string;
+  model?: string;
+  /** Environment variable this profile names, when it names one. */
+  apiKeyEnv?: string;
+  /**
+   * Whether this profile currently resolves a key — from its own secret slot or
+   * from the variable it names. Never which, and never the value.
+   */
+  apiKeyPresent: boolean;
+  /** Whether the key this profile resolves is its own secret slot (not the variable). */
+  apiKeyFromProfile: boolean;
+  timeoutMs?: number;
+  backend?: string;
+  /** Whether this is the profile in force. */
+  active: boolean;
+}
+
 /** System One backend block of the snapshot. */
 export interface PanelSystemOneView {
   /** Selected implementation; `auto` resolves through the environment. */
@@ -258,7 +293,19 @@ export interface PanelSystemOneView {
   apiKeyEnv?: string;
   /** Whether `apiKeyEnv` currently holds a non-empty value. Never the value. */
   apiKeyPresent: boolean;
+  /** Whether the resolved configuration carries a literal key. Never the key. */
+  apiKeyFromProfile: boolean;
   timeoutMs?: number;
+  /** Every authored profile, in authored order. Empty when none is authored. */
+  profiles: PanelSystemOneProfileView[];
+  /** The authored `active` name, when one was authored. */
+  activeProfile?: string;
+  /**
+   * The authored `active` name matches no profile, so these settings are the flat
+   * block's. Surfaced as a warning rather than hidden: a typo must not look like
+   * a working configuration.
+   */
+  activeProfileMissing: boolean;
   /**
    * Live gateway health, when the backend keeps any. Backends that answer every
    * call in-process (mock) omit it; the absence is not an outage.
@@ -336,6 +383,13 @@ export interface PanelRuntimeFacts {
   effort: ReflexEffortStatus | undefined;
   /** Whether an API key is currently reachable through the declared variable. */
   apiKeyPresent: boolean;
+  /**
+   * Key *presence* per profile name — the only key fact the panel may receive.
+   *
+   * A map of booleans, never of values: the projection cannot leak what it is not
+   * handed, and a test asserts the serialized snapshot contains no key substring.
+   */
+  profileKeys?: Record<string, { present: boolean; fromProfile: boolean }>;
   /** Health of the backend's gateway conversation, when it tracks one. */
   systemOneHealth?: PanelSystemOneHealth;
   /** Available physical model catalog from ctx.llm. */
@@ -494,16 +548,7 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       active: [...facts.toolSurface]
     },
     delegation: projectDelegation(config, facts),
-    systemOne: {
-      backend: config.systemOne.backend,
-      active: facts.backendName,
-      apiKeyPresent: facts.apiKeyPresent,
-      ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),
-      ...(config.systemOne.baseUrl === undefined ? {} : { baseUrl: config.systemOne.baseUrl }),
-      ...(config.systemOne.model === undefined ? {} : { model: config.systemOne.model }),
-      ...(config.systemOne.apiKeyEnv === undefined ? {} : { apiKeyEnv: config.systemOne.apiKeyEnv }),
-      ...(config.systemOne.timeoutMs === undefined ? {} : { timeoutMs: config.systemOne.timeoutMs })
-    },
+    systemOne: projectSystemOne(config, facts),
     ledger: {
       summary: facts.ledger.getSummary(),
       recent,
@@ -513,6 +558,65 @@ export function buildPanelSnapshot(facts: PanelRuntimeFacts, limit: number = PAN
       clearable: true
     },
     ...(facts.modelCatalog === undefined ? {} : { modelCatalog: facts.modelCatalog })
+  };
+}
+
+/**
+ * Project the System One connection block, including every profile.
+ *
+ * The one rule this function exists to keep: **no key value may reach the
+ * payload**. It reads {@link PanelRuntimeFacts.profileKeys} — presence flags the
+ * caller gathered — and never `config.systemOne.profiles[*].apiKey`, which does
+ * exist in the resolved config because the backend needs it.
+ *
+ * @param config - the configuration in force.
+ * @param facts - gathered runtime facts.
+ * @returns the wire projection of the connection block.
+ */
+export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRuntimeFacts): PanelSystemOneView {
+  const { systemOne } = config;
+  // Presence, never value: a profile "has" a key when its own secret slot is set,
+  // else when the variable it names holds a non-empty value.
+  const keyFacts = (name: string, profile: { apiKey?: string; apiKeyEnv?: string }): { present: boolean; fromProfile: boolean } => {
+    const supplied = facts.profileKeys?.[name];
+    if (supplied !== undefined) return { present: supplied.present, fromProfile: supplied.fromProfile };
+    const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
+    return { present: own, fromProfile: own };
+  };
+  // A row shows the connection it would *actually use*, so every field is the
+  // profile's own value merged over the flat block — the same precedence the
+  // runtime applies. Showing only authored fields would render a profile that
+  // inherits its address as a blank row, which reads as "not configured".
+  const flat = connectionTarget(systemOne, '', undefined);
+  const profiles: PanelSystemOneProfileView[] = Object.entries(systemOne.profiles ?? {}).map(([name, profile]) => {
+    const keys = keyFacts(name, profile);
+    const merged = connectionTarget(flat, name, profile);
+    return {
+      name,
+      active: systemOne.active === name,
+      apiKeyPresent: keys.present,
+      apiKeyFromProfile: keys.fromProfile,
+      ...(merged.baseUrl === undefined ? {} : { baseUrl: merged.baseUrl }),
+      ...(merged.model === undefined ? {} : { model: merged.model }),
+      ...(merged.apiKeyEnv === undefined ? {} : { apiKeyEnv: merged.apiKeyEnv }),
+      ...(merged.timeoutMs === undefined ? {} : { timeoutMs: merged.timeoutMs }),
+      ...(merged.backend === undefined ? {} : { backend: merged.backend })
+    };
+  });
+  const resolvedCarriesKey = typeof systemOne.apiKey === 'string' && systemOne.apiKey.length > 0;
+  return {
+    backend: systemOne.backend,
+    active: facts.backendName,
+    apiKeyPresent: facts.apiKeyPresent,
+    apiKeyFromProfile: resolvedCarriesKey,
+    profiles,
+    activeProfileMissing: systemOne.activeProfileMissing === true,
+    ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),
+    ...(systemOne.active === undefined ? {} : { activeProfile: systemOne.active }),
+    ...(systemOne.baseUrl === undefined ? {} : { baseUrl: systemOne.baseUrl }),
+    ...(systemOne.model === undefined ? {} : { model: systemOne.model }),
+    ...(systemOne.apiKeyEnv === undefined ? {} : { apiKeyEnv: systemOne.apiKeyEnv }),
+    ...(systemOne.timeoutMs === undefined ? {} : { timeoutMs: systemOne.timeoutMs })
   };
 }
 
@@ -685,6 +789,30 @@ export interface PanelSource {
    * @returns the outcome the panel renders.
    */
   enableDelegation?: () => PanelDelegationWrite;
+  /**
+   * Probe one System One profile; absent means the host cannot, and the route
+   * answers 501 rather than pretending the connection was fine.
+   * @param profile - profile name, or `undefined` for the active one.
+   * @param signal - cancelled when the client goes away.
+   * @returns the classified probe result.
+   */
+  testSystemOne?: (profile: string | undefined, signal: AbortSignal) => Promise<PanelProbeAnswer>;
+}
+
+/** The answer of one connection probe. */
+export interface PanelProbeAnswer {
+  ok: boolean;
+  /** `ok` | `auth-failed` | `unreachable` | `timeout` | `bad-response` | `misconfigured`. */
+  status: string;
+  /** Real round trip, in milliseconds. */
+  latencyMs: number;
+  /** Profile that was probed, or `null` when the flat block was. */
+  profile: string | null;
+  httpStatus?: number;
+  /** Redacted, single-line explanation. */
+  detail?: string;
+  model?: string;
+  endpoint?: string;
 }
 
 /** The answer of one delegation write. */
@@ -779,6 +907,123 @@ export function answerPanelRequest(source: PanelSource, request: IncomingMessage
   }
 }
 
+/** Largest body the probe route will read, so a request cannot make it buffer the world. */
+export const PANEL_PROBE_BODY_MAX = 4_096;
+
+/**
+ * Read one request body, bounded.
+ *
+ * @param request - the incoming request.
+ * @param max - largest accepted length in bytes.
+ * @returns the body text, or `undefined` when it exceeded the bound.
+ */
+async function readBoundedBody(request: IncomingMessage, max: number = PANEL_PROBE_BODY_MAX): Promise<string | undefined> {
+  const stream = request as IncomingMessage & AsyncIterable<Buffer | string>;
+  let size = 0;
+  const chunks: string[] = [];
+  for await (const chunk of stream) {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    size += Buffer.byteLength(text, 'utf8');
+    if (size > max) return undefined;
+    chunks.push(text);
+  }
+  return chunks.join('');
+}
+
+/**
+ * Resolve one panel request that may need to read a body or probe a connection.
+ *
+ * The synchronous {@link answerPanelRequest} stays the entry point for every
+ * route that needs neither, which is what keeps its existing callers (and their
+ * assertions) unchanged. This one handles the probe route, whose body names the
+ * profile and whose answer takes a real network round trip.
+ *
+ * @param source - the live facts.
+ * @param request - the incoming request.
+ * @returns the answer to serialize.
+ */
+export async function answerPanelRequestAsync(source: PanelSource, request: IncomingMessage): Promise<PanelAnswer> {
+  const path = (request.url ?? '/').split('?')[0] ?? '/';
+  if (path !== PANEL_ROUTES.systemOneTest) return answerPanelRequest(source, request);
+
+  const method = (request.method ?? 'GET').toUpperCase();
+  if (!source.allows(request)) {
+    return { status: 403, body: { ok: false, error: 'forbidden', detail: 'the reflex panel answers loopback clients and paired devices only' } };
+  }
+  if (method !== 'POST') return methodNotAllowed('POST');
+  if (source.testSystemOne === undefined) {
+    return {
+      status: 501,
+      body: { ok: false, error: 'not-probeable', detail: 'this host cannot reach a System One endpoint from the server' }
+    };
+  }
+
+  // An absent body means "the active profile"; anything else must be JSON naming
+  // one. A malformed body is refused here rather than guessed at.
+  const raw = await readBoundedBody(request);
+  if (raw === undefined) {
+    return { status: 413, body: { ok: false, error: 'body-too-large', detail: `the request body must stay under ${String(PANEL_PROBE_BODY_MAX)} bytes` } };
+  }
+  let requested: string | undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length > 0) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return { status: 400, body: { ok: false, error: 'bad-json', detail: 'the request body must be JSON like {"profile":"name"}' } };
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { status: 400, body: { ok: false, error: 'bad-body', detail: 'the request body must be a JSON object' } };
+    }
+    const value = (parsed as { profile?: unknown }).profile;
+    if (value !== undefined && typeof value !== 'string') {
+      return { status: 400, body: { ok: false, error: 'bad-profile', detail: '"profile" must be a string when present' } };
+    }
+    requested = typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+  }
+
+  // The client may go away mid-probe (panel closed, route unmounted); the probe
+  // then stops instead of completing into a destroyed socket.
+  const controller = new AbortController();
+  request.once?.('close', () => controller.abort());
+  try {
+    const result = await source.testSystemOne(requested, controller.signal);
+    // `result` already carries `ok`, so the spread is the whole payload.
+    return { status: 200, body: result };
+  } catch (error) {
+    // A probe is supposed to classify its own failures; reaching here means a bug.
+    // Report it as a failed probe rather than a 500, so the row still renders.
+    return {
+      status: 200,
+      body: {
+        ok: false,
+        status: 'bad-response',
+        latencyMs: 0,
+        profile: requested ?? null,
+        detail: error instanceof Error ? redactProbeText(error.message) : 'the probe failed'
+      }
+    };
+  }
+}
+
+/**
+ * Scrub one probe detail before it is put on the wire.
+ *
+ * The probe already redacts; this is the second gate, at the boundary the payload
+ * actually leaves through, so a bug in the first cannot become a leak.
+ * @param text - raw detail.
+ * @returns a single-line string with credential shapes removed.
+ */
+function redactProbeText(text: string): string {
+  return String(text ?? '')
+    .replace(/Bearer\s+[^\s"',;}]+/gi, 'Bearer ***')
+    .replace(/\b(sk|pk|key)-[A-Za-z0-9._-]{6,}/g, '$1-***')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
 /** Standard 405 answer. */
 function methodNotAllowed(allow: string): PanelAnswer {
   return { status: 405, body: { ok: false, error: 'method-not-allowed', detail: `use ${allow}` }, headers: { allow } };
@@ -829,26 +1074,31 @@ export function sendPanelAnswer(request: IncomingMessage, response: PanelRespons
  */
 export function makePanelRoutes(source: PanelSource): WebRoute[] {
   const handler = (request: IncomingMessage, response: ServerResponse): void => {
+    void answerPanelRequestAsync(source, request)
+      .then((answer) => sendPanelAnswer(request, response, answer))
+      .catch((error: unknown) => {
+        reportHandlerError(response, error);
+      });
+  };
+
+  const reportHandlerError = (response: ServerResponse, error: unknown): void => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
     try {
-      sendPanelAnswer(request, response, answerPanelRequest(source, request));
-    } catch (error) {
-      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
-      try {
-        response.writeHead(500, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store'
-        });
-        response.end(JSON.stringify({ ok: false, error: 'panel-handler-threw', detail }));
-      } catch {
-        // The socket is already gone: there is nobody left to report to.
-      }
+      response.writeHead(500, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      response.end(JSON.stringify({ ok: false, error: 'panel-handler-threw', detail }));
+    } catch {
+      // The socket is already gone: there is nobody left to report to.
     }
   };
   return [
     { kind: 'exact', path: PANEL_ROUTES.snapshot, handler },
     { kind: 'exact', path: PANEL_ROUTES.health, handler },
     { kind: 'exact', path: PANEL_ROUTES.clearLedger, handler },
-    { kind: 'exact', path: PANEL_ROUTES.delegation, handler }
+    { kind: 'exact', path: PANEL_ROUTES.delegation, handler },
+    { kind: 'exact', path: PANEL_ROUTES.systemOneTest, handler }
   ];
 }
 

@@ -20,7 +20,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage } from 'node:http';
 
-import { resolveApiKey, routingActive } from './config.js';
+import { connectionTarget, resolveApiKey, resolveSystemOneConfig, routingActive, type ResolvedSystemOneConfig } from './config.js';
 import { enableHostModelSelection, inspectHostModelSelection, type HostPatchOptions } from './host-patch.js';
 import { formatTargetName } from './router.js';
 import type { ReflexRuntime } from './bridge.js';
@@ -29,9 +29,11 @@ import {
   isPanelRequestAllowed,
   makePanelRoutes,
   type PanelPoolView,
+  type PanelProbeAnswer,
   type PanelRuntimeFacts,
   type PanelSource
 } from './panel-api.js';
+import { probeSystemOne } from './systemone-probe.js';
 import type { DelegationHealthState } from './delegation-health.js';
 
 /** Contexts that already mounted a panel; released when the activation disposes. */
@@ -145,6 +147,10 @@ export function panelFacts(
     ledger: runtime.ledger,
     effort: runtime.effortStatusFeed.latest(),
     apiKeyPresent: resolveApiKey(effective.systemOne, env) !== undefined,
+    // Presence only, per profile. Gathered here (and not by the projection) so
+    // the one place that reads the environment is this file, and so the wire
+    // projection is handed booleans rather than anything it could leak.
+    profileKeys: profileKeyPresence(effective.systemOne, env),
     // Both are read on every poll: the registry can change under a running host,
     // and the patch file can be edited by a person while the panel is open. A
     // cached copy of either would be exactly the stale fact the panel must not
@@ -153,6 +159,83 @@ export function panelFacts(
     hostPatch: inspectHostModelSelection(hostPatch ?? { env }),
     ...(systemOneHealth === undefined ? {} : { systemOneHealth }),
     ...(modelCatalog === undefined ? {} : { modelCatalog })
+  };
+}
+
+/**
+ * Gather key *presence* for every authored profile.
+ *
+ * Returns booleans and nothing else: the panel renders a placeholder from
+ * `present` and never needs the value. `fromProfile` distinguishes a key stored in
+ * the settings document from one read out of the environment, which the panel
+ * words differently ("stored" vs "from <VAR>") — still without the value.
+ *
+ * @param systemOne - the connection block in force.
+ * @param env - environment the `apiKeyEnv` indirection reads.
+ * @returns one presence record per profile name.
+ */
+export function profileKeyPresence(
+  systemOne: Pick<ResolvedSystemOneConfig, 'profiles'>,
+  env: Record<string, string | undefined> = process.env
+): Record<string, { present: boolean; fromProfile: boolean }> {
+  const out: Record<string, { present: boolean; fromProfile: boolean }> = {};
+  for (const [name, profile] of Object.entries(systemOne.profiles ?? {})) {
+    // Same precedence the runtime uses: the profile's own key, then the variable.
+    const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
+    const fromEnv =
+      profile.apiKeyEnv === undefined ? false : typeof env[profile.apiKeyEnv] === 'string' && (env[profile.apiKeyEnv]?.length ?? 0) > 0;
+    out[name] = { present: own || fromEnv, fromProfile: own };
+  }
+  return out;
+}
+
+/**
+ * Build the probe the test route calls for one profile name.
+ *
+ * Reads the profile out of the *live* configuration on every call, so a test
+ * started right after a save probes what was just saved. The key is handed to
+ * {@link probeSystemOne} and never leaves this process.
+ *
+ * @param runtime - the activation's runtime.
+ * @param env - environment the `apiKeyEnv` indirection reads.
+ * @returns the probe callback the panel source exposes.
+ */
+export function createSystemOneProbe(
+  runtime: ReflexRuntime,
+  env: Record<string, string | undefined> = process.env,
+  fetchImpl?: typeof fetch
+): (profile: string | undefined, signal: AbortSignal) => Promise<PanelProbeAnswer> {
+  return async (profile, signal) => {
+    const effective = runtime.effectiveConfig.systemOne;
+    // The block as authored, with no profile folded in: a bare profile must
+    // inherit the *flat* fields, not the active profile's.
+    const flat = resolveSystemOneConfig(effective.backend, {
+      ...(effective.baseUrl === undefined ? {} : { baseUrl: effective.baseUrl }),
+      ...(effective.apiKeyEnv === undefined ? {} : { apiKeyEnv: effective.apiKeyEnv }),
+      ...(effective.timeoutMs === undefined ? {} : { timeoutMs: effective.timeoutMs })
+    });
+    const name = profile ?? effective.active;
+    const targetProfile = name === undefined ? undefined : effective.profiles?.[name];
+    if (name !== undefined && targetProfile === undefined) {
+      // Naming a profile that does not exist is a caller error, not a connection
+      // failure: say so instead of probing the flat block under a wrong label.
+      return { ok: false, status: 'misconfigured', latencyMs: 0, profile: name, detail: `no profile named "${name}" is configured` };
+    }
+    const target =
+      targetProfile === undefined
+        ? connectionTarget(flat, '', undefined)
+        : connectionTarget(flat, name as string, targetProfile);
+    const result = await probeSystemOne(target, { env, signal, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
+    return {
+      ok: result.ok,
+      status: result.status,
+      latencyMs: result.latencyMs,
+      profile: name ?? null,
+      ...(result.httpStatus === undefined ? {} : { httpStatus: result.httpStatus }),
+      ...(result.detail === undefined ? {} : { detail: result.detail }),
+      ...(result.model === undefined ? {} : { model: result.model }),
+      ...(result.endpoint === undefined ? {} : { endpoint: result.endpoint })
+    };
   };
 }
 
@@ -268,6 +351,7 @@ export function createPanelSource(
         isPaired: pairing === undefined ? undefined : (candidate) => pairing.isPairedDevice(candidate)
       }),
     snapshot: (limit) => buildPanelSnapshot(panelFacts(runtime, env, ctx, hostPatch), limit),
+    testSystemOne: createSystemOneProbe(runtime, env),
     clearLedger: () => {
       const cleared = runtime.ledger.getEntries().length;
       runtime.ledger.clear();

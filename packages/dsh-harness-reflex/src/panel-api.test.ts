@@ -12,6 +12,7 @@ import {
   PANEL_ROUTES,
   REFLEX_PLUGIN_VERSION,
   answerPanelRequest,
+  answerPanelRequestAsync,
   buildPanelSnapshot,
   clampLimit,
   isLoopbackAddress,
@@ -114,6 +115,63 @@ function request(method: string, url: string, remoteAddress = '127.0.0.1'): Inco
   return { method, url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress } } as unknown as IncomingMessage;
 }
 
+/**
+ * A request stub carrying a body, as an async-iterable stream.
+ *
+ * The probe route reads its body, so this stub has to behave like one: the
+ * `answerPanelRequestAsync` path iterates the request.
+ * @param method - HTTP method.
+ * @param url - path.
+ * @param body - JSON body, or `undefined` for no body at all.
+ * @param remoteAddress - peer address the fence reads.
+ * @returns the request stub.
+ */
+function requestJson(method: string, url: string, body: string | undefined, remoteAddress = '127.0.0.1'): IncomingMessage {
+  const listeners = new Map<string, Array<() => void>>();
+  const stub = {
+    method,
+    url,
+    headers: { host: '127.0.0.1:3080' },
+    socket: { remoteAddress },
+    once(event: string, listener: () => void) {
+      const list = listeners.get(event) ?? [];
+      list.push(listener);
+      listeners.set(event, list);
+      return stub;
+    },
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined) yield Buffer.from(body, 'utf8');
+    }
+  };
+  return stub as unknown as IncomingMessage;
+}
+
+/**
+ * Run one route handler and wait for its (now asynchronous) answer.
+ *
+ * The handler dispatches through `answerPanelRequestAsync`, so a test that
+ * inspects the response must let a microtask turn elapse first.
+ * @param route - the registered route.
+ * @param request - the request to serve.
+ * @param response - the response stub to fill.
+ * @returns a promise resolving once the handler settled.
+ */
+async function serve(route: { handler: (req: never, res: never) => void }, request: IncomingMessage, response: unknown): Promise<void> {
+  route.handler(request as never, response as never);
+  // Drain the promise chain the handler kicked off.
+  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+}
+
+/** A panel source whose probe is the supplied callback. */
+function probeSource(testSystemOne: PanelSource['testSystemOne'] extends undefined ? never : NonNullable<PanelSource['testSystemOne']>): PanelSource {
+  return {
+    snapshot: () => buildPanelSnapshot(facts(1)),
+    clearLedger: () => 0,
+    allows: (req) => isPanelRequestAllowed(req),
+    testSystemOne
+  };
+}
+
 /** What the response stub recorded. */
 interface ResponseRecord extends PanelResponse {
   status: number;
@@ -201,6 +259,11 @@ test('the snapshot carries exactly the projected facts', () => {
     backend: 'jev',
     active: 'jev',
     apiKeyPresent: true,
+    apiKeyFromProfile: false,
+    // No profiles authored: the list is empty and the active name is absent, which
+    // is exactly the pre-g-057 block plus those two explicit "none" facts.
+    profiles: [],
+    activeProfileMissing: false,
     baseUrl: 'http://127.0.0.1:8000/v1',
     model: 'jev-small',
     apiKeyEnv: 'REFLEX_TEST_KEY',
@@ -510,21 +573,21 @@ test('clearing needs an explicit confirmation', () => {
 
 //#region wire format
 
-test('a HEAD answer carries headers and no body', () => {
+test('a HEAD answer carries headers and no body', async () => {
   const { source: panelSource } = source();
   const routes = makePanelRoutes(panelSource);
   const snapshotRoute = routes.find((route) => route.path === PANEL_ROUTES.snapshot);
   assert.ok(snapshotRoute !== undefined);
 
   const head = response();
-  snapshotRoute.handler(request('HEAD', PANEL_ROUTES.snapshot) as never, head as never);
+  await serve(snapshotRoute, request('HEAD', PANEL_ROUTES.snapshot), head);
   assert.equal(head.status, 200);
   assert.equal(head.body, '');
   assert.equal(head.headers['content-type'], 'application/json; charset=utf-8');
   assert.ok(Number(head.headers['content-length'] ?? '0') > 0, 'content-length must describe the body HEAD suppresses');
 
   const get = response();
-  snapshotRoute.handler(request('GET', PANEL_ROUTES.snapshot) as never, get as never);
+  await serve(snapshotRoute, request('GET', PANEL_ROUTES.snapshot), get);
   assert.equal(get.status, 200);
   assert.equal(get.headers['cache-control'], 'no-store');
   assert.equal(get.headers['content-length'], String(Buffer.byteLength(get.body, 'utf8')));
@@ -532,7 +595,7 @@ test('a HEAD answer carries headers and no body', () => {
   assert.deepEqual(JSON.parse(get.body), buildPanelSnapshot(facts()));
 });
 
-test('the route family owns exactly its four exact paths', () => {
+test('the route family owns exactly its five exact paths', () => {
   const { source: panelSource } = source();
   const routes = makePanelRoutes(panelSource);
   assert.deepEqual(
@@ -544,14 +607,18 @@ test('the route family owns exactly its four exact paths', () => {
       // The one route of the family that writes a file outside this plugin's
       // settings section; it is listed here so adding a write route can never be
       // done without updating this inventory.
-      ['exact', PANEL_ROUTES.delegation]
+      ['exact', PANEL_ROUTES.delegation],
+      // The connection probe: outbound work on the user's behalf, so it is a POST
+      // with a named profile and is listed here for the same reason as above.
+      ['exact', PANEL_ROUTES.systemOneTest]
     ]
   );
   assert.deepEqual([...PANEL_PATHS], [
     PANEL_ROUTES.snapshot,
     PANEL_ROUTES.health,
     PANEL_ROUTES.clearLedger,
-    PANEL_ROUTES.delegation
+    PANEL_ROUTES.delegation,
+    PANEL_ROUTES.systemOneTest
   ]);
   // Every path is under the one namespace, and every path is addressable.
   for (const path of PANEL_PATHS) assert.ok(path.startsWith('/dsh-reflex/api/'), path);
@@ -565,7 +632,7 @@ test('a 204 answer has no body even for GET', () => {
   assert.equal(written.body, '');
 });
 
-test('a handler that throws answers 500 with the real detail, not an empty 400', () => {
+test('a handler that throws answers 500 with the real detail, not an empty 400', async () => {
   // The Host turns a throw out of a route handler into a bare 400 — the shape
   // that made the "cannot get property "agents" without inject" panel outage
   // undiagnosable. The handler must answer for itself instead.
@@ -581,7 +648,7 @@ test('a handler that throws answers 500 with the real detail, not an empty 400',
   assert.ok(snapshotRoute !== undefined);
 
   const written = response();
-  assert.doesNotThrow(() => snapshotRoute.handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never));
+  await assert.doesNotReject(() => serve(snapshotRoute, request('GET', PANEL_ROUTES.snapshot), written));
   assert.equal(written.status, 500);
   assert.equal(written.headers['content-type'], 'application/json; charset=utf-8');
   assert.equal(written.headers['cache-control'], 'no-store');
@@ -595,7 +662,7 @@ test('a handler that throws answers 500 with the real detail, not an empty 400',
   assert.match(body.detail, /\n\s+at /, 'the detail must carry a stack');
 });
 
-test('a non-Error throw is still reported as a 500', () => {
+test('a non-Error throw is still reported as a 500', async () => {
   const broken: PanelSource = {
     snapshot: () => {
       throw 'string failure';
@@ -605,12 +672,12 @@ test('a non-Error throw is still reported as a 500', () => {
   };
   const routes = makePanelRoutes(broken);
   const written = response();
-  routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never);
+  await serve(routes[0], request('GET', PANEL_ROUTES.snapshot), written);
   assert.equal(written.status, 500);
   assert.equal((JSON.parse(written.body) as { detail: string }).detail, 'string failure');
 });
 
-test('a dead socket during the fallback is not a second throw', () => {
+test('a dead socket during the fallback is not a second throw', async () => {
   const broken: PanelSource = {
     snapshot: () => {
       throw new Error('boom');
@@ -625,16 +692,216 @@ test('a dead socket during the fallback is not a second throw', () => {
     },
     end: () => undefined
   };
-  assert.doesNotThrow(() => routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, dead as never));
+  await assert.doesNotReject(() => serve(routes[0], request('GET', PANEL_ROUTES.snapshot), dead));
 });
 
-test('a healthy handler still answers its own status, unchanged', () => {
+test('a healthy handler still answers its own status, unchanged', async () => {
   const { source: panelSource } = source();
   const routes = makePanelRoutes(panelSource);
   const written = response();
-  routes[0].handler(request('GET', PANEL_ROUTES.snapshot) as never, written as never);
+  await serve(routes[0], request('GET', PANEL_ROUTES.snapshot), written);
   assert.equal(written.status, 200);
   assert.ok(!written.body.includes('panel-handler-threw'));
 });
 
 //#endregion
+
+/* -------------------------------------------------------------------------- */
+/* Multi-profile connection block (g-057)                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A profile block where one profile carries a literal (secret) key. */
+const PROFILE_SECRETS = {
+  primary: 'sk-profile-primary-51b0e2',
+  secondary: 'sk-profile-secondary-88ac17'
+} as const;
+
+/** Authored config carrying two profiles, one of them active. */
+const MULTI_PROFILE: ReflexConfig = {
+  ...AUTHORED,
+  systemOne: {
+    baseUrl: 'http://flat.example',
+    model: 'flat-model',
+    apiKeyEnv: 'REFLEX_TEST_KEY',
+    timeoutMs: 4000,
+    active: 'primary',
+    profiles: {
+      primary: { model: 'primary-model', apiKey: PROFILE_SECRETS.primary },
+      secondary: { baseUrl: 'http://secondary.example', model: 'secondary-model', apiKey: PROFILE_SECRETS.secondary }
+    }
+  }
+};
+
+test('the panel lists every profile with its non-secret fields and the active marker', () => {
+  const snapshot = buildPanelSnapshot(
+    facts(1, { config: resolveConfig(MULTI_PROFILE), profileKeys: { primary: { present: true, fromProfile: true }, secondary: { present: true, fromProfile: true } } })
+  );
+  const view = snapshot.systemOne;
+  assert.equal(view.activeProfile, 'primary');
+  assert.equal(view.activeProfileMissing, false);
+  assert.deepEqual(view.profiles.map((profile) => profile.name), ['primary', 'secondary'], 'authored order is kept');
+  const [primary, secondary] = view.profiles;
+  assert.equal(primary?.active, true);
+  assert.equal(secondary?.active, false);
+  assert.equal(primary?.model, 'primary-model');
+  assert.equal(primary?.baseUrl, 'http://flat.example', 'an inherited field is reported as resolved');
+  assert.equal(secondary?.baseUrl, 'http://secondary.example');
+  assert.equal(primary?.apiKeyPresent, true);
+  assert.equal(primary?.apiKeyFromProfile, true);
+  assert.equal(primary?.apiKeyEnv, 'REFLEX_TEST_KEY', 'the inherited variable name is reported, it is not a secret');
+  assert.equal(secondary?.timeoutMs, 4000);
+});
+
+test('no serialized panel answer contains a profile key, in any form', () => {
+  // The criterion this whole design exists for. `config` (which really does hold
+  // the keys) goes in; a payload that does not is the only acceptable out.
+  const snapshot = buildPanelSnapshot(
+    facts(3, {
+      config: resolveConfig(MULTI_PROFILE),
+      profileKeys: { primary: { present: true, fromProfile: true }, secondary: { present: true, fromProfile: true } }
+    })
+  );
+  const serialized = JSON.stringify(snapshot);
+  for (const secret of Object.values(PROFILE_SECRETS)) {
+    assert.equal(serialized.includes(secret), false, `leaked ${secret} into the panel payload`);
+  }
+  // Neither may the key's surrounding key name survive as a *value* carrier: the
+  // only key-shaped facts on the wire are booleans.
+  assert.equal(/"apiKey"\s*:/.test(serialized), false, 'the payload carries no apiKey slot at all');
+  assert.equal(serialized.includes('sk-'), false, 'no key-shaped substring survives');
+
+  // The same promise over the actual route answer, which is what a client gets.
+  const panelSource: PanelSource = { snapshot: () => snapshot, clearLedger: () => 0, allows: () => true };
+  const answer = answerPanelRequest(panelSource, request('GET', PANEL_ROUTES.snapshot));
+  const body = JSON.stringify(answer.body);
+  for (const secret of Object.values(PROFILE_SECRETS)) assert.equal(body.includes(secret), false);
+});
+
+test('a resolved config that carries a key still projects presence only', () => {
+  const resolved = resolveConfig(MULTI_PROFILE);
+  assert.equal(resolved.systemOne.apiKey, PROFILE_SECRETS.primary, 'the runtime really does hold the active key');
+  // Projected without any supplied presence facts: the projection must fall back
+  // to reading presence, never the value.
+  const view = buildPanelSnapshot(facts(1, { config: resolved })).systemOne;
+  assert.equal(view.apiKeyFromProfile, true);
+  assert.equal(view.profiles.find((profile) => profile.name === 'primary')?.apiKeyPresent, true);
+  assert.equal(JSON.stringify(view).includes(PROFILE_SECRETS.primary), false);
+  assert.equal(JSON.stringify(view).includes(PROFILE_SECRETS.secondary), false, 'an inactive profile key is not leaked either');
+});
+
+test('an active name matching no profile is surfaced, not hidden', () => {
+  const config = resolveConfig({ ...MULTI_PROFILE, systemOne: { ...MULTI_PROFILE.systemOne, active: 'prod' } });
+  const view = buildPanelSnapshot(facts(1, { config })).systemOne;
+  assert.equal(view.activeProfileMissing, true);
+  assert.equal(view.activeProfile, 'prod');
+  assert.equal(view.baseUrl, 'http://flat.example', 'the resolved block is the flat fallback');
+  assert.equal(view.profiles.length, 2, 'the authored profiles are still listed, so the user can pick one');
+  assert.equal(view.profiles.every((profile) => !profile.active), true, 'none of them is silently promoted');
+});
+
+test('a deployment with no profiles projects an empty list, not an absent field', () => {
+  const view = buildPanelSnapshot(facts(1)).systemOne;
+  assert.deepEqual(view.profiles, []);
+  assert.equal(view.activeProfile, undefined);
+  assert.equal(view.activeProfileMissing, false);
+  assert.equal(view.apiKeyPresent, true, 'the pre-g-057 key fact is unchanged');
+  assert.equal(view.apiKeyEnv, 'REFLEX_TEST_KEY');
+});
+
+test('the probe route is registered, refuses the wrong method, and refuses remote peers', async () => {
+  assert.equal(PANEL_PATHS.includes(PANEL_ROUTES.systemOneTest), true);
+  const paths = makePanelRoutes({ snapshot: () => buildPanelSnapshot(facts(1)), clearLedger: () => 0, allows: (req) => isPanelRequestAllowed(req) }).map((route) => route.path);
+  assert.equal(paths.includes(PANEL_ROUTES.systemOneTest), true, 'the route family owns the probe path');
+
+  const calls: string[] = [];
+  const panelSource: PanelSource = {
+    snapshot: () => buildPanelSnapshot(facts(1)),
+    clearLedger: () => 0,
+    allows: (req) => isPanelRequestAllowed(req),
+    testSystemOne: async (profile) => {
+      calls.push(profile ?? '(active)');
+      return { ok: true, status: 'ok', latencyMs: 12, profile: profile ?? null };
+    }
+  };
+  // A GET must not be able to trigger outbound work.
+  const wrongMethod = await answerPanelRequestAsync(panelSource, request('GET', PANEL_ROUTES.systemOneTest));
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers?.allow, 'POST');
+  assert.deepEqual(calls, [], 'no probe ran for a refused method');
+
+  const remote = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, undefined, '10.0.0.9'));
+  assert.equal(remote.status, 403);
+  assert.deepEqual(calls, []);
+});
+
+test('the probe route probes the active profile when the body names none', async () => {
+  const calls: Array<string | undefined> = [];
+  const panelSource = probeSource(async (profile) => {
+    calls.push(profile);
+    return { ok: true, status: 'ok', latencyMs: 7, profile: profile ?? null };
+  });
+  for (const [label, body] of [['no body', undefined], ['empty object', '{}'], ['empty profile', '{"profile":"  "}']] as const) {
+    calls.length = 0;
+    const answer = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, body));
+    assert.equal(answer.status, 200, label);
+    assert.deepEqual(calls, [undefined], label);
+    assert.deepEqual(answer.body, { ok: true, status: 'ok', latencyMs: 7, profile: null }, label);
+  }
+});
+
+test('the probe route forwards a named profile and returns its classification', async () => {
+  const calls: Array<string | undefined> = [];
+  const panelSource = probeSource(async (profile) => {
+    calls.push(profile);
+    return { ok: false, status: 'auth-failed', latencyMs: 31, profile: profile ?? null, httpStatus: 401, detail: 'the gateway rejected the API key' };
+  });
+  const answer = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, '{"profile":"secondary"}'));
+  assert.deepEqual(calls, ['secondary']);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(answer.body, {
+    ok: false,
+    status: 'auth-failed',
+    latencyMs: 31,
+    profile: 'secondary',
+    httpStatus: 401,
+    detail: 'the gateway rejected the API key'
+  });
+});
+
+test('the probe route refuses malformed bodies instead of guessing', async () => {
+  const calls: string[] = [];
+  const panelSource = probeSource(async (profile) => {
+    calls.push(String(profile));
+    return { ok: true, status: 'ok', latencyMs: 1, profile: profile ?? null };
+  });
+  for (const [body, status, error] of [
+    ['{not json', 400, 'bad-json'],
+    ['[]', 400, 'bad-body'],
+    ['"primary"', 400, 'bad-body'],
+    ['{"profile":42}', 400, 'bad-profile']
+  ] as const) {
+    const answer = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, body));
+    assert.equal(answer.status, status, body);
+    assert.equal((answer.body as { error?: string }).error, error, body);
+  }
+  assert.deepEqual(calls, [], 'no probe ran for an invalid body');
+});
+
+test('the probe route answers 501 when the host cannot probe', async () => {
+  const panelSource: PanelSource = { snapshot: () => buildPanelSnapshot(facts(1)), clearLedger: () => 0, allows: () => true };
+  const answer = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, '{}'));
+  assert.equal(answer.status, 501);
+  assert.equal((answer.body as { error?: string }).error, 'not-probeable');
+});
+
+test('a probe that throws becomes a classified failure, not a 500', async () => {
+  const panelSource = probeSource(async () => {
+    throw new Error(`boom with Bearer ${SECRET}`);
+  });
+  const answer = await answerPanelRequestAsync(panelSource, requestJson('POST', PANEL_ROUTES.systemOneTest, '{"profile":"primary"}'));
+  assert.equal(answer.status, 200, 'a row must still render');
+  const body = answer.body as { ok: boolean; status: string; detail?: string };
+  assert.equal(body.ok, false);
+  assert.equal(body.status, 'bad-response');
+  assert.equal(JSON.stringify(body).includes(SECRET), false, 'a thrown message is redacted at the boundary too');
+});

@@ -939,6 +939,22 @@ function backendSignature(config: ResolvedReflexConfig): string {
     systemOne.model ?? '',
     systemOne.apiKeyEnv ?? '',
     systemOne.timeoutMs ?? null,
+    // g-057: switching the active profile (or editing any profile's connection
+    // facts) must rebuild the backend, otherwise the panel would report a new
+    // profile as active while the running transport still served the old one.
+    // The *keys* are represented by presence only: a signature is a diagnostic
+    // value, and a rotated key must not change what an edited profile is
+    // observed to be — but a profile that gained or lost a key must.
+    systemOne.active ?? '',
+    Object.entries(systemOne.profiles ?? {}).map(([name, profile]) => [
+      name,
+      profile.baseUrl ?? '',
+      profile.model ?? '',
+      profile.apiKeyEnv ?? '',
+      profile.timeoutMs ?? null,
+      profile.backend ?? '',
+      profile.apiKey === undefined ? '' : 'set'
+    ]),
     interventions.pruneJudgeMinChars
   ]);
 }
