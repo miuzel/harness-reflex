@@ -459,28 +459,65 @@ test('isContinuationReply separates replies that add nothing from turns that nam
   }
 });
 
-test('a continuation borrows recent turns; a new instruction never does', () => {
+test('every turn is graded with the recent turns, not only a continuation reply', () => {
   const history = [{ text: DEEP_TURN }];
   const continuation = composeEffortDecisionInput('继续', history);
   assert.equal(continuation.contextTurns, 1);
   assert.equal(continuation.contextChars, DEEP_TURN.length);
   assert.equal(continuation.text, `${DEEP_TURN}\n继续`, 'the context is prepended to the reply');
 
-  // The whole point of the split: an instruction is graded on its own text, so
-  // its level cannot be borrowed from a deep turn earlier in the session.
+  // g-063: the split is gone. A *new* instruction is short just as often as a
+  // reply is — "改成这样" names work the previous turns are already doing — so
+  // it is graded against them too instead of on its own few characters.
   const fresh = composeEffortDecisionInput('implement the config endpoint', history);
-  assert.equal(fresh.text, 'implement the config endpoint');
-  assert.equal(fresh.contextChars, 0);
-  assert.equal(fresh.contextTurns, 0);
+  assert.equal(fresh.contextTurns, 1, 'a new instruction sees the earlier turns');
+  assert.equal(fresh.contextChars, DEEP_TURN.length);
+  assert.equal(
+    fresh.text,
+    `${DEEP_TURN}\nimplement the config endpoint`,
+    'the earlier turns are context for this turn, in reading order'
+  );
 });
 
-test('a continuation with no earlier turn degrades to the existing behaviour', () => {
+test('a session with no earlier turn grades the turn alone, without an empty prefix', () => {
   for (const history of [[], [{ text: '继续' }], [{ text: '  ' }]]) {
     const input = composeEffortDecisionInput('继续', history);
     assert.equal(input.text, '继续', 'nothing is invented and the reply grades alone');
     assert.equal(input.contextChars, 0);
     assert.equal(input.contextTurns, 0);
+    assert.equal(input.previousLevel, undefined, 'a first decision has no prior to state');
   }
+});
+
+test('the decision input names the previous level on a line of its own (g-063)', () => {
+  const withoutHistory = composeEffortDecisionInput('继续', [], 'high');
+  assert.equal(withoutHistory.text, `[previous level: high]\n继续`, 'the prior opens the input');
+  assert.equal(withoutHistory.previousLevel, 'high');
+  assert.equal(withoutHistory.contextTurns, 0, 'a prior is not a borrowed turn');
+
+  // With history the order is: prior, the turns, this turn.
+  const withHistory = composeEffortDecisionInput('继续', [{ text: DEEP_TURN }], 'medium');
+  assert.equal(withHistory.text, `[previous level: medium]\n${DEEP_TURN}\n继续`);
+  assert.equal(withHistory.contextChars, DEEP_TURN.length, 'only real turns count as context');
+  assert.equal(withHistory.contextTurns, 1);
+
+  // The prior is stated, never invented: an empty or blank level adds no line.
+  for (const level of [undefined, '', '   ']) {
+    const input = composeEffortDecisionInput('继续', [], level);
+    assert.equal(input.text, '继续');
+    assert.equal(input.previousLevel, undefined);
+  }
+});
+
+test('the previous level is weighed, not obeyed: the prompt says so', () => {
+  const withPrior = buildEffortChoice(composeEffortDecisionInput('继续', [], 'high').text, readEffortCues('继续'));
+  assert.match(String(withPrior.context), /\[previous level: …\]/u, 'the prompt explains the leading line');
+  assert.match(String(withPrior.context), /do not copy it/u, 'the prior is context, not the answer');
+
+  // A turn graded without a prior keeps the exact prompt shape it had before, so
+  // no deployment that never had one starts seeing a new instruction.
+  const withoutPrior = buildEffortChoice('implement the config endpoint', readEffortCues('implement the config endpoint'));
+  assert.equal(withoutPrior.context, undefined);
 });
 
 test('long history is cut from the newest end and never exceeds the context budget', () => {
@@ -492,9 +529,14 @@ test('long history is cut from the newest end and never exceeds the context budg
   assert.match(input.text, /5:/u, 'the newest turn is kept');
   assert.doesNotMatch(input.text, /0:/u, 'the oldest turn is what goes first');
 
-  // One turn larger than the whole budget contributes its tail, not its head.
+  // One turn larger than the whole budget contributes its tail, not its head —
+  // for a continuation and for a new instruction alike (g-063).
   const huge = { text: `HEAD${'y'.repeat(EFFORT_CONTEXT_CHARS)}TAIL` };
   const clipped = composeEffortDecisionInput('继续', [huge]);
+  const clippedInstruction = composeEffortDecisionInput('implement the config endpoint', [huge]);
+  assert.ok(clippedInstruction.contextChars <= EFFORT_CONTEXT_CHARS);
+  assert.match(clippedInstruction.text, /TAIL/u);
+  assert.doesNotMatch(clippedInstruction.text, /HEAD/u);
   assert.ok(clipped.contextChars <= EFFORT_CONTEXT_CHARS);
   assert.match(clipped.text, /TAIL/u);
   assert.doesNotMatch(clipped.text, /HEAD/u);
@@ -540,10 +582,93 @@ test('the target scenario decides deep, and the status shows the context it used
 
   const entries = ledger.getEntries().filter((entry) => entry.type === 'effort-decision');
   assert.equal(entries.length, 2);
-  assert.equal(entries[0].details?.contextChars, undefined, 'a new instruction audits no borrowed context');
+  assert.equal(entries[0].details?.contextChars, undefined, 'the session had no earlier turn to show');
   assert.equal(entries[1].details?.contextChars, DEEP_TURN.length, 'the ledger shows the context actually used');
   assert.equal(entries[1].details?.contextTurns, 1);
   assert.match(String(continued.status?.line), /system-one/u);
+});
+
+/** A recorder standing in for System 1: it answers `high` and keeps every question. */
+function recordingDecider(): {
+  decide: (request: { question?: string; context?: string }) => Promise<ChoiceResponse>;
+  asked: { question?: string; context?: string }[];
+} {
+  const asked: { question?: string; context?: string }[] = [];
+  return {
+    asked,
+    decide: async (request) => {
+      asked.push({ question: request.question, context: request.context });
+      return answer('high deep reasoning', 0.95);
+    }
+  };
+}
+
+test('what System 1 is actually sent carries the history, the prior and this turn (g-063)', async () => {
+  const recorder = recordingDecider();
+  const effort = new EffortInterceptor({
+    setting: 'reflex',
+    decide: recorder.decide,
+    backendName: 'recording',
+    now: () => 0
+  });
+
+  // 1. A reply that only says "继续": the question it is asked must contain the
+  //    work being continued, or the backend grades two characters.
+  await effort.resolve(context({ requested: 'reflex', task: '继续', turn: 2, history: [{ text: DEEP_TURN }] }));
+  assert.equal(recorder.asked.length, 1);
+  assert.ok(recorder.asked[0]!.question?.includes(DEEP_TURN), `the reply was asked without its history: ${recorder.asked[0]!.question}`);
+
+  // 2. A brand-new instruction in a session that already did hard work: the
+  //    history is still sent. This is the semantic change — it used to be dropped.
+  await effort.resolve(
+    context({ requested: 'reflex', task: 'implement the config endpoint', turn: 3, history: [{ text: DEEP_TURN }] })
+  );
+  const second = recorder.asked[1]!.question ?? '';
+  assert.ok(second.includes(DEEP_TURN), `a new instruction was graded in isolation: ${second}`);
+  assert.ok(second.includes('implement the config endpoint'), 'the turn itself is still part of the question');
+
+  // 3. The previous level reaches System 1 as its own structured line, and the
+  //    prompt tells the backend how to read it.
+  await effort.resolve(
+    context({ requested: 'reflex', task: '继续', turn: 4, history: [{ text: DEEP_TURN }], previousLevel: 'medium' })
+  );
+  const third = recorder.asked[2]!;
+  assert.ok(
+    third.question?.startsWith('[previous level: medium]'),
+    `the prior is not in the decision input: ${third.question}`
+  );
+  assert.match(String(third.context), /\[previous level: …\]/u, 'the prompt does not explain the prior');
+});
+
+test('a turn with no history and no prior is sent exactly as it was before (g-063)', async () => {
+  const recorder = recordingDecider();
+  const effort = new EffortInterceptor({ setting: 'reflex', decide: recorder.decide, backendName: 'recording', now: () => 0 });
+  await effort.resolve(context({ requested: 'reflex', task: DEEP_TURN, turn: 1 }));
+  // No empty prefix line, no invented context: the cold-start shape is unchanged.
+  assert.equal(recorder.asked[0]!.question, DEEP_TURN);
+  assert.doesNotMatch(String(recorder.asked[0]!.context), /previous level/u, 'a cold turn has no prior line to explain');
+  const [entry] = new DecisionLedger(null).getEntries();
+  assert.equal(entry, undefined, 'the cold turn produced no entry');
+});
+
+test('the audit names the previous level the decision was given (g-063)', async () => {
+  const ledger = new DecisionLedger(null);
+  const effort = new EffortInterceptor({
+    setting: 'reflex',
+    decide: (request) => new MockDecisionBackend().choice(request),
+    backendName: 'mock',
+    ledger,
+    now: () => 0
+  });
+
+  await effort.resolve(context({ requested: 'reflex', task: DEEP_TURN, turn: 1 }));
+  await effort.resolve(context({ requested: 'reflex', task: '继续', turn: 2, history: [{ text: DEEP_TURN }], previousLevel: 'high' }));
+
+  const entries = ledger.getEntries().filter((entry) => entry.type === 'effort-decision');
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0]!.details?.previousLevel, undefined, 'a first decision has no prior to audit');
+  assert.equal(entries[1]!.details?.previousLevel, 'high', 'the ledger shows the prior the decision saw');
+  assert.equal(entries[1]!.details?.contextTurns, 1, 'and the history it was graded with');
 });
 
 test('a pinned level still bypasses the continuation path entirely', async () => {

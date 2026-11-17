@@ -46,8 +46,14 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * at its own bound. It fails identically on the g-057 merge commit this branch
  * was cut from, so it is an environment fact rather than a regression — and it
  * is the reason this floor is the pass count, not the total.
+ *
+ * g-063 moved the pass count 659 → 668: it added 13 tests (3 same-turn reuse,
+ * 3 effort-routing, 7 effort-input) and retired 4 that pinned the old contract —
+ * a new instruction was "never graded against earlier turns", which is exactly
+ * what the goal changed. The replacements assert the new contract, so the net is
+ * +9 rather than a silent loss.
  */
-const EXPECTED_TESTS = 672;
+const EXPECTED_TESTS = 681;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -1142,6 +1148,35 @@ const MUTATIONS = [
     file: 'src/client/view.ts',
     from: "    { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' },",
     to: "    { style: S.card, 'data-reflex-folded': 'open' },"
+  },
+  {
+    // g-063 B: the earlier turns are what makes a short prompt decidable. Dropping
+    // them from the composed input is the "grade the few characters alone"
+    // behaviour the goal removes, and it must never reach a backend again.
+    name: 'decision-input-drops-the-earlier-turns',
+    area: 'every decision input carries the recent turns',
+    file: 'src/effort.ts',
+    from: '  const parts = [formatPreviousLevelLine(fromState), context, task].filter((part) => part.length > 0);',
+    to: '  const parts = [formatPreviousLevelLine(fromState), task].filter((part) => part.length > 0);'
+  },
+  {
+    // g-063 B: the previous level is the one piece of state the decision is told
+    // about. Never handing it over makes `lastAdaptiveEffort` write-only again.
+    name: 'previous-level-never-reaches-the-decision',
+    area: 'the previous level is part of the decision input',
+    file: 'src/routing.ts',
+    from: '    ...(remembered?.lastAdaptiveEffort ? { previousLevel: remembered.lastAdaptiveEffort } : {}),',
+    to: '    ...(undefined && remembered?.lastAdaptiveEffort ? { previousLevel: remembered.lastAdaptiveEffort } : {}),'
+  },
+  {
+    // g-063 A: a later step of the same turn replays the turn's decision. Asking
+    // again whenever a step carries text is the per-step re-decision this goal
+    // removes, and it makes one turn oscillate between levels.
+    name: 'later-step-of-a-turn-decides-again',
+    area: 'a turn is decided once, whatever its later steps carry',
+    file: 'src/routing.ts',
+    from: '    remembered.decided.turn === input.turn &&\n    // A config-only save',
+    to: '    remembered.decided.turn === input.turn &&\n    task === undefined &&\n    // A config-only save'
   }
 ];
 
@@ -1344,11 +1379,20 @@ if (!baselineGreen) {
     // the report keeps them apart so the split stays visible. The environment
     // failures excused from the baseline are excused here too — they fail under
     // every fault as well, and counting them would mark every fault "caught".
+    //
+    // `stage` is the *way* a fault was caught; `undefined` means it was not.
+    // A timed-out suite counts as caught — the fault made the suite hang, which
+    // is a reaction — but it must arrive as its own label. It used to share the
+    // `undefined` branch with "the suite passed", so a timeout was reported as
+    // SURVIVED: the exact opposite of the line right above it, and a false alarm
+    // on a fault that is genuinely caught whenever the suite fits its budget.
     const stage = !built
       ? 'build'
-      : outcome.ok || outcome.timedOut || greenApartFromEnvironment(outcome, outcome.executed)
-        ? undefined
-        : 'tests';
+      : outcome.timedOut
+        ? 'timeout'
+        : outcome.ok || greenApartFromEnvironment(outcome, outcome.executed)
+          ? undefined
+          : 'tests';
     if (built && outcome.timedOut) {
       announce(`[${index}/${MUTATIONS.length}] ${mutation.name}: the suite TIMED OUT after ${COMMAND_TIMEOUT_MS}ms`);
     }

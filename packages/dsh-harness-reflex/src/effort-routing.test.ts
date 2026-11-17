@@ -151,7 +151,7 @@ test('the auto alias decides exactly like reflex', async () => {
   }
 });
 
-test('two turns of one agent are decided independently', async () => {
+test('each turn of one agent gets its own decision, with the previous one as its prior', async () => {
   const host = await createReflexHost(ADAPTIVE);
   try {
     registerPhysicalAdapter(host.ctx, 'deepseek', { models: ['reasoner'], reasoningEfforts: ['off', 'low', 'high'] });
@@ -169,8 +169,20 @@ test('two turns of one agent are decided independently', async () => {
     });
 
     assert.equal(deep.reasoningEffort, 'high', 'a hard turn buys thinking');
-    assert.equal(trivial.reasoningEffort, 'off', 'a turn that asks nothing stops buying it');
-    assert.equal(host.runtime.effortStatus('session-turns')?.level, 'off', 'the status follows the latest turn');
+    // g-063: turn 2 is no longer graded as if it were turn 1 of a fresh session.
+    // It is graded with turn 1's text and turn 1's level in front of it, and
+    // "thanks" after a design task keeps the depth the session is working at —
+    // the exact complaint the change is for ("thanks" is not a smaller task, the
+    // session it closes is a hard one).
+    assert.equal(trivial.reasoningEffort, 'high', 'a short turn continues the depth of the session it belongs to');
+    assert.equal(host.runtime.effortStatus('session-turns')?.level, 'high', 'the status follows the latest turn');
+
+    // What changed is the *evidence*, and the ledger has to show it: turn 2 saw
+    // turn 1's text and the level turn 1 settled on.
+    const entries = decisionsOf(host, 'session-turns');
+    assert.equal(entries.length, 2);
+    assert.equal(entries[1].details?.contextTurns, 1, 'turn 2 was graded with turn 1 in front of it');
+    assert.equal(entries[1].details?.previousLevel, 'high', 'turn 2 was told the level turn 1 produced');
   } finally {
     await host.dispose();
   }
@@ -525,6 +537,30 @@ function decisionsOf(host: { runtime: { ledger: { getEntries(): Array<Record<str
     .filter((entry) => entry.type === 'effort-decision' && entry.details?.agentId === agentId);
 }
 
+/**
+ * Count System One calls the way the effort layer makes them.
+ *
+ * The local mock backend is pure computation with no telemetry of its own, so the
+ * seam is its `choice` method — the one place `EffortInterceptor` dispatches
+ * through (`bridge.ts`: `decide: (request) => this.backend.choice(request)`).
+ * Counting it, rather than a ledger entry, is what distinguishes "System 1 was
+ * asked again and happened to answer the same" from "System 1 was never asked".
+ *
+ * @param host - the activation under test, which must be running `backend: 'mock'`.
+ * @returns the running count, read on every call.
+ */
+function countSystemOneCalls(host: { runtime: { backend: { name: string; choice?: unknown } } }): () => number {
+  const backend = host.runtime.backend as { name: string; choice: (...args: never[]) => unknown };
+  assert.equal(backend.name, 'mock-heuristic-v1', 'the counter instruments the local mock backend');
+  const original = backend.choice;
+  let calls = 0;
+  backend.choice = function patched(this: unknown, ...args: never[]): unknown {
+    calls++;
+    return original.apply(this, args);
+  };
+  return () => calls;
+}
+
 test('a continuation reply after a deep turn keeps the deep level and audits the context it used', async () => {
   const host = await createReflexHost(ADAPTIVE);
   try {
@@ -578,7 +614,7 @@ test('a session whose first turn is a continuation borrows nothing', async () =>
   }
 });
 
-test('a new instruction is never graded against earlier turns', async () => {
+test('a new instruction is graded with the earlier turns too (g-063)', async () => {
   const host = await createReflexHost(ADAPTIVE);
   try {
     registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
@@ -593,17 +629,21 @@ test('a new instruction is never graded against earlier turns', async () => {
       });
 
     await request(withHistory, 1, TASK_DEEP);
-    const afterDeep = await request(withHistory, 2, TASK_INSTRUCTION);
-    // The same task as the first turn of a session: the baseline it must match.
+    await request(withHistory, 2, TASK_INSTRUCTION);
+    // The same task as the first turn of a session — what used to be the answer
+    // this turn had to match. g-063 deliberately breaks that equivalence: a new
+    // instruction inside a hard session is not the same turn as a cold one.
     const cold = await request(coldSession, 1, TASK_INSTRUCTION);
+    assert.equal(cold.reasoningEffort, 'low', 'graded alone, a small instruction asks for little');
 
     const entries = decisionsOf(host, 'session-new-instruction');
-    assert.equal(entries[1].details?.contextChars, undefined, 'it borrows nothing from the deep turn');
     assert.equal(
-      afterDeep.reasoningEffort,
-      cold.reasoningEffort,
-      'it decides exactly as it would in a session with no history at all'
+      entries[1].details?.contextTurns,
+      1,
+      'the new instruction was graded with the earlier turn in front of it'
     );
+    assert.equal(entries[1].details?.contextChars, TASK_DEEP.length, 'and the ledger shows how much text that was');
+    assert.equal(entries[1].details?.previousLevel, 'high', 'and the level the previous turn produced');
   } finally {
     await host.dispose();
   }
@@ -632,6 +672,56 @@ test('a repeated continuation keeps one fixed context window instead of growing'
     assert.equal(entries.length, 4);
     const sizes = entries.slice(1).map((entry) => entry.details?.contextChars);
     assert.deepEqual(sizes, [TASK_DEEP.length, TASK_DEEP.length, TASK_DEEP.length], 'the window does not grow with each reply');
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a later step that carries text still reuses its turn decision (g-063)', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-steps-with-text' });
+
+    // Turn 1, step 1 carries the instruction; the turn is decided here.
+    const step1 = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      step: 1,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(step1.reasoningEffort, 'high');
+
+    // Turn 1, step 2 arrives *with* text — the shape `agent/pre-step` reports
+    // whenever a step is re-proposed with the same user message still in hand.
+    // It used to re-ask System 1 (`stepHasText !== true` gated the reuse), buying
+    // a second, possibly different, answer for a turn already decided. A turn is
+    // the unit the user asked about; every later step of it replays the decision.
+    const step2 = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      step: 2,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(step2.reasoningEffort, step1.reasoningEffort, 'the same turn keeps the level it decided');
+    assert.equal(
+      decisionsOf(host, 'session-steps-with-text').length,
+      1,
+      'one decision per turn, whether or not its later steps carry text'
+    );
+
+    // A different turn is still decided on its own: the reuse is same-turn only.
+    const nextTurn = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_INSTRUCTION,
+      turn: 2,
+      step: 1,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(decisionsOf(host, 'session-steps-with-text').length, 2, 'a new turn is decided again');
+    // ...with the previous turn as its prior, which the audit records.
+    const entries = decisionsOf(host, 'session-steps-with-text');
+    assert.equal(entries[1].details?.previousLevel, step1.reasoningEffort);
+    assert.equal(nextTurn.reasoningEffort, 'high', 'and it is graded with that prior in front of it');
   } finally {
     await host.dispose();
   }
@@ -666,6 +756,144 @@ test('a later step of the continuation turn reuses its decision and re-asks noth
       2,
       'one decision per turn: the continuation turn is decided once and reused by its later steps'
     );
+  } finally {
+    await host.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// g-063: the turn is the unit of decision — a later step carrying new user text
+// is still the same turn and still reuses the turn's decision.
+// ---------------------------------------------------------------------------
+
+test('a later step of the same turn reuses the decision even when it carries user text', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-same-turn-text' });
+    const systemOneCalls = countSystemOneCalls(host);
+
+    const firstStep = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 7,
+      step: 1,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(systemOneCalls(), 1, 'the turn decides once, on its first step');
+
+    // The step that used to break the reuse: a real user instruction, not an
+    // empty continuation. Under g-063 its text is part of the same turn.
+    const laterStep = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_INSTRUCTION,
+      turn: 7,
+      step: 2,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+
+    assert.equal(systemOneCalls(), 1, 'System 1 is not asked a second time inside the turn');
+    assert.equal(laterStep.reasoningEffort, firstStep.reasoningEffort, 'the later step keeps the turn level');
+    const entries = decisionsOf(host, 'session-same-turn-text');
+    assert.equal(entries.length, 1, 'one effort ledger entry for the whole turn');
+    assert.equal(entries[0].details?.turn, 7, 'and it is the turn’s first step that recorded it');
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('a new turn decides again, so the same-turn reuse is not "never re-decide"', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-new-turn-decides' });
+    const systemOneCalls = countSystemOneCalls(host);
+
+    const request = (turn: number, step: number, task: string) =>
+      dispatchAgentRequest(host.ctx, agent, {
+        task,
+        turn,
+        step,
+        selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+      });
+
+    const firstStep = await request(7, 1, TASK_DEEP);
+    assert.equal(systemOneCalls(), 1);
+
+    // Negative control: identical messages, identical step, only the turn moved.
+    const nextTurn = await request(8, 1, TASK_DEEP);
+
+    assert.equal(systemOneCalls(), 2, 'a new turn asks System 1 again');
+    assert.equal(
+      decisionsOf(host, 'session-new-turn-decides').length,
+      2,
+      'and records a decision of its own instead of replaying the earlier turn'
+    );
+    assert.equal(nextTurn.reasoningEffort, firstStep.reasoningEffort, 'the same task still lands on the same level');
+  } finally {
+    await host.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// g-063 part B: the previous level is *in the text System 1 is sent*, through
+// the real waterfall — not merely a field carried alongside it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture the `ChoiceRequest` objects the mounted plugin really builds.
+ *
+ * The unit tests assert on the `decide` seam, which proves the composer produced
+ * the prefix; this one takes the request object at the last edge before the
+ * backend and asserts on `question`/`context` as the backend would see them, so
+ * a prefix that was composed and then dropped on the way cannot pass.
+ *
+ * @param host - the activation under test, running `backend: 'mock'`.
+ * @returns the captured requests, in dispatch order.
+ */
+function captureSystemOneRequests(host: { runtime: { backend: { choice: (...args: never[]) => unknown } } }): Array<{
+  question?: string;
+  context?: string;
+}> {
+  const backend = host.runtime.backend as { choice: (...args: never[]) => unknown };
+  const sent: Array<{ question?: string; context?: string }> = [];
+  const original = backend.choice;
+  backend.choice = function patched(this: unknown, request: { question?: string; context?: string }): unknown {
+    sent.push({ question: request.question, context: request.context });
+    return original.call(this, request as never);
+  };
+  return sent;
+}
+
+test('the previous level is inside the text System 1 is sent, across the real waterfall', async () => {
+  const host = await createReflexHost(ADAPTIVE);
+  try {
+    registerPhysicalAdapter(host.ctx, 'deepseek', THINKING);
+    const agent = fakeAgent({ id: 'session-prior-in-prompt' });
+    const sent = captureSystemOneRequests(host);
+
+    // Turn 1: a deep task, decided on its own text — no prior exists yet.
+    const deep = await dispatchAgentRequest(host.ctx, agent, {
+      task: TASK_DEEP,
+      turn: 1,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(sent.length, 1);
+    assert.doesNotMatch(String(sent[0]!.question), /previous level/u, 'the first decision has no prior to be told about');
+
+    // Turn 2: a bare "继续". The level turn 1 produced must be in the question.
+    await dispatchAgentRequest(host.ctx, agent, {
+      task: '继续',
+      turn: 2,
+      selection: { provider: 'reflex', model: 'reflex-auto', reasoningEffort: effort('reflex') }
+    });
+    assert.equal(sent.length, 2);
+    const question = String(sent[1]!.question);
+    assert.equal(deep.reasoningEffort, 'high', 'turn 1 landed on high, so that is the prior turn 2 must see');
+    assert.ok(
+      question.startsWith('[previous level: high]'),
+      `the prior is not in the question the backend is asked: ${question}`
+    );
+    assert.ok(question.includes(TASK_DEEP), 'the work being continued is in the question too');
+    assert.match(String(sent[1]!.context), /\[previous level: …\]/u, 'and the prompt explains that the line is a hint, not the answer');
   } finally {
     await host.dispose();
   }

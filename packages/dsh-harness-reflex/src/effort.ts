@@ -172,13 +172,23 @@ export interface EffortRequestContext {
   /**
    * Task text of earlier turns of this agent, oldest first.
    *
-   * Consulted only when this turn is a continuation reply (see
-   * {@link isContinuationReply}), and only through {@link composeEffortDecisionInput},
-   * so this cannot change how a new instruction is graded. The caller supplies
+   * Always consulted, inside the fixed window, through
+   * {@link composeEffortDecisionInput} (g-063): a short prompt can continue a
+   * large task, and a short new instruction can name hard work, so grading text
+   * in isolation answers a question the user did not ask. The caller supplies
    * observed turn text — never a session-log structure — keeping routing's ban on
    * depending on the session module's internals intact.
    */
   history?: readonly EffortContextTurn[];
+  /**
+   * The level the previous decision produced for this agent (g-063).
+   *
+   * Read from the routing layer's own `lastAdaptiveEffort` fact, which existed
+   * since g-056 to recognise a header echo but never reached a decision. It is a
+   * prior, not an answer: {@link composeEffortDecisionInput} puts it on the
+   * decision input's opening line, and the prompt says it is to be weighed.
+   */
+  previousLevel?: string;
   agent?: EffortAgentFacts;
   turn?: number;
   step?: number;
@@ -257,6 +267,11 @@ export interface ReflexEffortStatus {
   contextChars?: number;
   /** How many earlier turns that context came from, at most `EFFORT_CONTEXT_TURNS`. */
   contextTurns?: number;
+  /**
+   * The level the previous decision produced, when this decision was told it
+   * (g-063). Absent on a session's first decision and after the prior aged out.
+   */
+  previousLevel?: string;
 }
 
 /** Whether a value is the adaptive trigger marker. */
@@ -778,34 +793,68 @@ export interface EffortContextTurn {
 }
 
 /**
+ * The previous level prefix, as it appears in the decision input.
+ *
+ * A structured first line rather than a sentence: System 1 is asked which level
+ * a turn needs, and the level it chose last turn is a *prior* on that answer,
+ * not part of the task. Keeping it on its own line lets the prompt say so, and
+ * lets a test assert on it without parsing prose. English on both sides of the
+ * page for the same reason the cue vocabulary is: it is read by a backend, not
+ * by a user.
+ */
+export const EFFORT_PREVIOUS_LEVEL_PREFIX = '[previous level:';
+
+/**
+ * Render the previous level as the decision input's opening line.
+ * @param level - the level the previous decision produced.
+ * @returns e.g. `[previous level: high]`; empty when there was no previous decision.
+ */
+export function formatPreviousLevelLine(level: string | undefined): string {
+  const value = (level ?? '').trim();
+  return value.length === 0 ? '' : `${EFFORT_PREVIOUS_LEVEL_PREFIX} ${value}]`;
+}
+
+/**
  * Compose the text one adaptive decision is graded on.
  *
- * For a new instruction the turn text is the whole input, exactly as before —
- * the history of the session says nothing about how hard *this* turn is. For a
- * continuation reply the earlier turns are prepended, so the level follows the
- * work being continued instead of the two characters that agreed to it.
+ * **Every turn is graded on three things, in this order** (g-063):
+ *
+ * 1. the previous level, as a one-line prefix — what the last decision chose;
+ * 2. the recent turns, inside the same window as before;
+ * 3. this turn's own text, last.
+ *
+ * It used to be the other way round: a continuation reply ("继续", "同意") got the
+ * history and every other turn got only its own text. That split was wrong for
+ * the reason the continuation path was introduced for. A short prompt is not
+ * the same thing as a small task — "继续" may be continuing a migration — and a
+ * *new* instruction can be just as short ("改成这样") while the work it names is
+ * everything the session has been doing. Grading text in isolation therefore
+ * answers a question the user did not ask, whichever branch it happens in.
+ *
+ * The history is cut from its **end**: the most recent turns are the ones being
+ * continued, so when the window overflows the oldest text is what goes first.
  *
  * Every part goes through {@link cleanEffortTaskText}: the history carries the
  * same architecture/proof vocabulary the current turn does, and it is exactly
  * that vocabulary that P9 showed must not leak into a decision as a raw keyword.
  *
- * The history is cut from its **end**: the most recent turns are the ones being
- * continued, so when the window overflows the oldest text is what goes first.
- *
  * @param task - the current turn input.
  * @param history - earlier turns of this session, oldest first.
- * @returns the text to grade, and how much history was actually used.
+ * @param previousLevel - the level the previous decision produced, when known.
+ * @returns the text to grade, and how much history and state were actually used.
  */
 export function composeEffortDecisionInput(
   task: string,
-  history: readonly EffortContextTurn[] = []
-): { text: string; contextChars: number; contextTurns: number } {
-  if (!isContinuationReply(task)) return { text: task, contextChars: 0, contextTurns: 0 };
+  history: readonly EffortContextTurn[] = [],
+  previousLevel?: string
+): { text: string; contextChars: number; contextTurns: number; previousLevel?: string } {
+  const earlier = (level: string): string => (level.trim().length === 0 ? '' : level.trim());
+  const fromState = earlier(previousLevel ?? '');
 
   // The current turn is already recorded in the history by the time it is
   // decided (`agent/pre-step` runs first), so it is dropped here: a session's
-  // first turn being "继续" must borrow nothing, or the reply would become its
-  // own context and the window would say it used one turn of history.
+  // own text must not be counted as its history, or the window would say it
+  // used a turn that says nothing new.
   const current = cleanEffortTaskText(task).text;
   // Newest first, bounded by the turn window, then joined oldest-first inside
   // the window so the reading order matches the session's own.
@@ -814,7 +863,6 @@ export function composeEffortDecisionInput(
     .filter((text) => text.length > 0 && text !== current)
     .slice(-EFFORT_CONTEXT_TURNS)
     .reverse();
-  if (recent.length === 0) return { text: task, contextChars: 0, contextTurns: 0 };
 
   const kept: string[] = [];
   let budget = EFFORT_CONTEXT_CHARS;
@@ -826,11 +874,15 @@ export function composeEffortDecisionInput(
     kept.push(slice);
     budget -= slice.length + 1; // +1 for the newline joining it to the next entry
   }
-  if (kept.length === 0) return { text: task, contextChars: 0, contextTurns: 0 };
-
   const context = kept.reverse().join('\n');
-  const text = `${context}\n${current}`;
-  return { text, contextChars: context.length, contextTurns: kept.length };
+
+  const parts = [formatPreviousLevelLine(fromState), context, task].filter((part) => part.length > 0);
+  return {
+    text: parts.join('\n'),
+    contextChars: context.length,
+    contextTurns: kept.length,
+    ...(fromState.length === 0 ? {} : { previousLevel: fromState })
+  };
 }
 
 /** One tier's vote. */
@@ -912,6 +964,13 @@ export function classifyByCues(
  * handed a keyword-scoring backend the exact words the cleanup had just removed
  * — the second half of the P9 regression.
  *
+ * g-063 adds a second neutral clause, and only when the input really opens with
+ * the previous level (see {@link composeEffortDecisionInput}): the line says the
+ * prior is there to be *considered*, and that a short reply to a larger task, or
+ * a new instruction inside a hard session, keeps the depth the session needs.
+ * Without that clause a text-reading backend can read `[previous level: high]`
+ * as the answer instead of as a hint.
+ *
  * @param task - the turn input captured before the request.
  * @param cues - its cue words (already cleaned).
  * @param efforts - effort ids the routed model declares; omitted keeps the whole ladder.
@@ -934,11 +993,30 @@ export function buildEffortChoice(task: string, cues: EffortCues, efforts?: read
     context = 'the routed model offers a bounded set of reasoning levels; choose the one this turn needs';
   }
 
+  const clauses: string[] = [];
+  if (context !== undefined) clauses.push(context);
+  // The prefix line is judged, not obeyed: today's text is the task, the earlier
+  // turns and the previous level are only context for it.
+  if (hasPreviousLevelPrefix(cleaned.text) || hasPreviousLevelPrefix(task)) {
+    clauses.push(
+      'a leading [previous level: …] line is the level the last decision produced; weigh it with the task, do not copy it — a short reply or a short new instruction can still continue hard work'
+    );
+  }
+
   return {
     question,
     options,
-    ...(context === undefined ? {} : { context })
+    ...(clauses.length === 0 ? {} : { context: clauses.join('; ') })
   };
+}
+
+/**
+ * Whether a decision input opens with the previous-level line.
+ * @param text - the composed decision input.
+ * @returns whether the structured prefix is present.
+ */
+export function hasPreviousLevelPrefix(text: string): boolean {
+  return text.trimStart().startsWith(EFFORT_PREVIOUS_LEVEL_PREFIX);
 }
 
 /**
@@ -1156,10 +1234,10 @@ export class EffortInterceptor {
   async #decideTurn(trigger: EffortTriggerKind, context: EffortRequestContext): Promise<EffortResolution> {
     const task = context.task ?? '';
     const started = this.#now();
-    // A continuation reply ("继续", "同意") adds no task of its own, so it is
-    // graded together with the turns it continues; every other turn is graded on
-    // its own text, exactly as before (g-053).
-    const decisionInput = composeEffortDecisionInput(task, context.history);
+    // Every turn is graded on the previous level, the recent turns and its own
+    // text together (g-063). g-053 graded only continuation replies this way,
+    // which left a short *new* instruction ("改成这样") as undecided as "继续".
+    const decisionInput = composeEffortDecisionInput(task, context.history, context.previousLevel);
     const graded = decisionInput.text;
     const support = await resolveSupport(context);
     const efforts = support.kind === 'declared' ? [...support.efforts] : undefined;
@@ -1308,7 +1386,10 @@ export class EffortInterceptor {
           ...(status.step === undefined ? {} : { step: status.step }),
           // g-053: the ledger has to show *that* earlier context was used, not
           // just the level that came out of it.
-          ...(status.contextChars === undefined ? {} : { contextChars: status.contextChars, contextTurns: status.contextTurns })
+          ...(status.contextChars === undefined ? {} : { contextChars: status.contextChars, contextTurns: status.contextTurns }),
+          // g-063: the previous level is part of the evidence, so the ledger has
+          // to name the prior the decision was given, not only the text it saw.
+          ...(status.previousLevel === undefined ? {} : { previousLevel: status.previousLevel })
         }
       });
     } catch {
@@ -1372,7 +1453,7 @@ function buildEffortStatus(
   trigger: EffortTriggerKind,
   context: EffortRequestContext,
   support?: ReasoningSupport,
-  decisionInput?: { contextChars: number; contextTurns: number }
+  decisionInput?: { contextChars: number; contextTurns: number; previousLevel?: string }
 ): ReflexEffortStatus {
   const task = context.task?.trim() ?? '';
   const status: ReflexEffortStatus = {
@@ -1401,10 +1482,12 @@ function buildEffortStatus(
     ...(context.heldForCache === undefined ? {} : { heldForCache: context.heldForCache }),
     ...(support?.kind === 'declared' ? { supportedEfforts: [...support.efforts] } : {}),
     ...(support?.kind === 'none' ? { supportedEfforts: [] } : {}),
-    // Audit trail of the continuation path: how much earlier-turn text the
-    // decision actually saw. Absent when the turn was graded on its own text,
-    // so a new instruction's status keeps the exact shape it had before g-053.
-    ...(decisionInput?.contextChars ? { contextChars: decisionInput.contextChars, contextTurns: decisionInput.contextTurns } : {})
+    // Audit trail of the decision input: how much earlier-turn text the decision
+    // actually saw. Absent when the session has no earlier turn to show, so the
+    // status keeps the shape it had before g-053 on a cold session.
+    ...(decisionInput?.contextChars ? { contextChars: decisionInput.contextChars, contextTurns: decisionInput.contextTurns } : {}),
+    // g-063: which level this decision was told about beforehand.
+    ...(decisionInput?.previousLevel === undefined ? {} : { previousLevel: decisionInput.previousLevel })
   };
 
   return { ...status, line: formatEffortStatusLine(status) };
