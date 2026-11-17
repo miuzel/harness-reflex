@@ -906,6 +906,9 @@ window.__ModuleLoader__.load({
 			    profileKeyPendingLiteral: '保存后使用此密钥（未保存）',
 			    profileKeyMissingPending: '未配置密钥（保存后生效）',
 			    profileNeedName: '先填写配置名',
+			    profileNamePlaceholder: '（未命名）',
+			    profileUnnamedTag: '未命名',
+			    profileUnnamedHint: '这一行已填写内容，但还没有「配置名」：保存会整页被拦下，这一行也不会进入设置文档。请在行首标题处填写配置名。',
 			    profileNeedSave: '先保存再测试',
 			    profileWriteBlocked: '设置文档为只读，无法修改',
 			    profileRemoveRow: '只删除这一套配置',
@@ -970,6 +973,7 @@ window.__ModuleLoader__.load({
 			    errPoolProvider: '候选的物理 Provider 不能为空',
 			    errPoolModelName: '候选的物理模型不能为空',
 			    errPoolEmpty: '启用路由时至少要有一个含候选的模型池',
+			    errProfileName: '第 {row} 行连接配置填了内容却没有「配置名」：没有名字就没有保存路径，请填写配置名（或用「删除」去掉这一行）',
 			    errMinConfidence: '最小置信度必须是 0 到 1 之间的数字',
 			    errEffortSetting: '推理强度策略不在可选范围内',
 			    errBackend: '后端实现不在可选范围内',
@@ -1243,6 +1247,9 @@ window.__ModuleLoader__.load({
 			    profileKeyPendingLiteral: 'Saved, this key will be used (not saved yet)',
 			    profileKeyMissingPending: 'No API key configured (takes effect once saved)',
 			    profileNeedName: 'Name this profile first',
+			    profileNamePlaceholder: '(unnamed)',
+			    profileUnnamedTag: 'Unnamed',
+			    profileUnnamedHint: 'This row has content but no name yet: saving stops the whole page and this row never reaches the settings document. Type the name in the row title.',
 			    profileNeedSave: 'Save it before testing',
 			    profileWriteBlocked: 'The settings document is read-only',
 			    profileRemoveRow: 'Remove this profile only',
@@ -1307,6 +1314,7 @@ window.__ModuleLoader__.load({
 			    errPoolProvider: 'A candidate provider cannot be empty',
 			    errPoolModelName: 'A candidate model cannot be empty',
 			    errPoolEmpty: 'Routing needs at least one pool with a candidate',
+			    errProfileName: 'Connection row {row} has content but no name: an unnamed row has no path to save to. Give it a name (or remove the row)',
 			    errMinConfidence: 'Minimum confidence must be a number between 0 and 1',
 			    errEffortSetting: 'The effort policy is not one of the offered choices',
 			    errBackend: 'The backend implementation is not one of the offered choices',
@@ -1711,6 +1719,7 @@ window.__ModuleLoader__.load({
 			exports.reseedProfileRows = reseedProfileRows;
 			exports.draftFromConfig = draftFromConfig;
 			exports.splitTarget = splitTarget;
+			exports.unnamedFilledRows = unnamedFilledRows;
 			exports.validateDraft = validateDraft;
 			exports.groupWrites = groupWrites;
 			exports.diffDraft = diffDraft;
@@ -2272,6 +2281,44 @@ window.__ModuleLoader__.load({
 			    return { provider: trimmed.slice(0, separator), model: trimmed.slice(separator + 1) };
 			}
 			/**
+			 * The one-based row numbers of the connection profiles that are filled in but
+			 * not named.
+			 *
+			 * A row is addressed by its name — `systemOne.profiles.<name>.<field>` is the
+			 * only path the page writes — so a row the user filled in *without* naming it
+			 * has nowhere to go. It used to be skipped silently: both the seeded draft and
+			 * the edited one produced the same (empty) write list, the diff came out empty
+			 * and the save reported "clean" while nothing was written, so the page stayed
+			 * dirty forever and the row could never be tested (g-064).
+			 *
+			 * A row with no content at all is *not* a problem: pressing "新增配置" leaves
+			 * one behind, and it must not block the rest of the page from saving.
+			 * @param draft - the draft to inspect.
+			 * @returns the numbers of the offending rows, in document order.
+			 */
+			function unnamedFilledRows(draft) {
+			    const rows = [];
+			    draft.backend.profiles.forEach((profile, index) => {
+			        if (profile.name.trim().length > 0)
+			            return;
+			        const content = [
+			            profile.baseUrl,
+			            profile.model,
+			            profile.apiKeyEnv,
+			            profile.timeoutMs,
+			            profile.backend,
+			            // A typed key is content even though it is never rendered back: the user
+			            // meant to store it, and dropping it is exactly the reported loss.
+			            profile.apiKey
+			        ];
+			        // `clearKey` on a row whose name is empty targets a slot that cannot exist,
+			        // so it is not content of its own.
+			        if (content.some((field) => field.trim().length > 0))
+			            rows.push(index + 1);
+			    });
+			    return rows;
+			}
+			/**
 			 * Validate a draft before it reaches the Host.
 			 *
 			 * The Host validates too, but a refused write is a poor way to learn that a
@@ -2383,7 +2430,17 @@ window.__ModuleLoader__.load({
 			        if (parsed === undefined || !Number.isInteger(parsed) || parsed < 200)
 			            errors.push('errClosingEvidenceChars');
 			    }
-			    return { errors: [...new Set(errors)], ok: errors.length === 0 };
+			    // A connection row that was filled in but never named has no settings path, so
+			    // it can be neither saved nor tested. Saying so is the whole point: the save
+			    // used to come back "clean" with nothing written and no row added (g-064).
+			    const unnamed = unnamedFilledRows(draft);
+			    if (unnamed.length > 0)
+			        errors.push('errProfileName');
+			    return {
+			        errors: [...new Set(errors)],
+			        values: unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') },
+			        ok: errors.length === 0
+			    };
 			}
 			/**
 			 * Convert a draft group into the Host schema paths it authors.
@@ -2482,10 +2539,15 @@ window.__ModuleLoader__.load({
 			                writes.push({ path: ['systemOne', key], value });
 			            for (const profile of draft.backend.profiles) {
 			                const name = profile.name.trim();
-			                // A row the user has not named yet cannot be addressed by a path, so it is
-			                // skipped rather than written under an empty segment. Its `id` is page
-			                // state, not a settings field: it is never read below, so no write can
-			                // carry it, and `sameValue` compares this list of writes only.
+			                // A row with no name cannot be addressed by a path, so it is not written
+			                // under an empty segment. It is no longer *silently* dropped: since
+			                // g-064 {@link unnamedFilledRows} makes a filled-in unnamed row a
+			                // validation error, which refuses the save before this point is reached.
+			                // The skip stays because `diffDraft`/`dirtyGroups` still run over drafts
+			                // that carry such a row, and they must not emit an empty path segment.
+			                // Its `id` is page state, not a settings field: it is never read below,
+			                // so no write can carry it, and `sameValue` compares this list of writes
+			                // only.
 			                if (name.length === 0)
 			                    continue;
 			                const row = {};
@@ -3174,6 +3236,11 @@ window.__ModuleLoader__.load({
 			        this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
 			        const form = options.form.getSnapshot();
 			        const seeded = draftFromForm(form);
+			        // The initial validation runs through `validateDraft` rather than a literal
+			        // `[]`: an array built here is created in the *caller's* realm, and the client
+			        // tests evaluate this module inside a VM, where `deepEqual(errors, [])` then
+			        // fails on the prototype rather than the (empty) content.
+			        const initial = (0, panel_1.validateDraft)(seeded);
 			        this.#state = {
 			            tab: 'overview',
 			            phase: 'idle',
@@ -3185,7 +3252,8 @@ window.__ModuleLoader__.load({
 			            revision: form.revision,
 			            original: seeded,
 			            draft: seeded,
-			            errors: [],
+			            errors: initial.errors,
+			            errorValues: initial.values,
 			            saving: false,
 			            notice: null,
 			            noticeValues: null,
@@ -3334,8 +3402,8 @@ window.__ModuleLoader__.load({
 			     */
 			    edit(mutate) {
 			        const draft = mutate(this.#state.draft);
-			        const { errors } = (0, panel_1.validateDraft)(draft);
-			        this.#set({ draft, errors, notice: null, noticeValues: null });
+			        const { errors, values } = (0, panel_1.validateDraft)(draft);
+			        this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
 			    }
 			    /**
 			     * Edit the routing draft's model pools.
@@ -3466,7 +3534,7 @@ window.__ModuleLoader__.load({
 			        // row's page identity survives it: the Host answers for the same saved rows,
 			        // so the markers it drives would otherwise be renumbered under the pointer.
 			        const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
-			        this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
+			        this.#set({ draft: seeded, original: seeded, errors: [], errorValues: {}, notice: null, noticeValues: null });
 			    }
 			    /**
 			     * Write the draft's changed groups to the Host.
@@ -3485,17 +3553,35 @@ window.__ModuleLoader__.load({
 			            return false;
 			        const validation = (0, panel_1.validateDraft)(draft);
 			        if (!validation.ok) {
-			            this.#set({ errors: validation.errors, notice: null, noticeValues: null });
+			            this.#set({ errors: validation.errors, errorValues: validation.values, notice: null, noticeValues: null });
 			            return false;
 			        }
 			        // The raw user layer is passed so a group write keeps the keys this page
 			        // never rendered instead of replacing the whole section with them dropped.
 			        const ops = (0, panel_1.diffDraft)(original, draft, this.#options.form.getSnapshot().user);
 			        if (ops.length === 0) {
-			            this.#set({ errors: [], notice: 'clean', noticeValues: null });
+			            // "Nothing to write" is only "clean" when the draft really is what the Host
+			            // holds. An unnamed row contributes no op on either side of the diff, so a
+			            // page carrying one came out of the diff *empty* and reported success while
+			            // writing nothing — the row vanished, the page stayed dirty and the row was
+			            // never testable (g-064). Validation refuses that draft, so reaching this
+			            // with one would be a regression in the rule above; it is reported instead
+			            // of claimed clean (fail closed), never silently accepted.
+			            const unnamed = (0, panel_1.unnamedFilledRows)(draft);
+			            if (unnamed.length > 0) {
+			                this.#set({ errors: ['errProfileName'], errorValues: { errProfileName: unnamed.join(', ') }, notice: null, noticeValues: null });
+			                return false;
+			            }
+			            // A *blank* unnamed row is allowed by the rule and by the page, but it is
+			            // still a draft the Host does not hold: reporting "clean" left the page's
+			            // dirty badge on forever (the early return never re-seeds `original`).
+			            // It survives this re-seed by identity — `draftFromFormKeepingRows` keeps
+			            // the page's own rows — so it is still there to be named.
+			            const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
+			            this.#set({ errors: [], errorValues: {}, original: seeded, draft: seeded, notice: 'clean', noticeValues: null });
 			            return true;
 			        }
-			        this.#set({ saving: true, errors: [], notice: null, noticeValues: null });
+			        this.#set({ saving: true, errors: [], errorValues: {}, notice: null, noticeValues: null });
 			        try {
 			            const accepted = await this.#options.form.mutate(ops, revision);
 			            if (this.#disposed)
@@ -3558,7 +3644,7 @@ window.__ModuleLoader__.load({
 			     * @returns whether the host accepted the write.
 			     */
 			    async enableDelegation() {
-			        this.#set({ delegationWrite: null, errors: [] });
+			        this.#set({ delegationWrite: null, errors: [], errorValues: {} });
 			        try {
 			            const response = await this.#options.fetch(`${this.#basePath}${exports.DELEGATION_PATH}`, { method: 'POST' });
 			            const body = (await response.json().catch(() => ({})));
@@ -3616,7 +3702,8 @@ window.__ModuleLoader__.load({
 			            revision: form.revision,
 			            original: seeded,
 			            draft: seeded,
-			            errors: []
+			            errors: [],
+			            errorValues: {}
 			        });
 			    }
 			    /** Schedule the next poll, unless polling is disabled. */
@@ -3953,6 +4040,15 @@ window.__ModuleLoader__.load({
 			    },
 			    profileHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
 			    profileName: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', fontWeight: 600 },
+			    /** The name badge of a row the user filled in but never named (g-064). */
+			    profileUnnamedTag: {
+			        fontSize: '11px',
+			        fontWeight: 700,
+			        padding: '1px 6px',
+			        borderRadius: '4px',
+			        color: token('--dsw-alias-state-warn-primary', '#fbbf24'),
+			        border: `1px solid ${token('--dsw-alias-state-warn-primary', '#fbbf24')}`
+			    },
 			    swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 			};
 			/** One read-only metric card. */
@@ -4304,6 +4400,11 @@ window.__ModuleLoader__.load({
 			    const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
 			    const name = profile.name.trim();
 			    const named = name.length > 0;
+			    // A row that carries content is one the user means to save, and an unnamed row
+			    // has no settings path, so the page must *say* it is unnamed rather than leave
+			    // a grey placeholder where a name would be (g-064: the row looked filled in
+			    // and the save looked clean, while nothing was written).
+			    const filled = [profile.baseUrl, profile.model, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some((field) => field.trim().length > 0) || profile.clearKey;
 			    // The availability matrix (g-062). Activation writes the *draft*, so a named
 			    // row can be activated before it is saved; a probe reads the **saved** document
 			    // on the Host, so an unsaved row has nothing to probe; and an unnamed row can
@@ -4364,7 +4465,26 @@ window.__ModuleLoader__.load({
 			                return status ?? '—';
 			        }
 			    };
-			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': profile.id }, (0, react_1.createElement)('div', { style: S.profileHead }, (0, react_1.createElement)('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name), isActive
+			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': profile.id, 'data-profile-unnamed': named ? undefined : 'true' }, (0, react_1.createElement)('div', { style: S.profileHead }, 
+			    // The name is edited *here*, not through a grey placeholder: the title is
+			    // the name field of the row (g-064). A named row keeps it as text so a
+			    // stray click cannot rename a row by accident; a new row opens as an input
+			    // whose placeholder is the field it is asking for.
+			    named
+			        ? (0, react_1.createElement)('span', { style: S.profileName }, name)
+			        : (0, react_1.createElement)('input', {
+			            type: 'text',
+			            style: { ...S.input, ...S.profileName, width: '13em' },
+			            'data-profile-name': profile.id,
+			            placeholder: t('profileNamePlaceholder'),
+			            title: t('profileName'),
+			            value: profile.name,
+			            disabled,
+			            onChange: (event) => onEdit({ name: event.target.value })
+			        }), 
+			    // Worded, not just painted: the row says it is unnamed, and why that blocks
+			    // the save, in its own head line.
+			    named ? null : (0, react_1.createElement)('span', { style: S.profileUnnamedTag, 'data-profile-unnamed-tag': 'true' }, t('profileUnnamedTag')), isActive
 			        ? (0, react_1.createElement)('span', { style: { ...S.hint, color: token('--dsw-alias-state-success-primary', '#34d399') } }, t('profileActive'))
 			        : Button({
 			            label: t('profileActivate'),
@@ -4411,6 +4531,11 @@ window.__ModuleLoader__.load({
 			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'activate' }, activateBlocked)
 			        : null, testBlocked !== undefined && testBlocked !== t('profileTesting')
 			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
+			        : null, 
+			    // The filled-in-but-unnamed case, spelled out on the row itself: the save is
+			    // refused for the whole page, so the reason has to be where the fix is.
+			    !named && filled
+			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%', color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-unnamed-warning': 'true' }, t('profileUnnamedHint'))
 			        : null, (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			        t,
 			        path: 'systemOne.profiles.baseUrl',
@@ -4986,7 +5111,20 @@ window.__ModuleLoader__.load({
 			                    : null;
 			        return (0, react_1.createElement)('div', { style: S.root }, Header({ t, state, store }), statusNote === null ? null : (0, react_1.createElement)('div', { style: S.hint }, statusNote), state.errors.length === 0
 			            ? null
-			            : (0, react_1.createElement)('div', { style: S.errors }, ...state.errors.map((key) => (0, react_1.createElement)('div', { key }, t(key)))), state.error === null ? null : (0, react_1.createElement)('div', { style: S.errors }, `${t('refreshFailed')}: ${state.error}`), (0, react_1.createElement)('nav', { style: S.tabs }, ...store_1.PANEL_TABS.map((tab) => (0, react_1.createElement)('button', {
+			            : (0, react_1.createElement)('div', { style: S.errors }, 
+			            // `errors` holds copy keys; the row number an error has to name
+			            // (g-064) travels in `errorValues`, so it is interpolated here. An
+			            // unresolved `{row}` must never reach the user as braces, so a
+			            // missing value is filled in with a dash instead of being left raw.
+			            ...state.errors.map((key, index) => {
+			                // The validator can report the same key about different rows, and a
+			                // bare key would then collide on the React key: the index is part of
+			                // the identity, since the list is rebuilt as a whole every time.
+			                const values = state.errorValues ?? {};
+			                const row = values[key];
+			                const text = row === undefined ? t(key) : (0, panel_1.interpolate)(t(key), { ...values, row });
+			                return (0, react_1.createElement)('div', { key: `${String(index)}:${key}` }, text.replace(/\{(\w+)\}/g, '-'));
+			            })), state.error === null ? null : (0, react_1.createElement)('div', { style: S.errors }, `${t('refreshFailed')}: ${state.error}`), (0, react_1.createElement)('nav', { style: S.tabs }, ...store_1.PANEL_TABS.map((tab) => (0, react_1.createElement)('button', {
 			            key: tab,
 			            type: 'button',
 			            style: { ...S.tab, ...(state.tab === tab ? S.tabActive : {}) },

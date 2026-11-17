@@ -31,6 +31,7 @@ import {
   removePool,
   removePoolEntry,
   reseedProfileRows,
+  unnamedFilledRows,
   validateDraft,
   type PanelDraft,
   type PanelSnapshotLike,
@@ -129,6 +130,13 @@ export interface PanelState {
   draft: PanelDraft;
   /** Copy keys of the draft's validation problems. */
   errors: string[];
+  /**
+   * Values the error copy interpolates, by copy key.
+   *
+   * `errors` holds keys only, so an error that has to name *which* row is wrong
+   * (g-064) carries its row numbers here rather than in the key.
+   */
+  errorValues: Record<string, string>;
   saving: boolean;
   /** Copy key of the last outcome, if any. */
   notice: string | null;
@@ -316,6 +324,11 @@ export class PanelStore {
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     const form = options.form.getSnapshot();
     const seeded = draftFromForm(form);
+    // The initial validation runs through `validateDraft` rather than a literal
+    // `[]`: an array built here is created in the *caller's* realm, and the client
+    // tests evaluate this module inside a VM, where `deepEqual(errors, [])` then
+    // fails on the prototype rather than the (empty) content.
+    const initial = validateDraft(seeded);
     this.#state = {
       tab: 'overview',
       phase: 'idle',
@@ -327,7 +340,8 @@ export class PanelStore {
       revision: form.revision,
       original: seeded,
       draft: seeded,
-      errors: [],
+      errors: initial.errors,
+      errorValues: initial.values,
       saving: false,
       notice: null,
       noticeValues: null,
@@ -472,8 +486,8 @@ export class PanelStore {
    */
   edit(mutate: (draft: PanelDraft) => PanelDraft): void {
     const draft = mutate(this.#state.draft);
-    const { errors } = validateDraft(draft);
-    this.#set({ draft, errors, notice: null, noticeValues: null });
+    const { errors, values } = validateDraft(draft);
+    this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
   }
 
   /**
@@ -611,7 +625,7 @@ export class PanelStore {
     // row's page identity survives it: the Host answers for the same saved rows,
     // so the markers it drives would otherwise be renumbered under the pointer.
     const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
-    this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
+    this.#set({ draft: seeded, original: seeded, errors: [], errorValues: {}, notice: null, noticeValues: null });
   }
 
   /**
@@ -630,17 +644,35 @@ export class PanelStore {
     if (!this.#state.writable) return false;
     const validation = validateDraft(draft);
     if (!validation.ok) {
-      this.#set({ errors: validation.errors, notice: null, noticeValues: null });
+      this.#set({ errors: validation.errors, errorValues: validation.values, notice: null, noticeValues: null });
       return false;
     }
     // The raw user layer is passed so a group write keeps the keys this page
     // never rendered instead of replacing the whole section with them dropped.
     const ops = diffDraft(original, draft, this.#options.form.getSnapshot().user);
     if (ops.length === 0) {
-      this.#set({ errors: [], notice: 'clean', noticeValues: null });
+      // "Nothing to write" is only "clean" when the draft really is what the Host
+      // holds. An unnamed row contributes no op on either side of the diff, so a
+      // page carrying one came out of the diff *empty* and reported success while
+      // writing nothing — the row vanished, the page stayed dirty and the row was
+      // never testable (g-064). Validation refuses that draft, so reaching this
+      // with one would be a regression in the rule above; it is reported instead
+      // of claimed clean (fail closed), never silently accepted.
+      const unnamed = unnamedFilledRows(draft);
+      if (unnamed.length > 0) {
+        this.#set({ errors: ['errProfileName'], errorValues: { errProfileName: unnamed.join(', ') }, notice: null, noticeValues: null });
+        return false;
+      }
+      // A *blank* unnamed row is allowed by the rule and by the page, but it is
+      // still a draft the Host does not hold: reporting "clean" left the page's
+      // dirty badge on forever (the early return never re-seeds `original`).
+      // It survives this re-seed by identity — `draftFromFormKeepingRows` keeps
+      // the page's own rows — so it is still there to be named.
+      const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
+      this.#set({ errors: [], errorValues: {}, original: seeded, draft: seeded, notice: 'clean', noticeValues: null });
       return true;
     }
-    this.#set({ saving: true, errors: [], notice: null, noticeValues: null });
+    this.#set({ saving: true, errors: [], errorValues: {}, notice: null, noticeValues: null });
     try {
       const accepted = await this.#options.form.mutate(ops, revision);
       if (this.#disposed) return accepted;
@@ -698,7 +730,7 @@ export class PanelStore {
    * @returns whether the host accepted the write.
    */
   async enableDelegation(): Promise<boolean> {
-    this.#set({ delegationWrite: null, errors: [] });
+    this.#set({ delegationWrite: null, errors: [], errorValues: {} });
     try {
       const response = await this.#options.fetch(`${this.#basePath}${DELEGATION_PATH}`, { method: 'POST' });
       const body = (await response.json().catch(() => ({}))) as {
@@ -761,7 +793,8 @@ export class PanelStore {
       revision: form.revision,
       original: seeded,
       draft: seeded,
-      errors: []
+      errors: [],
+      errorValues: {}
     });
   }
 

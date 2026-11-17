@@ -52,8 +52,17 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * a new instruction was "never graded against earlier turns", which is exactly
  * what the goal changed. The replacements assert the new contract, so the net is
  * +9 rather than a silent loss.
+ *
+ * g-064 moved the pass count 681 → 684: it added 6 tests (the filled-in unnamed
+ * row being refused, the blank row not blocking the save, the named save's narrow
+ * paths, the validator's own row numbers, and a page case for the visible marker
+ * plus the name field) and *rewrote* 2 that pinned the old contract — "an unnamed
+ * row is skipped" and "an unnamed row is never written, and survives the save"
+ * both asserted a save that returned `true` and wrote nothing, which is the bug.
+ * No test was deleted: the two survivors assert the row is still never written
+ * *and* is now refused with the row number.
  */
-const EXPECTED_TESTS = 681;
+const EXPECTED_TESTS = 684;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [

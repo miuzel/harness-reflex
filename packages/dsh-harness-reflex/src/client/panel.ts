@@ -776,8 +776,47 @@ export function splitTarget(text: string): { provider: string; model: string } |
 export interface DraftValidation {
   /** Copy keys of the problems found, in presentation order. */
   errors: string[];
+  /** Values the errors interpolate, by copy key; the row's number is `{row}`. */
+  values: Record<string, string>;
   /** Whether the draft can be written. */
   ok: boolean;
+}
+
+/**
+ * The one-based row numbers of the connection profiles that are filled in but
+ * not named.
+ *
+ * A row is addressed by its name — `systemOne.profiles.<name>.<field>` is the
+ * only path the page writes — so a row the user filled in *without* naming it
+ * has nowhere to go. It used to be skipped silently: both the seeded draft and
+ * the edited one produced the same (empty) write list, the diff came out empty
+ * and the save reported "clean" while nothing was written, so the page stayed
+ * dirty forever and the row could never be tested (g-064).
+ *
+ * A row with no content at all is *not* a problem: pressing "新增配置" leaves
+ * one behind, and it must not block the rest of the page from saving.
+ * @param draft - the draft to inspect.
+ * @returns the numbers of the offending rows, in document order.
+ */
+export function unnamedFilledRows(draft: PanelDraft): number[] {
+  const rows: number[] = [];
+  draft.backend.profiles.forEach((profile, index) => {
+    if (profile.name.trim().length > 0) return;
+    const content = [
+      profile.baseUrl,
+      profile.model,
+      profile.apiKeyEnv,
+      profile.timeoutMs,
+      profile.backend,
+      // A typed key is content even though it is never rendered back: the user
+      // meant to store it, and dropping it is exactly the reported loss.
+      profile.apiKey
+    ];
+    // `clearKey` on a row whose name is empty targets a slot that cannot exist,
+    // so it is not content of its own.
+    if (content.some((field) => field.trim().length > 0)) rows.push(index + 1);
+  });
+  return rows;
 }
 
 /**
@@ -883,7 +922,16 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
     const parsed = asNumber(draft.interventions.closingEvidenceChars);
     if (parsed === undefined || !Number.isInteger(parsed) || parsed < 200) errors.push('errClosingEvidenceChars');
   }
-  return { errors: [...new Set(errors)], ok: errors.length === 0 };
+  // A connection row that was filled in but never named has no settings path, so
+  // it can be neither saved nor tested. Saying so is the whole point: the save
+  // used to come back "clean" with nothing written and no row added (g-064).
+  const unnamed = unnamedFilledRows(draft);
+  if (unnamed.length > 0) errors.push('errProfileName');
+  return {
+    errors: [...new Set(errors)],
+    values: unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') },
+    ok: errors.length === 0
+  };
 }
 
 /** One Host schema path a draft group authors, and the value it writes there. */
@@ -984,10 +1032,15 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
 
       for (const profile of draft.backend.profiles) {
         const name = profile.name.trim();
-        // A row the user has not named yet cannot be addressed by a path, so it is
-        // skipped rather than written under an empty segment. Its `id` is page
-        // state, not a settings field: it is never read below, so no write can
-        // carry it, and `sameValue` compares this list of writes only.
+        // A row with no name cannot be addressed by a path, so it is not written
+        // under an empty segment. It is no longer *silently* dropped: since
+        // g-064 {@link unnamedFilledRows} makes a filled-in unnamed row a
+        // validation error, which refuses the save before this point is reached.
+        // The skip stays because `diffDraft`/`dirtyGroups` still run over drafts
+        // that carry such a row, and they must not emit an empty path segment.
+        // Its `id` is page state, not a settings field: it is never read below,
+        // so no write can carry it, and `sameValue` compares this list of writes
+        // only.
         if (name.length === 0) continue;
         const row: Record<string, unknown> = {};
         if (present(profile.baseUrl) !== undefined) row.baseUrl = profile.baseUrl.trim();

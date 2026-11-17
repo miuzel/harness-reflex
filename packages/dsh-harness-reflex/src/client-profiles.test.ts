@@ -29,6 +29,8 @@ interface PanelModule {
   draftFromLayers(value: unknown, base: unknown): any;
   groupWrites(draft: unknown, group: string): { op?: string; path: string[]; value?: unknown }[];
   profileRowsFrom(value: unknown): any[];
+  unnamedFilledRows(draft: unknown): number[];
+  validateDraft(draft: unknown): { errors: string[]; values: Record<string, string>; ok: boolean };
 }
 
 /** Evaluate one built CommonJS client module in a sandbox and return its exports. */
@@ -77,6 +79,11 @@ function row(overrides: Record<string, unknown> = {}): Record<string, any> {
 /** A draft carrying the supplied rows. */
 function draftWith(profiles: Record<string, any>[], active = 'primary'): any {
   return { ...panel.EMPTY_DRAFT, backend: { ...panel.EMPTY_DRAFT.backend, backend: 'jev', active, profiles } };
+}
+
+/** Cross-realm comparison: JSON round-trips a value out of the module sandbox. */
+function plain(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
 /** Whether any write targets the whole `systemOne` group. */
@@ -179,9 +186,27 @@ test('a blanked profile field becomes an unset so the row inherits again', () =>
   assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'model'])?.value, 'm1', 'the untouched field is kept');
 });
 
-test('an unnamed row is skipped because it cannot become a settings path', () => {
+test('an unnamed row is still never written, but it is no longer silently accepted', () => {
+  // g-062 pinned that an unnamed row is skipped by `groupWrites` — and it still
+  // is, because an empty path segment is not a settings path. What g-064 changes
+  // is what the *page* does about it: skipping alone meant both drafts produced
+  // the same empty write list, the diff came out empty, and the save reported
+  // "clean" while the row silently vanished. The row cannot be written (this
+  // assertion, unchanged) and must now be *refused* instead (the next ones).
   const writes = panel.groupWrites(draftWith([row({ name: '', model: 'm' })]), 'backend');
   assert.equal(writes.some((write) => write.path.includes('')), false, 'an empty path segment would be invalid');
+  // A blank row is not refused: "新增配置" leaves one behind and it must not
+  // block the rest of the page.
+  assert.deepEqual([...panel.unnamedFilledRows(draftWith([row({ name: '' })]))], [], 'an empty new row is not an error');
+  // A filled-in one is, and the message names the row by its position. A blank
+  // row sitting *above* it is not counted, so the number is the position on the
+  // page, not the index among the unnamed ones.
+  const threeRows = draftWith([row({ name: '' }), row(), row({ name: ' ', baseUrl: 'http://x' })]);
+  assert.deepEqual([...panel.unnamedFilledRows(threeRows)], [3], 'only the filled-in row is a problem');
+  const validation = panel.validateDraft(threeRows);
+  assert.equal(validation.ok, false, 'a filled-in unnamed row must not validate');
+  assert.ok(validation.errors.includes('errProfileName'), `no errProfileName: ${validation.errors.join(',')}`);
+  assert.equal(validation.values.errProfileName, '3', 'the error must name which row is unnamed');
 });
 
 test('the active name is written, and an empty one is an unset rather than left stale', () => {
@@ -403,12 +428,14 @@ test('saving still writes only named rows, and never a row identity', async () =
   }
 });
 
-test('an unnamed row is never written, and survives the save that follows', async () => {
+test('a filled-in unnamed row is refused by the save, and nothing is written', async () => {
+  // The reported bug (g-064): the row was filled in but never named, the save
+  // returned `true` with notice `clean`, the document got nothing, the page kept
+  // saying "unsaved" forever and the row could never be tested.
   const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { base: {} } } });
   store.addProfile();
   const rows = () => store.getState().draft.backend.profiles as any[];
   const blank = rows().find((row) => row.name === '')!;
-  // Fill the unnamed row in, the way the report did — but never name it.
   store.edit((current) => ({
     ...current,
     backend: {
@@ -418,17 +445,76 @@ test('an unnamed row is never written, and survives the save that follows', asyn
       )
     }
   }));
-  // An unnamed row is not a settings path, so there is nothing to write at all.
-  assert.equal(await store.save(), true, 'a save with no writable change is not an error');
-  const serialized = JSON.stringify(form.mutations.flatMap((mutation) => mutation.ops));
-  assert.equal(serialized.includes('NEWAPI_ASEIT_API_KEY'), false, 'an unnamed row reached the document');
-  assert.equal(serialized.includes('profile-'), false, 'a row identity reached the settings write');
-  // The re-seed that followed the save read a document that never held this row:
-  // it must not disappear from under the user.
+  // Editing already surfaces the problem, before any save click.
+  assert.ok(store.getState().errors.includes('errProfileName'), `the row is not flagged while editing: ${store.getState().errors}`);
+  assert.equal(store.getState().errorValues.errProfileName, '2', 'the error names the row (the seeded `base` row is 1)');
+
+  assert.equal(await store.save(), false, 'the save must be refused, not reported successful');
+  const state = store.getState();
+  assert.ok(state.errors.length > 0, 'the refusal carries no explanation');
+  assert.ok(state.errors.includes('errProfileName'), `wrong explanation: ${state.errors.join(',')}`);
+  assert.notEqual(state.notice, 'clean', 'a refused save must never report clean');
+  assert.notEqual(state.notice, 'saved', 'a refused save must never report saved');
+  assert.deepEqual(form.mutations, [], 'a refused save wrote to the document');
+  // The user's row is untouched by the refusal: it is still there to be named.
+  const survivor = rows().find((row) => row.id === blank.id);
+  assert.ok(survivor !== undefined, 'the refused row disappeared');
+  assert.equal(survivor.apiKeyEnv, 'NEWAPI_ASEIT_API_KEY', 'the typed value was lost');
+});
+
+test('a blank row the user just added does not block the save, and the page stops claiming dirty', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { base: {} } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const blank = rows().find((row) => row.name === '')!;
+  // Cross-realm: the store runs in the module sandbox, so the empty list is
+  // compared by content rather than by prototype (see `plain` above).
+  assert.deepEqual(plain(store.getState().errors), [], 'an empty new row must not be an error');
+  assert.equal(await store.save(), true, `the save should go through: ${store.getState().errors}`);
+  assert.deepEqual(form.mutations, [], 'there was nothing to write');
+  const state = store.getState();
+  assert.equal(state.notice, 'clean');
+  // The regression: the empty diff returned early without re-seeding, so the
+  // dirty badge stayed on over a draft that held only an empty new row.
+  assert.equal(state.draft, state.original, 'the page still believes it has unsaved changes');
   const after = rows().filter((row) => row.name === '');
-  assert.equal(after.length, 1, `an unsaved row must survive the save; rows: ${rows().map((row) => row.name).join(',')}`);
+  assert.equal(after.length, 1, 'the blank row must survive the re-seed');
   assert.equal(after[0]!.id, blank.id, 'and keep its identity');
-  assert.equal(after[0]!.apiKeyEnv, 'NEWAPI_ASEIT_API_KEY', 'with its typed value');
+});
+
+test('naming the row after the refusal writes narrow profile paths and reports saved', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { base: {} } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const blank = rows().find((row) => row.name === '')!;
+  const fill = (patch: Record<string, string>): void => {
+    store.edit((current) => ({
+      ...current,
+      backend: {
+        ...current.backend,
+        profiles: current.backend.profiles.map((row: any) => (row.id === blank.id ? { ...row, ...patch } : row))
+      }
+    }));
+  };
+  fill({ baseUrl: 'https://newapi.example/v1', apiKeyEnv: 'NEWAPI_ASEIT_API_KEY' });
+  assert.equal(await store.save(), false);
+  fill({ name: 'aseit' });
+  assert.deepEqual(plain(store.getState().errors), [], 'naming the row clears the problem');
+  assert.equal(await store.save(), true, `the named save went through: ${store.getState().errors}`);
+  assert.equal(store.getState().notice, 'saved');
+  assert.equal(store.getState().draft, store.getState().original, 'the page still shows unsaved changes after the save');
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  const written = ops.filter((op) => op.path[0] === 'systemOne' && op.path[1] === 'profiles' && op.path[2] === 'aseit');
+  // The row is written on narrow paths under its own name, and only there.
+  assert.ok(written.length > 0, `the named row produced no profile write: ${JSON.stringify(ops.slice(0, 4))}`);
+  for (const op of written) {
+    assert.equal(op.path[3] !== undefined, true, `a write stops at the row: ${op.path.join('.')}`);
+  }
+  const valueAt = (field: string): unknown => written.find((op) => op.path[3] === field)?.value;
+  assert.equal(valueAt('baseUrl'), 'https://newapi.example/v1');
+  assert.equal(valueAt('apiKeyEnv'), 'NEWAPI_ASEIT_API_KEY');
+  assert.equal(JSON.stringify(ops).includes('profile-'), false, 'a row identity reached the settings write');
 });
 
 test('a re-seed matches rows by name even when the unnamed rows sit above them', () => {

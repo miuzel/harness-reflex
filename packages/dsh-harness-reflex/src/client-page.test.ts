@@ -1710,11 +1710,18 @@ test('an unnamed row keeps its typed connection fields, and says where its key w
   // ever saving it.
   const inputs = elements(row).filter((element) => element.type === 'input');
   assert.ok(inputs.length >= 4, `the row has no connection inputs: ${inputs.length}`);
-  // The four connection fields are baseUrl, model, timeoutMs, apiKeyEnv in order.
-  type(inputs[0], 'https://newapi.aseit.cn/v1');
-  type(inputs[1], 'd3-ultra');
-  type(inputs[2], '2000');
-  type(inputs[3], 'NEWAPI_ASEIT_API_KEY');
+  // The name field comes first (g-064), then baseUrl, model, timeoutMs and
+  // apiKeyEnv in order; named by what they are, so a field addition fails loudly
+  // instead of shifting every value one box to the left.
+  const nameInput = inputs.find((element) => typeof element.props['data-profile-name'] === 'string');
+  assert.ok(nameInput !== undefined, 'the row has no name field');
+  const connection = inputs.filter((element) => element !== nameInput && element.props.type !== 'password');
+  assert.equal(connection.length, 4, `expected four connection fields, saw ${connection.length}`);
+  assert.equal(String(connection[0]?.props.placeholder), 'http://127.0.0.1:8000/v1', 'the first connection field is not Base URL');
+  type(connection[0], 'https://newapi.aseit.cn/v1');
+  type(connection[1], 'd3-ultra');
+  type(connection[2], '2000');
+  type(connection[3], 'NEWAPI_ASEIT_API_KEY');
   tree = await mounted.runtime.flush();
 
   const updated = profileRows(tree).find((candidate) => String(candidate.props['data-profile']) === String(row.props['data-profile']));
@@ -1734,6 +1741,66 @@ test('an unnamed row keeps its typed connection fields, and says where its key w
   assert.ok(values.includes('NEWAPI_ASEIT_API_KEY'), 'the variable name was lost');
   // And it is still unnamed, so it is still not testable — with the reason.
   assert.equal(rowBlockedNote(updated, 'test'), '先填写配置名');
+  mounted.unmount();
+});
+
+test('a filled-in unnamed row is marked, names its row in the save error, and saves once named', async () => {
+  const settings = settingsForm(PROFILED);
+  const { form, mutations } = settings;
+  const mounted = await mountPanel({ facts: rowsFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const unnamedRow = (): Element => {
+    const row = profileRows(tree).find((candidate) => String(candidate.props['data-profile-unnamed']) === 'true');
+    assert.ok(row !== undefined, 'the new row is not marked as unnamed');
+    return row;
+  };
+  // The marker is visible copy on the row itself, not a grey placeholder.
+  assert.ok(textOf(unnamedRow()).includes('未命名'), `the row carries no "未命名" marker: ${textOf(unnamedRow())}`);
+  const nameInput = elements(unnamedRow()).find((element) => typeof element.props['data-profile-name'] === 'string');
+  assert.ok(nameInput !== undefined, 'the row has no name field to type into');
+
+  // Fill it in without naming it, then press save: refused, explained, unwritten.
+  const connectionInputs = elements(unnamedRow()).filter((element) => element.type === 'input' && typeof element.props['data-profile-name'] !== 'string' && element.props.type !== 'password');
+  type(connectionInputs[0], 'https://newapi.aseit.cn/v1');
+  tree = await mounted.runtime.flush();
+  assert.ok(
+    textOf(unnamedRow()).includes('没有「配置名」'),
+    `the filled-in unnamed row does not say what is wrong: ${textOf(unnamedRow())}`
+  );
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.deepEqual(mutations, [], 'the refused save reached the Host');
+  assert.ok(textOf(tree).includes('没有「配置名」'), 'the page did not explain the refusal');
+  // The row number travels with the error: the error list holds copy *keys*, so
+  // the position is interpolated from `errorValues`, never baked into the key.
+  const missing = mounted.observed.calls.find((call) => (call as any).op === 'mutate');
+  assert.equal(missing, undefined, 'a refused save opened a write request');
+  const errorLine = elements(tree).find((element) => typeof element.props.style === 'object' && textOf(element).includes('没有「配置名」'));
+  assert.ok(errorLine !== undefined, 'the page did not explain the refusal');
+  assert.match(textOf(tree), /第 \d+ 行连接配置/, `the refusal does not name the row: ${textOf(tree).slice(0, 400)}`);
+
+  // Naming it in the row's own field clears the marker and the save goes through.
+  type(
+    elements(profileRows(tree).find((row) => String(row.props['data-profile-unnamed']) === 'true')).find((element) => typeof element.props['data-profile-name'] === 'string'),
+    'aseit'
+  );
+  tree = await mounted.runtime.flush();
+  assert.equal(profileRows(tree).filter((row) => String(row.props['data-profile-unnamed']) === 'true').length, 0, 'the marker survived the name');
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  /** Declared with its own type: `mutations` is narrowed to an empty tuple above by `deepEqual(mutations, [])`. */
+  const saves: { ops: unknown; revision: unknown }[] = mutations;
+  assert.equal(saves.length, 1, `the named save did not reach the Host: ${textOf(tree).slice(0, 300)}`);
+  const ops = plain(saves[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
+  const written = ops.filter((op) => op.path[0] === 'systemOne' && op.path[1] === 'profiles' && op.path[2] === 'aseit');
+  assert.ok(
+    written.some((op) => op.path[3] === 'baseUrl' && (op.value as unknown) === 'https://newapi.aseit.cn/v1'),
+    `the new row's base URL was not written: ${JSON.stringify(ops).slice(0, 300)}`
+  );
   mounted.unmount();
 });
 
@@ -2261,7 +2328,7 @@ test('the System 1 backend page writes the scalar and its block, on the paths th
   await mounted.runtime.flush();
 
   assert.equal(mutations.length, 1, 'saving did not reach the settings form');
-  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value?: unknown }[];
+  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(
     ops.map((op) => [op.op, op.path]),
     [

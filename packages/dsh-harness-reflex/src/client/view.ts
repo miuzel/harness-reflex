@@ -351,6 +351,15 @@ const S = {
   },
   profileHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   profileName: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', fontWeight: 600 },
+  /** The name badge of a row the user filled in but never named (g-064). */
+  profileUnnamedTag: {
+    fontSize: '11px',
+    fontWeight: 700,
+    padding: '1px 6px',
+    borderRadius: '4px',
+    color: token('--dsw-alias-state-warn-primary', '#fbbf24'),
+    border: `1px solid ${token('--dsw-alias-state-warn-primary', '#fbbf24')}`
+  },
   swatch: { display: 'inline-block', width: '6px', height: '6px', borderRadius: '2px', background: 'currentColor', marginRight: '5px' }
 } as const;
 
@@ -975,6 +984,14 @@ function ProfileRow(props: {
   const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
   const name = profile.name.trim();
   const named = name.length > 0;
+  // A row that carries content is one the user means to save, and an unnamed row
+  // has no settings path, so the page must *say* it is unnamed rather than leave
+  // a grey placeholder where a name would be (g-064: the row looked filled in
+  // and the save looked clean, while nothing was written).
+  const filled =
+    [profile.baseUrl, profile.model, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some(
+      (field) => field.trim().length > 0
+    ) || profile.clearKey;
   // The availability matrix (g-062). Activation writes the *draft*, so a named
   // row can be activated before it is saved; a probe reads the **saved** document
   // on the Host, so an unsaved row has nothing to probe; and an unnamed row can
@@ -1037,11 +1054,29 @@ function ProfileRow(props: {
   };
   return h(
     'div',
-    { style: S.profileRow, 'data-profile': profile.id },
+    { style: S.profileRow, 'data-profile': profile.id, 'data-profile-unnamed': named ? undefined : 'true' },
     h(
       'div',
       { style: S.profileHead },
-      h('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name),
+      // The name is edited *here*, not through a grey placeholder: the title is
+      // the name field of the row (g-064). A named row keeps it as text so a
+      // stray click cannot rename a row by accident; a new row opens as an input
+      // whose placeholder is the field it is asking for.
+      named
+        ? h('span', { style: S.profileName }, name)
+        : h('input', {
+            type: 'text',
+            style: { ...S.input, ...S.profileName, width: '13em' },
+            'data-profile-name': profile.id,
+            placeholder: t('profileNamePlaceholder'),
+            title: t('profileName'),
+            value: profile.name,
+            disabled,
+            onChange: (event: { target: { value: string } }) => onEdit({ name: event.target.value })
+          }),
+      // Worded, not just painted: the row says it is unnamed, and why that blocks
+      // the save, in its own head line.
+      named ? null : h('span', { style: S.profileUnnamedTag, 'data-profile-unnamed-tag': 'true' }, t('profileUnnamedTag')),
       isActive
         ? h('span', { style: { ...S.hint, color: token('--dsw-alias-state-success-primary', '#34d399') } }, t('profileActive'))
         : Button({
@@ -1100,6 +1135,15 @@ function ProfileRow(props: {
       : null,
     testBlocked !== undefined && testBlocked !== t('profileTesting')
       ? h('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
+      : null,
+    // The filled-in-but-unnamed case, spelled out on the row itself: the save is
+    // refused for the whole page, so the reason has to be where the fix is.
+    !named && filled
+      ? h(
+          'div',
+          { style: { ...S.hint, flexBasis: '100%', color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-unnamed-warning': 'true' },
+          t('profileUnnamedHint')
+        )
       : null,
     h(
       'div',
@@ -1933,7 +1977,23 @@ export function createPanelComponent(ctx: any, t: Translate): (props: PanelProps
       statusNote === null ? null : h('div', { style: S.hint }, statusNote),
       state.errors.length === 0
         ? null
-        : h('div', { style: S.errors }, ...state.errors.map((key) => h('div', { key }, t(key)))),
+        : h(
+            'div',
+            { style: S.errors },
+            // `errors` holds copy keys; the row number an error has to name
+            // (g-064) travels in `errorValues`, so it is interpolated here. An
+            // unresolved `{row}` must never reach the user as braces, so a
+            // missing value is filled in with a dash instead of being left raw.
+            ...state.errors.map((key, index) => {
+              // The validator can report the same key about different rows, and a
+              // bare key would then collide on the React key: the index is part of
+              // the identity, since the list is rebuilt as a whole every time.
+              const values = state.errorValues ?? {};
+              const row = values[key];
+              const text = row === undefined ? t(key) : interpolate(t(key), { ...values, row });
+              return h('div', { key: `${String(index)}:${key}` }, text.replace(/\{(\w+)\}/g, '-'));
+            })
+          ),
       state.error === null ? null : h('div', { style: S.errors }, `${t('refreshFailed')}: ${state.error}`),
       h(
         'nav',
