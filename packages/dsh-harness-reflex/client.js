@@ -902,8 +902,16 @@ window.__ModuleLoader__.load({
 			    profileKeyFromFallback: '来自环境变量 {name}（回退：本配置未指定变量名）',
 			    profileKeyMissing: '未设置密钥（未指定变量名；检查 SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY）',
 			    profileKeyLocked: '已点名 {name}，但该变量未设置——密钥为空（不会回退到其他变量）',
+			    profileKeyPendingEnv: '保存后将从 {name} 读取（未保存）',
+			    profileKeyPendingLiteral: '保存后使用此密钥（未保存）',
+			    profileKeyMissingPending: '未配置密钥（保存后生效）',
+			    profileNeedName: '先填写配置名',
+			    profileNeedSave: '先保存再测试',
+			    profileWriteBlocked: '设置文档为只读，无法修改',
+			    profileRemoveRow: '只删除这一套配置',
 			    profileClearKey: '清除已存 Key',
 			    profileClearConfirm: '确认清除？',
+			    profileClearCancel: '取消清除',
 			    profileTest: '测试',
 			    profileTesting: '测试中…',
 			    profileTestOk: '连接正常',
@@ -1231,8 +1239,16 @@ window.__ModuleLoader__.load({
 			    profileKeyFromFallback: 'From environment variable {name} (fallback: this profile names no variable)',
 			    profileKeyMissing: 'No API key (no variable named; checks SYSTEM_ONE_API_KEY / JEV_API_KEY / VLLM_API_KEY / OPENAI_API_KEY)',
 			    profileKeyLocked: '{name} is named but unset — the key is empty (no fallback to another variable)',
+			    profileKeyPendingEnv: 'Saved, the key will be read from {name} (not saved yet)',
+			    profileKeyPendingLiteral: 'Saved, this key will be used (not saved yet)',
+			    profileKeyMissingPending: 'No API key configured (takes effect once saved)',
+			    profileNeedName: 'Name this profile first',
+			    profileNeedSave: 'Save it before testing',
+			    profileWriteBlocked: 'The settings document is read-only',
+			    profileRemoveRow: 'Remove this profile only',
 			    profileClearKey: 'Clear stored key',
 			    profileClearConfirm: 'Confirm clear?',
+			    profileClearCancel: 'Cancel clear',
 			    profileTest: 'Test',
 			    profileTesting: 'Testing…',
 			    profileTestOk: 'Connected',
@@ -1691,6 +1707,8 @@ window.__ModuleLoader__.load({
 			exports.draftFromSnapshot = draftFromSnapshot;
 			exports.draftFromLayers = draftFromLayers;
 			exports.profileRowsFrom = profileRowsFrom;
+			exports.createProfileRowId = createProfileRowId;
+			exports.reseedProfileRows = reseedProfileRows;
 			exports.draftFromConfig = draftFromConfig;
 			exports.splitTarget = splitTarget;
 			exports.validateDraft = validateDraft;
@@ -2038,6 +2056,7 @@ window.__ModuleLoader__.load({
 			        const profile = asRecord(entry);
 			        return [
 			            {
+			                id: createProfileRowId(),
 			                name,
 			                baseUrl: asText(profile.baseUrl),
 			                model: asText(profile.model),
@@ -2054,6 +2073,94 @@ window.__ModuleLoader__.load({
 			            }
 			        ];
 			    });
+			}
+			/**
+			 * Mint a row identity that is unique within one page session (g-062).
+			 *
+			 * A module counter, not `crypto.randomUUID`: the client half runs inside a
+			 * host page whose globals vary, and the only property needed is uniqueness
+			 * among the handful of rows one open page can hold. Ids never leave the page.
+			 * @returns the next `profile-<n>` id.
+			 */
+			function createProfileRowId() {
+			    PROFILE_ROW_SEQUENCE += 1;
+			    return `profile-${String(PROFILE_ROW_SEQUENCE)}`;
+			}
+			/** The counter behind {@link createProfileRowId}. */
+			let PROFILE_ROW_SEQUENCE = 0;
+			/**
+			 * Replace the profile rows of a freshly seeded draft with the rows on screen.
+			 *
+			 * Called whenever the draft is re-seeded from the settings document (`reset`,
+			 * a save that landed, a Host push). Re-seeding re-reads `systemOne.profiles`,
+			 * which a save was just told to keep unchanged — profile rows are written as
+			 * narrow paths, never a whole-group replace — so the fresh rows are the same
+			 * rows this page already holds, minus the unsaved fields the user was still
+			 * typing into (an unnamed row is not written at all, so it would vanish).
+			 *
+			 * The rule is therefore: a fresh row is matched to the row on screen that the
+			 * document already answers for; the very same row object is kept, id and all.
+			 *
+			 * Matching order, weakest last:
+			 *   1. by name — a named row resolves uniquely in the document;
+			 *   2. by position among the unnamed rows;
+			 *   3. one-to-one by content, for the legitimate shuffle where the user names
+			 *      one unnamed row while another unnamed row sits *above* it, so the fresh
+			 *      named row sorts before the leftover unnamed one. Nothing can tell those
+			 *      two rows apart except their values, so equal values claim each other.
+			 *
+			 * `previous` being empty means the first seed, which keeps the fresh rows.
+			 * @param previous - the rows the page is showing.
+			 * @param seeded - the rows read back from the settings document.
+			 * @returns the rows to put in the re-seeded draft.
+			 */
+			function reseedProfileRows(previous, seeded) {
+			    if (previous.length === 0)
+			        return seeded.map((row) => ({ ...row }));
+			    const content = (row) => [row.baseUrl, row.model, row.apiKeyEnv, row.timeoutMs, row.backend].map((field) => field.trim()).join('\u0000');
+			    const claimed = new Set();
+			    const fresh = seeded.map(() => false);
+			    const kept = seeded.map(() => undefined);
+			    // 1. by name.
+			    for (const [index, row] of seeded.entries()) {
+			        const name = row.name.trim();
+			        if (name.length === 0)
+			            continue;
+			        const match = previous.find((candidate) => !claimed.has(candidate) && candidate.name.trim() === name);
+			        if (match === undefined)
+			            continue;
+			        claimed.add(match);
+			        fresh[index] = true;
+			        kept[index] = match;
+			    }
+			    // 3. unnamed fresh rows by exact content.
+			    for (const [index, row] of seeded.entries()) {
+			        if (row.name.trim().length > 0)
+			            continue;
+			        const wanted = content(row);
+			        const match = previous.find((candidate) => !claimed.has(candidate) && content(candidate) === wanted);
+			        if (match === undefined)
+			            continue;
+			        claimed.add(match);
+			        fresh[index] = true;
+			        kept[index] = match;
+			    }
+			    // 2. the unnamed rows left over, in order.
+			    const unclaimedPrevious = previous.filter((row) => !claimed.has(row));
+			    for (const [index, row] of seeded.entries()) {
+			        if (fresh[index] === true || row.name.trim().length > 0)
+			            continue;
+			        const match = unclaimedPrevious.shift();
+			        if (match === undefined)
+			            break;
+			        claimed.add(match);
+			        fresh[index] = true;
+			        kept[index] = match;
+			    }
+			    // Fresh rows nobody claimed are new: they get an id now and sort first below.
+			    const result = seeded.map((row, index) => kept[index] ?? { ...row });
+			    // The user's own unnamed rows survive the save, in the order they had.
+			    return [...result, ...previous.filter((row) => !claimed.has(row))];
 			}
 			/**
 			 * Merge two virtual-model pool lists, keeping both sides.
@@ -2376,7 +2483,9 @@ window.__ModuleLoader__.load({
 			            for (const profile of draft.backend.profiles) {
 			                const name = profile.name.trim();
 			                // A row the user has not named yet cannot be addressed by a path, so it is
-			                // skipped rather than written under an empty segment.
+			                // skipped rather than written under an empty segment. Its `id` is page
+			                // state, not a settings field: it is never read below, so no write can
+			                // carry it, and `sameValue` compares this list of writes only.
 			                if (name.length === 0)
 			                    continue;
 			                const row = {};
@@ -2915,6 +3024,7 @@ window.__ModuleLoader__.load({
 			Object.defineProperty(exports, "__esModule", { value: true });
 			exports.PanelStore = exports.DEFAULT_POLL_MS = exports.SYSTEMONE_TEST_PATH = exports.DELEGATION_PATH = exports.CLEAR_PATH = exports.SNAPSHOT_PATH = exports.PANEL_TABS = void 0;
 			exports.draftFromForm = draftFromForm;
+			exports.draftFromFormKeepingRows = draftFromFormKeepingRows;
 			/**
 			 * Stateful core of the Reflex settings page.
 			 *
@@ -2975,6 +3085,31 @@ window.__ModuleLoader__.load({
 			    return typeof error === 'string' ? error : 'unknown error';
 			}
 			/**
+			 * One blank profile row carrying its page identity.
+			 * @param id - the identity minted for this row, never persisted.
+			 * @returns the row as the draft holds it.
+			 */
+			function blankProfileRow(id) {
+			    return {
+			        id,
+			        name: '',
+			        baseUrl: '',
+			        model: '',
+			        apiKeyEnv: '',
+			        timeoutMs: '',
+			        backend: '',
+			        apiKey: '',
+			        apiKeyPresent: false,
+			        apiKeyFromProfile: false,
+			        apiKeyVariable: '',
+			        // A blank row has locked onto nothing yet: `env` is the neutral tag until
+			        // the Host reports where a saved row's key really comes from.
+			        apiKeySource: 'env',
+			        apiKeyLocked: false,
+			        clearKey: false
+			    };
+			}
+			/**
 			 * Seed a draft from one settings section.
 			 *
 			 * The Host reports two layers: `value` (effective, with the profile's compose
@@ -2990,6 +3125,26 @@ window.__ModuleLoader__.load({
 			 */
 			function draftFromForm(form) {
 			    return (0, panel_1.draftFromLayers)(form.value, form.base);
+			}
+			/**
+			 * Seed the draft from the settings document, keeping the profile rows on screen.
+			 *
+			 * A re-seed is a *re-read* of the document, not a reset of the user's work: the
+			 * profile rows are the one part of the draft the document does not describe
+			 * faithfully, because an unnamed row is not written to it at all (g-062). The
+			 * rows in force are therefore carried across, identity included — see
+			 * {@link reseedProfileRows} — so a save can no longer wipe the row the user was
+			 * still filling in, and `data-profile` stays stable across a write.
+			 *
+			 * @param form - the settings form snapshot.
+			 * @param previous - the profile rows currently on screen, if any.
+			 * @returns the draft to edit.
+			 */
+			function draftFromFormKeepingRows(form, previous) {
+			    const seeded = draftFromForm(form);
+			    if (previous.length === 0)
+			        return seeded;
+			    return { ...seeded, backend: { ...seeded.backend, profiles: (0, panel_1.reseedProfileRows)(previous, seeded.backend.profiles) } };
 			}
 			/**
 			 * Observable state of the Reflex settings page.
@@ -3229,54 +3384,88 @@ window.__ModuleLoader__.load({
 			     *
 			     * The row carries no name yet: an unnamed row cannot become a settings path,
 			     * so {@link groupWrites} skips it until the user names it. A default name is
-			     * *not* invented — two clicks would then collide on it.
+			     * *not* invented — two clicks would then collide on it. Its page identity is
+			     * minted here ({@link createProfileRowId}), never derived from the name.
 			     */
 			    addProfile() {
 			        this.edit((draft) => ({
 			            ...draft,
 			            backend: {
 			                ...draft.backend,
-			                profiles: [
-			                    ...draft.backend.profiles,
-			                    {
-			                        name: '',
-			                        baseUrl: '',
-			                        model: '',
-			                        apiKeyEnv: '',
-			                        timeoutMs: '',
-			                        backend: '',
-			                        apiKey: '',
-			                        apiKeyPresent: false,
-			                        apiKeyFromProfile: false,
-			                        apiKeyVariable: '',
-			                        // A blank row has locked onto nothing yet: `env` is the neutral tag
-			                        // until the Host reports where a saved row's key really comes from.
-			                        apiKeySource: 'env',
-			                        apiKeyLocked: false,
-			                        clearKey: false
-			                    }
-			                ]
+			                profiles: [...draft.backend.profiles, blankProfileRow((0, panel_1.createProfileRowId)())]
 			            }
 			        }));
 			    }
 			    /**
-			     * Remove one profile row by name.
+			     * Remove exactly one profile row, addressed by its page identity.
+			     *
+			     * The row is found by `id`, never by name (g-062): every unnamed row shares
+			     * the name `''`, so a name filter used to delete all of them at once.
 			     *
 			     * Removing the active profile also clears `active`, so the settings document
 			     * never names a profile the user just deleted (which would resolve as the
 			     * `activeProfileMissing` fallback until the next save).
-			     * @param name - the row's profile name.
+			     * @param id - the row's page identity.
 			     */
-			    removeProfile(name) {
+			    removeProfile(id) {
 			        this.edit((draft) => {
-			            const profiles = draft.backend.profiles.filter((row) => row.name.trim() !== name);
-			            const active = draft.backend.active.trim() === name ? '' : draft.backend.active;
-			            return { ...draft, backend: { ...draft.backend, profiles, active } };
+			            const removed = draft.backend.profiles.find((row) => row.id === id);
+			            if (removed === undefined)
+			                return draft;
+			            const name = removed.name.trim();
+			            const profiles = draft.backend.profiles.filter((row) => row.id !== id);
+			            // Only the row actually deleted may clear `active`; two rows can share a
+			            // name in the draft before a save, and the survivor keeps the marker.
+			            const stillActivated = profiles.some((row) => row.name.trim() === name);
+			            const wasActive = name.length > 0 && draft.backend.active.trim() === name && !stillActivated;
+			            return { ...draft, backend: { ...draft.backend, profiles, active: wasActive ? '' : draft.backend.active } };
 			        });
+			    }
+			    /**
+			     * Make one row the active profile, addressed by its page identity.
+			     *
+			     * Activation is recorded in the *draft* ({@link PanelDraft.backend}.active),
+			     * so it is visible at once and only reaches the settings document on save.
+			     * An unnamed row has no name to activate — the page disables that action and
+			     * this method refuses it, so a stale click can never write `active: ''`.
+			     * @param id - the row's page identity.
+			     * @returns whether the row could be activated.
+			     */
+			    setActiveProfile(id) {
+			        const row = this.#state.draft.backend.profiles.find((candidate) => candidate.id === id);
+			        if (row === undefined || row.name.trim().length === 0)
+			            return false;
+			        const name = row.name.trim();
+			        if (this.#state.draft.backend.active.trim() === name)
+			            return true;
+			        this.edit((draft) => ({ ...draft, backend: { ...draft.backend, active: name } }));
+			        return true;
+			    }
+			    /**
+			     * Probe one row's connection, addressed by its page identity.
+			     *
+			     * The Host probes the *saved* document (its own resolution chain), so only a
+			     * row whose name the Host already knows can be tested; the page disables the
+			     * action otherwise. The result is still filed under the profile name, which
+			     * is what the probe route is addressed by.
+			     * @param id - the row's page identity.
+			     * @param saved - the profile names the Host's snapshot reports, which is the
+			     *   set it can actually probe.
+			     * @returns settlement once the probe answered, or `false` without a request.
+			     */
+			    async testProfile(id, saved) {
+			        const row = this.#state.draft.backend.profiles.find((candidate) => candidate.id === id);
+			        const name = row?.name.trim() ?? '';
+			        if (name.length === 0 || !saved.has(name))
+			            return false;
+			        return this.testSystemOne(name);
 			    }
 			    /** Discard unsaved edits and re-seed from the Host. */
 			    reset() {
-			        const seeded = draftFromForm(this.#options.form.getSnapshot());
+			        // An explicit reset is the one re-seed that may drop the user's work, but a
+			        // row's page identity survives it: the Host answers for the same saved rows,
+			        // so the markers it drives would otherwise be renumbered under the pointer.
+			        const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
 			        this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
 			    }
 			    /**
@@ -3315,7 +3504,7 @@ window.__ModuleLoader__.load({
 			                this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
 			                return false;
 			            }
-			            const seeded = draftFromForm(this.#options.form.getSnapshot());
+			            const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
 			            this.#set({ saving: false, original: seeded, draft: seeded, notice: 'saved', noticeValues: null });
 			            void this.refresh();
 			            return true;
@@ -3420,7 +3609,7 @@ window.__ModuleLoader__.load({
 			            this.#set({ configStatus: form.status, writable: form.writable, revision: form.revision });
 			            return;
 			        }
-			        const seeded = draftFromForm(form);
+			        const seeded = draftFromFormKeepingRows(form, this.#state.draft.backend.profiles);
 			        this.#set({
 			            configStatus: form.status,
 			            writable: form.writable,
@@ -4112,21 +4301,51 @@ window.__ModuleLoader__.load({
 			 * not the value — and can only be destroyed through the explicit Clear action.
 			 */
 			function ProfileRow(props) {
-			    const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+			    const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
+			    const name = profile.name.trim();
+			    const named = name.length > 0;
+			    // The availability matrix (g-062). Activation writes the *draft*, so a named
+			    // row can be activated before it is saved; a probe reads the **saved** document
+			    // on the Host, so an unsaved row has nothing to probe; and an unnamed row can
+			    // be neither, because an empty name is not a settings path.
+			    //
+			    // Every disabled button carries its reason in `title` *and* in a visible note,
+			    // not just a dimmed paint: "nothing happens when I click" was the report.
+			    const activateBlocked = !named ? t('profileNeedName') : disabled ? t('profileWriteBlocked') : undefined;
+			    const testBlocked = !named
+			        ? t('profileNeedName')
+			        : !saved
+			            ? t('profileNeedSave')
+			            : probe?.phase === 'testing'
+			                ? t('profileTesting')
+			                : disabled
+			                    ? t('profileWriteBlocked')
+			                    : undefined;
 			    // The variable reported is the one the resolution reported, which is the one
 			    // that *supplied* the key when there is one, and the named-but-empty one when
 			    // the row locked onto a variable (g-059). A named row can no longer be served
 			    // by a different variable, so the two cases can no longer be confused.
 			    const keyVariable = profile.apiKeyFromProfile ? '' : profile.apiKeyVariable || profile.apiKeyEnv || '—';
-			    const keyState = profile.apiKeyPresent
-			        ? profile.apiKeyFromProfile
-			            ? t('profileKeyStored')
-			            : profile.apiKeySource === 'fallback'
-			                ? t('profileKeyFromFallback').replace('{name}', keyVariable)
-			                : t('profileKeyFromEnv').replace('{name}', keyVariable)
-			        : profile.apiKeyLocked
-			            ? t('profileKeyLocked').replace('{name}', keyVariable)
-			            : t('profileKeyMissing');
+			    // A row the Host has never seen has no resolution answer, so its key state is
+			    // read off the *draft* instead (g-062): the snapshot simply cannot describe
+			    // the variable the user just typed, and rendering that absence as "no variable
+			    // named" contradicted the field sitting next to it.
+			    const draftVariable = profile.apiKeyEnv.trim();
+			    const keyState = !saved
+			        ? profile.apiKey.trim().length > 0
+			            ? t('profileKeyPendingLiteral')
+			            : draftVariable.length > 0
+			                ? t('profileKeyPendingEnv').replace('{name}', draftVariable)
+			                : t('profileKeyMissingPending')
+			        : profile.apiKeyPresent
+			            ? profile.apiKeyFromProfile
+			                ? t('profileKeyStored')
+			                : profile.apiKeySource === 'fallback'
+			                    ? t('profileKeyFromFallback').replace('{name}', keyVariable)
+			                    : t('profileKeyFromEnv').replace('{name}', keyVariable)
+			            : profile.apiKeyLocked
+			                ? t('profileKeyLocked').replace('{name}', keyVariable)
+			                : t('profileKeyMissing');
 			    const statusLabel = (status) => {
 			        switch (status) {
 			            case 'ok':
@@ -4145,21 +4364,26 @@ window.__ModuleLoader__.load({
 			                return status ?? '—';
 			        }
 			    };
-			    const name = profile.name.trim();
-			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': name }, (0, react_1.createElement)('div', { style: S.profileHead }, (0, react_1.createElement)('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name), isActive
+			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': profile.id }, (0, react_1.createElement)('div', { style: S.profileHead }, (0, react_1.createElement)('span', { style: S.profileName }, name.length === 0 ? t('profileName') : name), isActive
 			        ? (0, react_1.createElement)('span', { style: { ...S.hint, color: token('--dsw-alias-state-success-primary', '#34d399') } }, t('profileActive'))
 			        : Button({
 			            label: t('profileActivate'),
 			            small: true,
-			            disabled: disabled,
-			            onClick: () => store.edit((current) => ({ ...current, backend: { ...current.backend, active: name } }))
+			            disabled: activateBlocked !== undefined,
+			            // The reason is the tooltip; it is also spelled out in the row's note
+			            // below, because a tooltip is unreachable on a disabled control in
+			            // several browsers.
+			            title: activateBlocked ?? t('profileActivate'),
+			            onClick: () => void store.setActiveProfile(profile.id)
 			        }), 
-			    // The test is a server-side probe: the button never carries the key.
+			    // The test is a server-side probe of the *saved* document: the button never
+			    // carries the key, and it cannot describe a row the Host has not read yet.
 			    Button({
 			        label: probe?.phase === 'testing' ? t('profileTesting') : t('profileTest'),
 			        small: true,
-			        disabled: probe?.phase === 'testing' || name.length === 0,
-			        onClick: () => void store.testSystemOne(name)
+			        disabled: testBlocked !== undefined,
+			        title: testBlocked ?? t('profileTest'),
+			        onClick: () => void store.testProfile(profile.id, new Set(saved ? [name] : []))
 			    }), probe?.phase === 'done' && probe.result !== undefined
 			        ? (0, react_1.createElement)('span', {
 			            style: {
@@ -4174,9 +4398,20 @@ window.__ModuleLoader__.load({
 			        label: t('profileRemove'),
 			        kind: 'danger',
 			        small: true,
-			        disabled: disabled,
-			        onClick: () => store.removeProfile(name)
-			    })), (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
+			        // Always available (per row, by identity): an unnamed row is exactly the
+			        // one a user wants to take back, and it used to take its neighbours too.
+			        disabled,
+			        title: t('profileRemoveRow'),
+			        onClick: () => store.removeProfile(profile.id)
+			    })), 
+			    // Why a control above is greyed out, written out in the row: a disabled
+			    // button swallows hover on some browsers, so a tooltip alone can explain
+			    // nothing. One line, the first reason that applies.
+			    activateBlocked !== undefined
+			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'activate' }, activateBlocked)
+			        : null, testBlocked !== undefined && testBlocked !== t('profileTesting')
+			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
+			        : null, (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			        t,
 			        path: 'systemOne.profiles.baseUrl',
 			        label: t('labelBaseUrl'),
@@ -4213,7 +4448,7 @@ window.__ModuleLoader__.load({
 			    (0, react_1.createElement)('input', {
 			        type: 'password',
 			        autocomplete: 'new-password',
-			        'data-profile-key': name,
+			        'data-profile-key': profile.id,
 			        placeholder: t('profileKeyPlaceholder'),
 			        value: profile.apiKey,
 			        disabled: disabled || profile.clearKey,
@@ -4238,7 +4473,9 @@ window.__ModuleLoader__.load({
 			            }
 			        })
 			        : null, profile.clearKey
-			        ? Button({ label: t('profileRemove'), small: true, onClick: () => onEdit({ clearKey: false }) })
+			        // Cancelling the pending clear is labelled apart from removing the row:
+			        // "删除" twice in one row is how a user deletes a row by mistake.
+			        ? Button({ label: t('profileClearCancel'), small: true, onClick: () => onEdit({ clearKey: false }) })
 			        : null));
 			}
 			/** Backend page: the System 1 connection and the runtime-level fields. */
@@ -4280,12 +4517,18 @@ window.__ModuleLoader__.load({
 			    const flatConfigured = [draft.backend.baseUrl, draft.backend.model, draft.backend.apiKeyEnv, draft.backend.timeoutMs].some((field) => field.trim().length > 0);
 			    const flatSummary = `${t('backendFlatFoldRole')} · ${draft.backend.backend} · ${flatKeyState}${flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''}`;
 			    const activeMissing = systemOne?.activeProfileMissing === true;
-			    const setProfile = (index, patch) => {
+			    // Which rows the Host has actually read: the probe route resolves the *saved*
+			    // document, so this set is what decides whether "测试" can do anything. The
+			    // draft's names are not enough — a name only a draft knows is not on the Host.
+			    const savedNames = new Set((systemOne?.profiles ?? []).map((profile) => profile.name?.trim() ?? '').filter((name) => name.length > 0));
+			    // Rows are addressed by their page identity, never by position: one row's edit
+			    // must never land on whichever row happens to be third after a delete.
+			    const setProfile = (id, patch) => {
 			        store.edit((current) => ({
 			            ...current,
 			            backend: {
 			                ...current.backend,
-			                profiles: current.backend.profiles.map((row, position) => (position === index ? { ...row, ...patch } : row))
+			                profiles: current.backend.profiles.map((row) => (row.id === id ? { ...row, ...patch } : row))
 			            }
 			        }));
 			    };
@@ -4297,16 +4540,19 @@ window.__ModuleLoader__.load({
 			            ? (0, react_1.createElement)('div', { style: S.banner }, t('activeProfileMissing').replace('{name}', activeName))
 			            : null, profiles.length === 0
 			            ? (0, react_1.createElement)('div', { style: S.empty }, t('profilesEmpty'))
-			            : (0, react_1.createElement)('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, ...profiles.map((profile, index) => (0, react_1.createElement)(ProfileRow, {
-			                key: `${profile.name}:${String(index)}`,
+			            : (0, react_1.createElement)('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, ...profiles.map((profile) => (0, react_1.createElement)(ProfileRow, {
+			                // The page identity, not the name: two unnamed rows produced the
+			                // same `${name}:${index}` key and React reused one row's DOM for
+			                // the other (g-062).
+			                key: profile.id,
 			                t,
-			                index,
 			                profile,
 			                isActive: activeName.length > 0 && profile.name.trim() === activeName,
 			                probe: state.probes[profile.name.trim()],
+			                saved: savedNames.has(profile.name.trim()),
 			                disabled,
 			                store,
-			                onEdit: (patch) => setProfile(index, patch)
+			                onEdit: (patch) => setProfile(profile.id, patch)
 			            }))), Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() }))
 			    }), 
 			    // g-058: the flat block is the *compatibility* surface now — profiles above

@@ -189,6 +189,263 @@ test('the active name is written, and an empty one is an unset rather than left 
   assert.equal(writeAt(panel.groupWrites(draftWith([row()], ''), 'backend'), ['systemOne', 'active'])?.value, undefined);
 });
 
+//#region row identity (g-062)
+
+/**
+ * The store module of the built client.
+ *
+ * The page's own state machine is plain JavaScript once compiled — no React, no
+ * browser global — so the row-identity behaviour can be driven directly rather
+ * than through a rendered tree, which is what these cases need: a *sequence* of
+ * clicks, each depending on the previous one.
+ */
+interface StoreModule {
+  PanelStore: new (options: Record<string, unknown>) => {
+    getState(): any;
+    edit(mutate: (draft: any) => any): void;
+    addProfile(): void;
+    removeProfile(id: string): void;
+    setActiveProfile(id: string): boolean;
+    testProfile(id: string, saved: ReadonlySet<string>): Promise<boolean>;
+    save(): Promise<boolean>;
+    reset(): void;
+    dispose(): void;
+  };
+  draftFromForm(form: unknown): any;
+  draftFromFormKeepingRows(form: unknown, previous: readonly any[]): any;
+}
+
+const storeModule = loadModule('store') as unknown as StoreModule;
+
+/** A settings form over one authored document, recording what a save writes. */
+function fakeForm(value: unknown): {
+  form: Record<string, unknown> & { getSnapshot(): unknown };
+  mutations: { ops: any[]; revision: unknown }[];
+  replace(next: unknown): void;
+} {
+  const mutations: { ops: any[]; revision: unknown }[] = [];
+  let snapshot: Record<string, unknown> = { status: 'ready', value, base: 0, user: 0, revision: 1, writable: true };
+  const listeners = new Set<() => void>();
+  return {
+    mutations,
+    form: {
+      getSnapshot: () => snapshot,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+      mutate: async (ops: unknown, revision?: number) => {
+        mutations.push({ ops: ops as any[], revision });
+        return true;
+      }
+    },
+    replace: (next: unknown) => {
+      snapshot = { ...snapshot, value: next, revision: (Number(snapshot.revision) ?? 0) + 1 };
+      for (const listener of [...listeners]) listener();
+    }
+  };
+}
+
+/** A store over one authored document, with polling switched off. */
+function makeStore(value: unknown = { backend: 'jev', systemOne: { profiles: {} } }): {
+  store: InstanceType<StoreModule['PanelStore']>;
+  form: ReturnType<typeof fakeForm>;
+  fetched: string[];
+} {
+  // Shipping routing needs at least one usable candidate, so an empty pool would
+  // fail validation for a reason that has nothing to do with the rows under test.
+  const form = fakeForm({ ...(value as Record<string, unknown>), routing: { enabled: false } });
+  const fetched: string[] = [];
+  const store = new storeModule.PanelStore({
+    form: form.form,
+    fetch: async (url: string) => {
+      fetched.push(url);
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+    pollIntervalMs: 0
+  });
+  return { store, form, fetched };
+}
+
+test('deleting one unnamed row deletes exactly one row', () => {
+  const { store } = makeStore();
+  store.addProfile();
+  store.addProfile();
+  store.addProfile();
+  const before = store.getState().draft.backend.profiles as any[];
+  assert.equal(before.length, 3, 'three unnamed candidate rows');
+  assert.equal(new Set(before.map((row) => row.id)).size, 3, 'every row has its own identity');
+  const victim = before[1]!;
+  store.removeProfile(victim.id);
+  const after = store.getState().draft.backend.profiles as any[];
+  // The regression this pins: `filter(row => row.name.trim() !== '')` removed
+  // *all* three unnamed rows, so this went from 3 to 0 rather than 3 to 2.
+  assert.equal(after.length, 2, 'one remove must take one row, not every unnamed one');
+  // Ids come from the sandbox realm, so they are stringified before comparing.
+  assert.deepEqual(
+    [...after.map((row) => row.id)],
+    [...[before[0]!.id, before[2]!.id]],
+    'the pressed row is the row that went'
+  );
+});
+
+test('deleting a named row leaves the unnamed rows and the active marker alone', () => {
+  const { store } = makeStore({ backend: 'jev', systemOne: { active: 'primary', profiles: { primary: { model: 'm' } } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const named = rows().find((row) => row.name === 'primary');
+  assert.ok(named !== undefined, 'the saved row is seeded');
+  store.removeProfile(named.id);
+  assert.equal(rows().length, 1, 'the unnamed row survives');
+  assert.equal(rows()[0]!.name, '', 'the survivor is the unnamed one');
+  // Removing the active profile clears it, so the document never names a row the
+  // user just deleted.
+  assert.equal(store.getState().draft.backend.active, '', 'the active profile was the one removed');
+});
+
+test('removing one of two same-named rows keeps the activation', () => {
+  const { store } = makeStore({ backend: 'jev', systemOne: { active: 'primary', profiles: { primary: { model: 'm' } } } });
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: [
+        ...current.backend.profiles,
+        // A second row that happens to carry the same name in the draft: the
+        // activation must survive deleting one of the two.
+        { ...current.backend.profiles[0], id: 'dup-row' }
+      ]
+    }
+  }));
+  store.removeProfile('dup-row');
+  assert.equal(store.getState().draft.backend.active, 'primary', 'the survivor still carries the active name');
+  const remaining = store.getState().draft.backend.profiles as any[];
+  assert.equal(remaining.length, 1);
+  store.removeProfile(remaining[0]!.id);
+  assert.equal(store.getState().draft.backend.active, '', 'the last holder of the name clears it');
+});
+
+test('activating a row is addressed by identity and is visible at once', () => {
+  const { store } = makeStore({
+    backend: 'jev',
+    systemOne: { profiles: { primary: { model: 'm' }, secondary: { model: 'n' } } }
+  });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const secondary = rows().find((row) => row.name === 'secondary');
+  assert.ok(secondary !== undefined);
+  // Activation is a draft edit: it shows immediately, before any save.
+  assert.equal(store.setActiveProfile(secondary.id), true, 'a named row can be activated');
+  assert.equal(store.getState().draft.backend.active, 'secondary');
+});
+
+test('activating an unnamed row is refused instead of writing an empty active', () => {
+  const { store } = makeStore({ backend: 'jev', systemOne: { active: 'primary', profiles: { primary: { model: 'm' } } } });
+  store.addProfile();
+  const blank = (store.getState().draft.backend.profiles as any[]).find((row) => row.name === '');
+  assert.ok(blank !== undefined);
+  assert.equal(store.setActiveProfile(blank.id), false, 'an unnamed row has no name to activate');
+  // The regression: `active: ''` was written and the screen never changed.
+  assert.equal(store.getState().draft.backend.active, 'primary', 'the previous activation is untouched');
+});
+
+test('a row is tested only when the Host already knows its name', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { primary: { model: 'm' } } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const named = rows().find((row) => row.name === 'primary');
+  const blank = rows().find((row) => row.name === '');
+  const saved = new Set(['primary']);
+
+  assert.equal(await store.testProfile(blank!.id, saved), false, 'an unnamed row cannot be probed');
+  assert.equal(store.getState().probes[''], undefined, 'no probe state was recorded for the empty name');
+
+  // A named row the Host has not read yet is not probeable either.
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) => (row.id === blank.id ? { ...row, name: 'fresh' } : row))
+    }
+  }));
+  assert.equal(await store.testProfile(blank!.id, saved), false, 'an unsaved row has nothing on the Host to probe');
+  // Once the Host reports it, the same click works and files the result by name.
+  assert.equal(await store.testProfile(named!.id, saved), true);
+  assert.equal(store.getState().probes['primary']?.phase, 'done');
+  assert.deepEqual(form.mutations, [], 'testing a connection never writes the document');
+});
+
+test('saving still writes only named rows, and never a row identity', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { base: {} } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const blank = rows().find((row) => row.name === '')!;
+  assert.equal(blank.name, '', 'the row starts unnamed');
+  // Save the row the way the user does: name it, fill it in, then save.
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) =>
+        row.id === blank.id ? { ...row, name: 'aseit', baseUrl: 'https://newapi.example/v1', apiKeyEnv: 'NEWAPI_ASEIT_API_KEY' } : row
+      )
+    }
+  }));
+  assert.equal(await store.save(), true, `the save went through: ${JSON.stringify(store.getState().errors)}`);
+  const ops = form.mutations.flatMap((mutation) => mutation.ops);
+  assert.ok(ops.length > 0, 'the named row was written');
+  const serialized = JSON.stringify(ops);
+  // The identity is page state: no op may name it, and no op may address a
+  // profile path whose name segment is empty.
+  assert.equal(serialized.includes('profile-'), false, 'a row identity reached the settings write');
+  for (const op of ops) {
+    if (op.path?.[0] !== 'systemOne' || op.path?.[1] !== 'profiles') continue;
+    assert.notEqual(String(op.path[2]).trim(), '', `an unnamed row produced the path ${(op.path as string[]).join('.')}`);
+  }
+});
+
+test('an unnamed row is never written, and survives the save that follows', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { base: {} } } });
+  store.addProfile();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const blank = rows().find((row) => row.name === '')!;
+  // Fill the unnamed row in, the way the report did — but never name it.
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) =>
+        row.id === blank.id ? { ...row, baseUrl: 'https://newapi.example/v1', apiKeyEnv: 'NEWAPI_ASEIT_API_KEY' } : row
+      )
+    }
+  }));
+  // An unnamed row is not a settings path, so there is nothing to write at all.
+  assert.equal(await store.save(), true, 'a save with no writable change is not an error');
+  const serialized = JSON.stringify(form.mutations.flatMap((mutation) => mutation.ops));
+  assert.equal(serialized.includes('NEWAPI_ASEIT_API_KEY'), false, 'an unnamed row reached the document');
+  assert.equal(serialized.includes('profile-'), false, 'a row identity reached the settings write');
+  // The re-seed that followed the save read a document that never held this row:
+  // it must not disappear from under the user.
+  const after = rows().filter((row) => row.name === '');
+  assert.equal(after.length, 1, `an unsaved row must survive the save; rows: ${rows().map((row) => row.name).join(',')}`);
+  assert.equal(after[0]!.id, blank.id, 'and keep its identity');
+  assert.equal(after[0]!.apiKeyEnv, 'NEWAPI_ASEIT_API_KEY', 'with its typed value');
+});
+
+test('a re-seed matches rows by name even when the unnamed rows sit above them', () => {
+  const form = fakeForm({ backend: 'jev', systemOne: { profiles: { primary: { model: 'm' } } } });
+  const seeded = storeModule.draftFromForm(form.form.getSnapshot());
+  const [primary] = seeded.backend.profiles as any[];
+  // User state: one blank row added *first*, then the saved row.
+  const blank = { ...primary, id: 'blank-row', name: '', model: '', baseUrl: '' };
+  const onScreen = [blank, primary];
+  // The document answers for `primary` only; the blank row is not in it.
+  const next = storeModule.draftFromFormKeepingRows(form.form.getSnapshot(), onScreen);
+  const ids = (next.backend.profiles as any[]).map((row) => row.id);
+  assert.ok(ids.includes('blank-row'), `the unsaved row must survive a re-seed; got ${ids.join(',')}`);
+  assert.equal(next.backend.profiles.find((row: any) => row.id === 'blank-row')!.name, '', 'it stays unnamed');
+  assert.ok(ids.includes(primary.id), 'the saved row keeps its identity');
+});
+
 test('profileRowsFrom seeds rows in authored order and drops malformed entries', () => {
   const rows = panel.profileRowsFrom({
     a: { model: 'ma', apiKey: 'stored-never-returned' },

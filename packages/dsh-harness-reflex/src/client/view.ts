@@ -963,29 +963,60 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
  */
 function ProfileRow(props: {
   t: Translate;
-  index: number;
   profile: ProfileDraft;
   isActive: boolean;
   probe: ProbeState | undefined;
+  /** Whether this row's name is in the Host snapshot, i.e. the Host can probe it. */
+  saved: boolean;
   disabled: boolean;
   store: PanelStore;
   onEdit: (patch: Partial<ProfileDraft>) => void;
 }): ReactNode {
-  const { t, profile, isActive, probe, disabled, store, onEdit } = props;
+  const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
+  const name = profile.name.trim();
+  const named = name.length > 0;
+  // The availability matrix (g-062). Activation writes the *draft*, so a named
+  // row can be activated before it is saved; a probe reads the **saved** document
+  // on the Host, so an unsaved row has nothing to probe; and an unnamed row can
+  // be neither, because an empty name is not a settings path.
+  //
+  // Every disabled button carries its reason in `title` *and* in a visible note,
+  // not just a dimmed paint: "nothing happens when I click" was the report.
+  const activateBlocked = !named ? t('profileNeedName') : disabled ? t('profileWriteBlocked') : undefined;
+  const testBlocked = !named
+    ? t('profileNeedName')
+    : !saved
+      ? t('profileNeedSave')
+      : probe?.phase === 'testing'
+        ? t('profileTesting')
+        : disabled
+          ? t('profileWriteBlocked')
+          : undefined;
   // The variable reported is the one the resolution reported, which is the one
   // that *supplied* the key when there is one, and the named-but-empty one when
   // the row locked onto a variable (g-059). A named row can no longer be served
   // by a different variable, so the two cases can no longer be confused.
   const keyVariable = profile.apiKeyFromProfile ? '' : profile.apiKeyVariable || profile.apiKeyEnv || '—';
-  const keyState = profile.apiKeyPresent
-    ? profile.apiKeyFromProfile
-      ? t('profileKeyStored')
-      : profile.apiKeySource === 'fallback'
-        ? t('profileKeyFromFallback').replace('{name}', keyVariable)
-        : t('profileKeyFromEnv').replace('{name}', keyVariable)
-    : profile.apiKeyLocked
-      ? t('profileKeyLocked').replace('{name}', keyVariable)
-      : t('profileKeyMissing');
+  // A row the Host has never seen has no resolution answer, so its key state is
+  // read off the *draft* instead (g-062): the snapshot simply cannot describe
+  // the variable the user just typed, and rendering that absence as "no variable
+  // named" contradicted the field sitting next to it.
+  const draftVariable = profile.apiKeyEnv.trim();
+  const keyState = !saved
+    ? profile.apiKey.trim().length > 0
+      ? t('profileKeyPendingLiteral')
+      : draftVariable.length > 0
+        ? t('profileKeyPendingEnv').replace('{name}', draftVariable)
+        : t('profileKeyMissingPending')
+    : profile.apiKeyPresent
+      ? profile.apiKeyFromProfile
+        ? t('profileKeyStored')
+        : profile.apiKeySource === 'fallback'
+          ? t('profileKeyFromFallback').replace('{name}', keyVariable)
+          : t('profileKeyFromEnv').replace('{name}', keyVariable)
+      : profile.apiKeyLocked
+        ? t('profileKeyLocked').replace('{name}', keyVariable)
+        : t('profileKeyMissing');
   const statusLabel = (status: string | undefined): string => {
     switch (status) {
       case 'ok':
@@ -1004,10 +1035,9 @@ function ProfileRow(props: {
         return status ?? '—';
     }
   };
-  const name = profile.name.trim();
   return h(
     'div',
-    { style: S.profileRow, 'data-profile': name },
+    { style: S.profileRow, 'data-profile': profile.id },
     h(
       'div',
       { style: S.profileHead },
@@ -1017,15 +1047,21 @@ function ProfileRow(props: {
         : Button({
             label: t('profileActivate'),
             small: true,
-            disabled: disabled,
-            onClick: () => store.edit((current) => ({ ...current, backend: { ...current.backend, active: name } }))
+            disabled: activateBlocked !== undefined,
+            // The reason is the tooltip; it is also spelled out in the row's note
+            // below, because a tooltip is unreachable on a disabled control in
+            // several browsers.
+            title: activateBlocked ?? t('profileActivate'),
+            onClick: () => void store.setActiveProfile(profile.id)
           }),
-      // The test is a server-side probe: the button never carries the key.
+      // The test is a server-side probe of the *saved* document: the button never
+      // carries the key, and it cannot describe a row the Host has not read yet.
       Button({
         label: probe?.phase === 'testing' ? t('profileTesting') : t('profileTest'),
         small: true,
-        disabled: probe?.phase === 'testing' || name.length === 0,
-        onClick: () => void store.testSystemOne(name)
+        disabled: testBlocked !== undefined,
+        title: testBlocked ?? t('profileTest'),
+        onClick: () => void store.testProfile(profile.id, new Set(saved ? [name] : []))
       }),
       probe?.phase === 'done' && probe.result !== undefined
         ? h(
@@ -1049,10 +1085,22 @@ function ProfileRow(props: {
         label: t('profileRemove'),
         kind: 'danger',
         small: true,
-        disabled: disabled,
-        onClick: () => store.removeProfile(name)
+        // Always available (per row, by identity): an unnamed row is exactly the
+        // one a user wants to take back, and it used to take its neighbours too.
+        disabled,
+        title: t('profileRemoveRow'),
+        onClick: () => store.removeProfile(profile.id)
       })
     ),
+    // Why a control above is greyed out, written out in the row: a disabled
+    // button swallows hover on some browsers, so a tooltip alone can explain
+    // nothing. One line, the first reason that applies.
+    activateBlocked !== undefined
+      ? h('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'activate' }, activateBlocked)
+      : null,
+    testBlocked !== undefined && testBlocked !== t('profileTesting')
+      ? h('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
+      : null,
     h(
       'div',
       { style: S.fieldRow },
@@ -1100,7 +1148,7 @@ function ProfileRow(props: {
       h('input', {
         type: 'password',
         autocomplete: 'new-password',
-        'data-profile-key': name,
+        'data-profile-key': profile.id,
         placeholder: t('profileKeyPlaceholder'),
         value: profile.apiKey,
         disabled: disabled || profile.clearKey,
@@ -1126,7 +1174,9 @@ function ProfileRow(props: {
           })
         : null,
       profile.clearKey
-        ? Button({ label: t('profileRemove'), small: true, onClick: () => onEdit({ clearKey: false }) })
+        // Cancelling the pending clear is labelled apart from removing the row:
+        // "删除" twice in one row is how a user deletes a row by mistake.
+        ? Button({ label: t('profileClearCancel'), small: true, onClick: () => onEdit({ clearKey: false }) })
         : null
     )
   );
@@ -1176,12 +1226,18 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
     flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''
   }`;
   const activeMissing = systemOne?.activeProfileMissing === true;
-  const setProfile = (index: number, patch: Partial<ProfileDraft>): void => {
+  // Which rows the Host has actually read: the probe route resolves the *saved*
+  // document, so this set is what decides whether "测试" can do anything. The
+  // draft's names are not enough — a name only a draft knows is not on the Host.
+  const savedNames = new Set((systemOne?.profiles ?? []).map((profile) => profile.name?.trim() ?? '').filter((name) => name.length > 0));
+  // Rows are addressed by their page identity, never by position: one row's edit
+  // must never land on whichever row happens to be third after a delete.
+  const setProfile = (id: string, patch: Partial<ProfileDraft>): void => {
     store.edit((current) => ({
       ...current,
       backend: {
         ...current.backend,
-        profiles: current.backend.profiles.map((row, position) => (position === index ? { ...row, ...patch } : row))
+        profiles: current.backend.profiles.map((row) => (row.id === id ? { ...row, ...patch } : row))
       }
     }));
   };
@@ -1207,17 +1263,20 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
           : h(
               'div',
               { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-              ...profiles.map((profile, index) =>
+              ...profiles.map((profile) =>
                 h(ProfileRow, {
-                  key: `${profile.name}:${String(index)}`,
+                  // The page identity, not the name: two unnamed rows produced the
+                  // same `${name}:${index}` key and React reused one row's DOM for
+                  // the other (g-062).
+                  key: profile.id,
                   t,
-                  index,
                   profile,
                   isActive: activeName.length > 0 && profile.name.trim() === activeName,
                   probe: state.probes[profile.name.trim()],
+                  saved: savedNames.has(profile.name.trim()),
                   disabled,
                   store,
-                  onEdit: (patch: Partial<ProfileDraft>) => setProfile(index, patch)
+                  onEdit: (patch: Partial<ProfileDraft>) => setProfile(profile.id, patch)
                 })
               )
             ),

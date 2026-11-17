@@ -1596,6 +1596,169 @@ test('an active name that matches no profile is shown as a warning', async () =>
 
 //#endregion
 
+//#region row identity (g-062)
+
+/** The profile rows of the connection page, in document order. */
+function profileRows(tree: unknown): Element[] {
+  return elements(tree).filter((element) => typeof element.props['data-profile'] === 'string');
+}
+
+/** One button of one profile row, found by its label. */
+function rowButton(row: Element, label: string): Element | undefined {
+  return elements(row).find((element) => element.type === 'button' && textOf(element) === label);
+}
+
+/** The status note one profile row prints for a blocked action. */
+function rowBlockedNote(row: Element, action: 'activate' | 'test'): string | undefined {
+  const note = elements(row).find((element) => element.props['data-profile-blocked'] === action);
+  return note === undefined ? undefined : textOf(note).trim();
+}
+
+/** The page with two unnamed candidate rows and one saved row. */
+function rowsFacts(): PanelRuntimeFacts {
+  return profiledFacts();
+}
+
+test('a new, unnamed row disables both actions and says why', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: rowsFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  // Two clicks on "add" produce two rows with their own identity — the very
+  // state in which the remove action used to take both away.
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const rows = profileRows(tree);
+  assert.equal(rows.length, 4, `expected the two saved rows plus two new ones, saw ${rows.length}`);
+  assert.equal(
+    new Set(rows.map((row) => String(row.props['data-profile']))).size,
+    rows.length,
+    'two rows share a data-profile key'
+  );
+  const keys = elements(tree).filter((element) => typeof element.props['data-profile-key'] === 'string');
+  assert.equal(new Set(keys.map((key) => String(key.props['data-profile-key']))).size, keys.length, 'two key inputs share a key');
+
+  // The unnamed rows: activation and testing are greyed *out loud*.
+  const unnamed = rows.filter((row) => !textOf(row).includes('primary') && !textOf(row).includes('secondary'));
+  assert.equal(unnamed.length, 2, 'the two new rows are not identifiable');
+  for (const row of unnamed) {
+    const activate = rowButton(row, '设为激活');
+    const test = rowButton(row, '测试');
+    assert.ok(activate !== undefined && test !== undefined, 'a row is missing its actions');
+    assert.equal(activate.props.disabled, true, 'an unnamed row must not be activatable');
+    assert.equal(test.props.disabled, true, 'an unnamed row must not be testable');
+    // Disabled *with a reason*, in the tooltip and in the row's own text.
+    assert.equal(String(activate.props.title), '先填写配置名');
+    assert.equal(String(test.props.title), '先填写配置名');
+    assert.equal(rowBlockedNote(row, 'activate'), '先填写配置名');
+    assert.equal(rowBlockedNote(row, 'test'), '先填写配置名');
+    // Remove stays available: it only ever removes this row.
+    const remove = elements(row).find((element) => element.type === 'button' && textOf(element) === '删除');
+    assert.equal(remove?.props.disabled, false, 'an unnamed row must always be removable');
+  }
+
+  // A saved row can be tested at once; the unsaved-but-named row cannot.
+  const saved = rows.find((row) => textOf(row).includes('primary'));
+  assert.ok(saved !== undefined);
+  assert.equal(rowButton(saved, '测试')?.props.disabled, false, 'a saved row must be testable');
+  mounted.unmount();
+});
+
+test('removing one unnamed row removes exactly that row', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: rowsFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const before = profileRows(tree);
+  assert.equal(before.length, 4);
+  const victim = before[2]!;
+  const victimId = String(victim.props['data-profile']);
+  fire(rowButton(victim, '删除'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const after = profileRows(tree);
+  assert.equal(after.length, 3, 'one remove must take one row, not every unnamed one');
+  assert.equal(after.some((row) => String(row.props['data-profile']) === victimId), false, 'the pressed row went');
+  for (const row of before) {
+    const id = String(row.props['data-profile']);
+    if (id === victimId) continue;
+    assert.ok(after.some((candidate) => String(candidate.props['data-profile']) === id), `row ${id} was removed too`);
+  }
+  mounted.unmount();
+});
+
+test('an unnamed row keeps its typed connection fields, and says where its key will come from', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: rowsFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const row = profileRows(tree).find((candidate) => !textOf(candidate).includes('primary') && !textOf(candidate).includes('secondary'));
+  assert.ok(row !== undefined, 'the new row is missing');
+  // Fill it in the way the report did — including the variable name — without
+  // ever saving it.
+  const inputs = elements(row).filter((element) => element.type === 'input');
+  assert.ok(inputs.length >= 4, `the row has no connection inputs: ${inputs.length}`);
+  // The four connection fields are baseUrl, model, timeoutMs, apiKeyEnv in order.
+  type(inputs[0], 'https://newapi.aseit.cn/v1');
+  type(inputs[1], 'd3-ultra');
+  type(inputs[2], '2000');
+  type(inputs[3], 'NEWAPI_ASEIT_API_KEY');
+  tree = await mounted.runtime.flush();
+
+  const updated = profileRows(tree).find((candidate) => String(candidate.props['data-profile']) === String(row.props['data-profile']));
+  assert.ok(updated !== undefined, 'the row disappeared while it was being filled in');
+  const text = textOf(updated);
+  // The contradiction this pins: the row said "no variable named" while the
+  // variable name sat in the field beside it.
+  assert.ok(!text.includes('未指定变量名'), `an unsaved row still claims nothing was named: ${text}`);
+  assert.ok(
+    text.includes('保存后将从 NEWAPI_ASEIT_API_KEY 读取（未保存）'),
+    `the row does not say where its key will come from: ${text}`
+  );
+  // Every field the user typed is still there.
+  const values = valuesOf(updated);
+  assert.ok(values.includes('https://newapi.aseit.cn/v1'), 'the base URL was lost');
+  assert.ok(values.includes('d3-ultra'), 'the model was lost');
+  assert.ok(values.includes('NEWAPI_ASEIT_API_KEY'), 'the variable name was lost');
+  // And it is still unnamed, so it is still not testable — with the reason.
+  assert.equal(rowBlockedNote(updated, 'test'), '先填写配置名');
+  mounted.unmount();
+});
+
+test('activating a saved row shows the marker at once', async () => {
+  const { form } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: rowsFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  // `secondary` is not the active profile yet.
+  const secondaryRow = profileRows(tree).find((row) => textOf(row).includes('secondary'));
+  assert.ok(secondaryRow !== undefined);
+  assert.ok(!textOf(secondaryRow).includes('已激活'), 'the fixture already shows the marker');
+  fire(rowButton(secondaryRow, '设为激活'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const activated = profileRows(tree).find((row) => textOf(row).includes('secondary'));
+  assert.ok(activated !== undefined);
+  assert.ok(textOf(activated).includes('已激活'), 'the activation did not show up on the row');
+  // The marker is a draft edit, so nothing was written yet.
+  mounted.unmount();
+});
+
+//#endregion
+
 //#region header status icon
 
 /** The single status button of the rendered header, if any. */

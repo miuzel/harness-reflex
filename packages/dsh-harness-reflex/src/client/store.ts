@@ -21,6 +21,7 @@
 import {
   addPool,
   addPoolEntry,
+  createProfileRowId,
   diffDraft,
   dirtyGroups,
   draftFromConfig,
@@ -29,9 +30,11 @@ import {
   movePoolEntry,
   removePool,
   removePoolEntry,
+  reseedProfileRows,
   validateDraft,
   type PanelDraft,
   type PanelSnapshotLike,
+  type ProfileDraft,
   type SettingsOp
 } from './panel';
 
@@ -221,6 +224,32 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * One blank profile row carrying its page identity.
+ * @param id - the identity minted for this row, never persisted.
+ * @returns the row as the draft holds it.
+ */
+function blankProfileRow(id: string): ProfileDraft {
+  return {
+    id,
+    name: '',
+    baseUrl: '',
+    model: '',
+    apiKeyEnv: '',
+    timeoutMs: '',
+    backend: '',
+    apiKey: '',
+    apiKeyPresent: false,
+    apiKeyFromProfile: false,
+    apiKeyVariable: '',
+    // A blank row has locked onto nothing yet: `env` is the neutral tag until
+    // the Host reports where a saved row's key really comes from.
+    apiKeySource: 'env',
+    apiKeyLocked: false,
+    clearKey: false
+  };
+}
+
+/**
  * Seed a draft from one settings section.
  *
  * The Host reports two layers: `value` (effective, with the profile's compose
@@ -236,6 +265,26 @@ function messageOf(error: unknown): string {
  */
 export function draftFromForm(form: FormSnapshotLike): PanelDraft {
   return draftFromLayers(form.value, form.base);
+}
+
+/**
+ * Seed the draft from the settings document, keeping the profile rows on screen.
+ *
+ * A re-seed is a *re-read* of the document, not a reset of the user's work: the
+ * profile rows are the one part of the draft the document does not describe
+ * faithfully, because an unnamed row is not written to it at all (g-062). The
+ * rows in force are therefore carried across, identity included — see
+ * {@link reseedProfileRows} — so a save can no longer wipe the row the user was
+ * still filling in, and `data-profile` stays stable across a write.
+ *
+ * @param form - the settings form snapshot.
+ * @param previous - the profile rows currently on screen, if any.
+ * @returns the draft to edit.
+ */
+export function draftFromFormKeepingRows(form: FormSnapshotLike, previous: readonly ProfileDraft[]): PanelDraft {
+  const seeded = draftFromForm(form);
+  if (previous.length === 0) return seeded;
+  return { ...seeded, backend: { ...seeded.backend, profiles: reseedProfileRows(previous, seeded.backend.profiles) } };
 }
 
 /**
@@ -480,56 +529,88 @@ export class PanelStore {
    *
    * The row carries no name yet: an unnamed row cannot become a settings path,
    * so {@link groupWrites} skips it until the user names it. A default name is
-   * *not* invented — two clicks would then collide on it.
+   * *not* invented — two clicks would then collide on it. Its page identity is
+   * minted here ({@link createProfileRowId}), never derived from the name.
    */
   addProfile(): void {
     this.edit((draft) => ({
       ...draft,
       backend: {
         ...draft.backend,
-        profiles: [
-          ...draft.backend.profiles,
-          {
-            name: '',
-            baseUrl: '',
-            model: '',
-            apiKeyEnv: '',
-            timeoutMs: '',
-            backend: '',
-            apiKey: '',
-            apiKeyPresent: false,
-            apiKeyFromProfile: false,
-            apiKeyVariable: '',
-            // A blank row has locked onto nothing yet: `env` is the neutral tag
-            // until the Host reports where a saved row's key really comes from.
-            apiKeySource: 'env',
-            apiKeyLocked: false,
-            clearKey: false
-          }
-        ]
+        profiles: [...draft.backend.profiles, blankProfileRow(createProfileRowId())]
       }
     }));
   }
 
   /**
-   * Remove one profile row by name.
+   * Remove exactly one profile row, addressed by its page identity.
+   *
+   * The row is found by `id`, never by name (g-062): every unnamed row shares
+   * the name `''`, so a name filter used to delete all of them at once.
    *
    * Removing the active profile also clears `active`, so the settings document
    * never names a profile the user just deleted (which would resolve as the
    * `activeProfileMissing` fallback until the next save).
-   * @param name - the row's profile name.
+   * @param id - the row's page identity.
    */
-  removeProfile(name: string): void {
+  removeProfile(id: string): void {
     this.edit((draft) => {
-      const profiles = draft.backend.profiles.filter((row) => row.name.trim() !== name);
-      const active = draft.backend.active.trim() === name ? '' : draft.backend.active;
-      return { ...draft, backend: { ...draft.backend, profiles, active } };
+      const removed = draft.backend.profiles.find((row) => row.id === id);
+      if (removed === undefined) return draft;
+      const name = removed.name.trim();
+      const profiles = draft.backend.profiles.filter((row) => row.id !== id);
+      // Only the row actually deleted may clear `active`; two rows can share a
+      // name in the draft before a save, and the survivor keeps the marker.
+      const stillActivated = profiles.some((row) => row.name.trim() === name);
+      const wasActive = name.length > 0 && draft.backend.active.trim() === name && !stillActivated;
+      return { ...draft, backend: { ...draft.backend, profiles, active: wasActive ? '' : draft.backend.active } };
     });
+  }
+
+  /**
+   * Make one row the active profile, addressed by its page identity.
+   *
+   * Activation is recorded in the *draft* ({@link PanelDraft.backend}.active),
+   * so it is visible at once and only reaches the settings document on save.
+   * An unnamed row has no name to activate — the page disables that action and
+   * this method refuses it, so a stale click can never write `active: ''`.
+   * @param id - the row's page identity.
+   * @returns whether the row could be activated.
+   */
+  setActiveProfile(id: string): boolean {
+    const row = this.#state.draft.backend.profiles.find((candidate) => candidate.id === id);
+    if (row === undefined || row.name.trim().length === 0) return false;
+    const name = row.name.trim();
+    if (this.#state.draft.backend.active.trim() === name) return true;
+    this.edit((draft) => ({ ...draft, backend: { ...draft.backend, active: name } }));
+    return true;
+  }
+
+  /**
+   * Probe one row's connection, addressed by its page identity.
+   *
+   * The Host probes the *saved* document (its own resolution chain), so only a
+   * row whose name the Host already knows can be tested; the page disables the
+   * action otherwise. The result is still filed under the profile name, which
+   * is what the probe route is addressed by.
+   * @param id - the row's page identity.
+   * @param saved - the profile names the Host's snapshot reports, which is the
+   *   set it can actually probe.
+   * @returns settlement once the probe answered, or `false` without a request.
+   */
+  async testProfile(id: string, saved: ReadonlySet<string>): Promise<boolean> {
+    const row = this.#state.draft.backend.profiles.find((candidate) => candidate.id === id);
+    const name = row?.name.trim() ?? '';
+    if (name.length === 0 || !saved.has(name)) return false;
+    return this.testSystemOne(name);
   }
 
   /** Discard unsaved edits and re-seed from the Host. */
   reset(): void {
-    const seeded = draftFromForm(this.#options.form.getSnapshot());
+    // An explicit reset is the one re-seed that may drop the user's work, but a
+    // row's page identity survives it: the Host answers for the same saved rows,
+    // so the markers it drives would otherwise be renumbered under the pointer.
+    const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
     this.#set({ draft: seeded, original: seeded, errors: [], notice: null, noticeValues: null });
   }
 
@@ -567,7 +648,7 @@ export class PanelStore {
         this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
         return false;
       }
-      const seeded = draftFromForm(this.#options.form.getSnapshot());
+      const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
       this.#set({ saving: false, original: seeded, draft: seeded, notice: 'saved', noticeValues: null });
       void this.refresh();
       return true;
@@ -673,7 +754,7 @@ export class PanelStore {
       this.#set({ configStatus: form.status, writable: form.writable, revision: form.revision });
       return;
     }
-    const seeded = draftFromForm(form);
+    const seeded = draftFromFormKeepingRows(form, this.#state.draft.backend.profiles);
     this.#set({
       configStatus: form.status,
       writable: form.writable,

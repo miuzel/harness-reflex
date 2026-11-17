@@ -247,7 +247,18 @@ export interface BackendDraft {
  * can never destroy a working key by saving an unrelated field.
  */
 export interface ProfileDraft {
-  /** Stable key of this row: the profile name as seeded (empty for a new row). */
+  /**
+   * Identity of this row for the lifetime of one page session (g-062).
+   *
+   * The name cannot be the identity: a row the user has not named yet has an
+   * empty name, so deleting or activating "the row called `''`" hit whichever
+   * rows happened to be unnamed — for the remove action, *every* one of them.
+   * This id is minted by the page ({@link createProfileRowId}) and is never
+   * persisted and never sent: the Host addresses a profile by name, and a blank
+   * name is not a path.
+   */
+  id: string;
+  /** The profile's settings key as seeded; empty until the user names the row. */
   name: string;
   baseUrl: string;
   model: string;
@@ -540,6 +551,7 @@ export function profileRowsFrom(value: unknown): ProfileDraft[] {
     const profile = asRecord(entry);
     return [
       {
+        id: createProfileRowId(),
         name,
         baseUrl: asText(profile.baseUrl),
         model: asText(profile.model),
@@ -556,6 +568,93 @@ export function profileRowsFrom(value: unknown): ProfileDraft[] {
       }
     ];
   });
+}
+
+/**
+ * Mint a row identity that is unique within one page session (g-062).
+ *
+ * A module counter, not `crypto.randomUUID`: the client half runs inside a
+ * host page whose globals vary, and the only property needed is uniqueness
+ * among the handful of rows one open page can hold. Ids never leave the page.
+ * @returns the next `profile-<n>` id.
+ */
+export function createProfileRowId(): string {
+  PROFILE_ROW_SEQUENCE += 1;
+  return `profile-${String(PROFILE_ROW_SEQUENCE)}`;
+}
+
+/** The counter behind {@link createProfileRowId}. */
+let PROFILE_ROW_SEQUENCE = 0;
+
+/**
+ * Replace the profile rows of a freshly seeded draft with the rows on screen.
+ *
+ * Called whenever the draft is re-seeded from the settings document (`reset`,
+ * a save that landed, a Host push). Re-seeding re-reads `systemOne.profiles`,
+ * which a save was just told to keep unchanged — profile rows are written as
+ * narrow paths, never a whole-group replace — so the fresh rows are the same
+ * rows this page already holds, minus the unsaved fields the user was still
+ * typing into (an unnamed row is not written at all, so it would vanish).
+ *
+ * The rule is therefore: a fresh row is matched to the row on screen that the
+ * document already answers for; the very same row object is kept, id and all.
+ *
+ * Matching order, weakest last:
+ *   1. by name — a named row resolves uniquely in the document;
+ *   2. by position among the unnamed rows;
+ *   3. one-to-one by content, for the legitimate shuffle where the user names
+ *      one unnamed row while another unnamed row sits *above* it, so the fresh
+ *      named row sorts before the leftover unnamed one. Nothing can tell those
+ *      two rows apart except their values, so equal values claim each other.
+ *
+ * `previous` being empty means the first seed, which keeps the fresh rows.
+ * @param previous - the rows the page is showing.
+ * @param seeded - the rows read back from the settings document.
+ * @returns the rows to put in the re-seeded draft.
+ */
+export function reseedProfileRows(previous: readonly ProfileDraft[], seeded: readonly ProfileDraft[]): ProfileDraft[] {
+  if (previous.length === 0) return seeded.map((row) => ({ ...row }));
+  const content = (row: ProfileDraft): string =>
+    [row.baseUrl, row.model, row.apiKeyEnv, row.timeoutMs, row.backend].map((field) => field.trim()).join('\u0000');
+  const claimed = new Set<ProfileDraft>();
+  const fresh = seeded.map(() => false);
+  const kept: (ProfileDraft | undefined)[] = seeded.map(() => undefined);
+
+  // 1. by name.
+  for (const [index, row] of seeded.entries()) {
+    const name = row.name.trim();
+    if (name.length === 0) continue;
+    const match = previous.find((candidate) => !claimed.has(candidate) && candidate.name.trim() === name);
+    if (match === undefined) continue;
+    claimed.add(match);
+    fresh[index] = true;
+    kept[index] = match;
+  }
+  // 3. unnamed fresh rows by exact content.
+  for (const [index, row] of seeded.entries()) {
+    if (row.name.trim().length > 0) continue;
+    const wanted = content(row);
+    const match = previous.find((candidate) => !claimed.has(candidate) && content(candidate) === wanted);
+    if (match === undefined) continue;
+    claimed.add(match);
+    fresh[index] = true;
+    kept[index] = match;
+  }
+  // 2. the unnamed rows left over, in order.
+  const unclaimedPrevious = previous.filter((row) => !claimed.has(row));
+  for (const [index, row] of seeded.entries()) {
+    if (fresh[index] === true || row.name.trim().length > 0) continue;
+    const match = unclaimedPrevious.shift();
+    if (match === undefined) break;
+    claimed.add(match);
+    fresh[index] = true;
+    kept[index] = match;
+  }
+
+  // Fresh rows nobody claimed are new: they get an id now and sort first below.
+  const result = seeded.map((row, index) => kept[index] ?? { ...row });
+  // The user's own unnamed rows survive the save, in the order they had.
+  return [...result, ...previous.filter((row) => !claimed.has(row))];
 }
 
 /**
@@ -886,7 +985,9 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
       for (const profile of draft.backend.profiles) {
         const name = profile.name.trim();
         // A row the user has not named yet cannot be addressed by a path, so it is
-        // skipped rather than written under an empty segment.
+        // skipped rather than written under an empty segment. Its `id` is page
+        // state, not a settings field: it is never read below, so no write can
+        // carry it, and `sameValue` compares this list of writes only.
         if (name.length === 0) continue;
         const row: Record<string, unknown> = {};
         if (present(profile.baseUrl) !== undefined) row.baseUrl = profile.baseUrl.trim();
