@@ -47,7 +47,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * was cut from, so it is an environment fact rather than a regression — and it
  * is the reason this floor is the pass count, not the total.
  */
-const EXPECTED_TESTS = 651;
+const EXPECTED_TESTS = 659;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [

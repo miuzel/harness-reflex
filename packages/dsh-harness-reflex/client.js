@@ -3035,6 +3035,7 @@ window.__ModuleLoader__.load({
 			            notice: null,
 			            noticeValues: null,
 			            confirmingClear: false,
+			            flatOpen: false,
 			            delegationWrite: null,
 			            probes: {}
 			        };
@@ -3162,6 +3163,15 @@ window.__ModuleLoader__.load({
 			        if (this.#state.tab === tab)
 			            return;
 			        this.#set({ tab });
+			    }
+			    /**
+			     * Expand or collapse the flat compatibility block.
+			     * @param open - the new state of the disclosure.
+			     */
+			    setFlatOpen(open) {
+			        if (this.#state.flatOpen === open)
+			            return;
+			        this.#set({ flatOpen: open });
 			    }
 			    /**
 			     * Edit the draft in place.
@@ -3775,12 +3785,12 @@ window.__ModuleLoader__.load({
 			 * on screen, so folding can never change what a save writes.
 			 */
 			function FoldedCard(props) {
-			    const [open, setOpen] = (0, react_1.useState)(false);
+			    const { open } = props;
 			    return (0, react_1.createElement)('section', { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' }, (0, react_1.createElement)('button', {
 			        type: 'button',
 			        style: S.foldHead,
 			        'aria-expanded': open ? 'true' : 'false',
-			        onClick: () => setOpen((current) => !current)
+			        onClick: props.onToggle
 			    }, (0, react_1.createElement)('span', { style: S.foldCaret }, open ? '▾' : '▸'), (0, react_1.createElement)('span', { style: S.cardTitle }, props.title), open ? null : (0, react_1.createElement)('span', { style: S.hint }, props.summary)), open ? props.children : null);
 			}
 			/** A button. */
@@ -4303,9 +4313,15 @@ window.__ModuleLoader__.load({
 			    // are the main editing face. It stays a real fallback of the resolution chain
 			    // ("active profile > flat block > environment"), so it must remain editable,
 			    // but it no longer competes with the profiles card for the same fields.
+			    // Deliberately a plain call: `FoldedCard` holds no state of its own, so no
+			    // hook can be grafted onto this component's sequence. The open flag lives
+			    // here instead — g-059 shipped a crashing page because a *stateful* helper
+			    // was invoked this way and React rejected the shifted hook count (#310).
 			    FoldedCard({
 			        title: t('groupBackend'),
 			        summary: flatSummary,
+			        open: state.flatOpen,
+			        onToggle: () => store.setFlatOpen(!state.flatOpen),
 			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('span', { style: S.hint }, t('backendHintFlat')), (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			            t,
 			            path: 'backend',

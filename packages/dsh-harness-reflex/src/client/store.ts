@@ -132,6 +132,15 @@ export interface PanelState {
   noticeValues: Record<string, string> | null;
   /** Whether the next clear request is the confirming one. */
   confirmingClear: boolean;
+  /**
+   * Whether the flat connection block is expanded.
+   *
+   * Presentation only, and held here rather than in `useState` on purpose: the
+   * page's tabs are called as plain functions from `Body`, so giving one of them
+   * a hook would make the hook count depend on which tab is showing and React
+   * would reject the shifted sequence (#310).
+   */
+  flatOpen: boolean;
   /** Outcome of the last host-patch write, as the host reported it. */
   delegationWrite: DelegationWriteState | null;
   /**
@@ -274,6 +283,7 @@ export class PanelStore {
       notice: null,
       noticeValues: null,
       confirmingClear: false,
+      flatOpen: false,
       delegationWrite: null,
       probes: {}
     };
@@ -396,6 +406,15 @@ export class PanelStore {
   setTab(tab: PanelTab): void {
     if (this.#state.tab === tab) return;
     this.#set({ tab });
+  }
+
+  /**
+   * Expand or collapse the flat compatibility block.
+   * @param open - the new state of the disclosure.
+   */
+  setFlatOpen(open: boolean): void {
+    if (this.#state.flatOpen === open) return;
+    this.#set({ flatOpen: open });
   }
 
   /**

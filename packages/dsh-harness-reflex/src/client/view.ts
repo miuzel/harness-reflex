@@ -374,8 +374,14 @@ function Card(props: { title: string; children?: ReactNode }): ReactNode {
  * the same draft and write through the same narrow paths whether or not they are
  * on screen, so folding can never change what a save writes.
  */
-function FoldedCard(props: { title: string; summary: string; children?: ReactNode }): ReactNode {
-  const [open, setOpen] = useState(false);
+function FoldedCard(props: {
+  title: string;
+  summary: string;
+  open: boolean;
+  onToggle: () => void;
+  children?: ReactNode;
+}): ReactNode {
+  const { open } = props;
   return h(
     'section',
     { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' },
@@ -385,7 +391,7 @@ function FoldedCard(props: { title: string; summary: string; children?: ReactNod
         type: 'button',
         style: S.foldHead,
         'aria-expanded': open ? 'true' : 'false',
-        onClick: () => setOpen((current) => !current)
+        onClick: props.onToggle
       },
       h('span', { style: S.foldCaret }, open ? '▾' : '▸'),
       h('span', { style: S.cardTitle }, props.title),
@@ -1222,9 +1228,15 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
     // are the main editing face. It stays a real fallback of the resolution chain
     // ("active profile > flat block > environment"), so it must remain editable,
     // but it no longer competes with the profiles card for the same fields.
+    // Deliberately a plain call: `FoldedCard` holds no state of its own, so no
+    // hook can be grafted onto this component's sequence. The open flag lives
+    // here instead — g-059 shipped a crashing page because a *stateful* helper
+    // was invoked this way and React rejected the shifted hook count (#310).
     FoldedCard({
       title: t('groupBackend'),
       summary: flatSummary,
+      open: state.flatOpen,
+      onToggle: () => store.setFlatOpen(!state.flatOpen),
       children: h(
         'div',
         { style: S.field },
