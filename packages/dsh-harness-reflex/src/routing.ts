@@ -219,12 +219,6 @@ interface AgentRoutingFacts {
   currentModel?: PhysicalTarget;
   /** Characters of step input observed for this agent so far. */
   contextChars: number;
-  /**
-   * Whether the most recent `agent/pre-step` carried new user text. A step that
-   * carries none is a continuation of the step before it, not a new instruction,
-   * so its decision may be reused instead of asking System 1 again.
-   */
-  stepHasText?: boolean;
   /** The decision this turn already made, reused by its later steps. */
   decided?: TurnDecision;
   /** Adaptive effort this layer dispatched most recently, used to recognise a header echo. */
@@ -888,13 +882,14 @@ async function planStep(input: StepPlanInput): Promise<StepPlan | undefined> {
     (isAdaptiveMarker(requested) ||
       (requested === undefined && router.owns(config.provider) && isAdaptiveMarker(effort.setting)));
 
-  // Same-turn follow-up steps (step > 1 without new user text) reuse the turn's
-  // decision: no second System 1 call, no second effort event, 0ms latency.
+  // Same-turn follow-up steps (step > 1) reuse the turn's decision: no second
+  // System 1 call, no second effort event, 0ms latency. The turn is the unit of
+  // decision — a later step carrying user text is still the same turn, so it
+  // does not break the reuse (g-063).
   const isFollowupStep =
     (input.step ?? 1) > 1 &&
     remembered?.decided !== undefined &&
     remembered.decided.turn === input.turn &&
-    remembered.stepHasText !== true &&
     // A config-only save may replace the policy mid-turn; a decision taken
     // under the previous policy is not this turn's answer any more.
     remembered.decided.generation === effort.generation;
@@ -1008,9 +1003,14 @@ async function planStep(input: StepPlanInput): Promise<StepPlan | undefined> {
     target: { provider: routed.provider, model: routed.model },
     probe,
     task,
-    // Earlier turns of this agent, for the continuation path only: the
-    // effort layer consults them when the turn adds no task of its own.
+    // Earlier turns of this agent: since g-063 every decision sees them, inside
+    // the effort layer's window, so a short prompt is graded against the work it
+    // continues instead of on its own few characters.
     ...(remembered?.turns?.length ? { history: remembered.turns.map((entry) => ({ text: entry.text })) } : {}),
+    // The level the last adaptive decision produced. It was recorded since g-056
+    // to recognise a header echo and nothing ever read it; g-063 makes it the
+    // decision input's prior, so "继续" after a hard turn cannot be graded cold.
+    ...(remembered?.lastAdaptiveEffort ? { previousLevel: remembered.lastAdaptiveEffort } : {}),
     agent: describeAgent(agent),
     turn: input.turn,
     step: input.step,
@@ -1455,7 +1455,6 @@ function rememberStep(
     ...(text ?? previous?.task ? { task: text ?? previous?.task } : {}),
     ...(previous?.currentModel ? { currentModel: previous.currentModel } : {}),
     contextChars: (previous?.contextChars ?? 0) + Math.max(0, Math.round(chars)),
-    stepHasText: text !== undefined,
     ...(previous?.decided ? { decided: previous.decided } : {}),
     ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {}),
     ...(turns.length === 0 ? {} : { turns })
@@ -1540,16 +1539,21 @@ function rememberDecision(
     generation
   };
   const previous = facts.get(key);
+  // g-063: a later step of the *same* turn replays this decision instead of
+  // asking again, so the previous level the next decision is given must be the
+  // level this turn settled on, not the one from before it. Otherwise a five-step
+  // turn hands the turn after it a stale prior.
+  const settledEffort = resolution.decision ? resolution.effort : (previous?.decided?.effort ?? previous?.lastAdaptiveEffort);
   facts.delete(key);
   facts.set(key, {
     ...(previous?.task ? { task: previous.task } : {}),
     ...(previous?.currentModel ? { currentModel: previous.currentModel } : {}),
     contextChars: previous?.contextChars ?? 0,
-    ...(previous?.stepHasText === undefined ? {} : { stepHasText: previous.stepHasText }),
     decided: decision,
     // An echo is only recognisable when this layer, not the user, chose the
-    // effort — so the marker is recorded for adaptive decisions alone.
-    ...(resolution.decision ? { lastAdaptiveEffort: resolution.effort } : {}),
+    // effort — so the marker is recorded for adaptive decisions alone — and
+    // since g-063 it is also the previous level the next decision is told about.
+    ...(settledEffort === undefined ? {} : { lastAdaptiveEffort: settledEffort }),
     ...(previous?.turns?.length ? { turns: previous.turns } : {})
   });
 }
@@ -1644,7 +1648,6 @@ function rememberTarget(facts: Map<string, AgentRoutingFacts>, agent: Agent, tar
     ...(previous?.task ? { task: previous.task } : {}),
     currentModel: { provider: target.provider, model: target.model },
     contextChars: previous?.contextChars ?? 0,
-    ...(previous?.stepHasText === undefined ? {} : { stepHasText: previous.stepHasText }),
     ...(previous?.decided ? { decided: previous.decided } : {}),
     ...(previous?.lastAdaptiveEffort ? { lastAdaptiveEffort: previous.lastAdaptiveEffort } : {}),
     ...(previous?.turns?.length ? { turns: previous.turns } : {})
