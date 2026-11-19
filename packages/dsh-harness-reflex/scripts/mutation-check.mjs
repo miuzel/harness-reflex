@@ -62,7 +62,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * No test was deleted: the two survivors assert the row is still never written
  * *and* is now refused with the row number.
  */
-const EXPECTED_TESTS = 684;
+const EXPECTED_TESTS = 692;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -1245,8 +1245,8 @@ function run(command, args) {
  * the baseline would be red for a missing file rather than for a real fault.
  */
 function resetSources() {
-  rmSync(path.join(workDir, 'src'), { recursive: true, force: true });
-  rmSync(path.join(workDir, 'dist'), { recursive: true, force: true });
+  rmSync(path.join(workDir, 'src'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  rmSync(path.join(workDir, 'dist'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   cpSync(srcDir, path.join(workDir, 'src'), { recursive: true });
   cpSync(path.join(packageDir, 'tsconfig.json'), path.join(workDir, 'tsconfig.json'));
   cpSync(path.join(packageDir, 'package.json'), path.join(workDir, 'package.json'));

@@ -1181,6 +1181,36 @@ function sameValue(left: unknown, right: unknown): boolean {
 }
 
 /**
+ * The saved profile names a save must delete, because no row answers for them.
+ *
+ * A profile is addressed by name, and its name is the *user's* label for it, so
+ * a rename is a different settings path, not an edit of one: the old
+ * `systemOne.profiles.<old>` subtree keeps existing unless it is deleted
+ * explicitly, and the page would then hold two rows — the ghost of the old name
+ * and the real row under the new one. The same holds for a deleted row (g-065).
+ *
+ * Rows are matched by identity, never by name (g-062): `id` is what survives a
+ * rename, so `same id, different name` is exactly a rename. A name is retired
+ * only when *no* row in the draft still carries it, which keeps a name that was
+ * reassigned in the same save — swapping two rows' names, or renaming onto a
+ * name that was just freed — from deleting the row that now owns it.
+ *
+ * @param original - the draft seeded from the Host, whose rows are the saved ones.
+ * @param draft - the edited draft.
+ * @returns the names to unset, each once, in the original's row order.
+ */
+export function retiredProfileNames(original: PanelDraft, draft: PanelDraft): string[] {
+  const surviving = new Set(draft.backend.profiles.map((row) => row.name.trim()));
+  const retired: string[] = [];
+  for (const row of original.backend.profiles) {
+    const name = row.name.trim();
+    if (name.length === 0 || surviving.has(name) || retired.includes(name)) continue;
+    retired.push(name);
+  }
+  return retired;
+}
+
+/**
  * Diff two drafts into the path operations that turn the first into the second.
  *
  * Group granularity is deliberate: a group is dirty or it is not, and a dirty
@@ -1196,6 +1226,12 @@ function sameValue(left: unknown, right: unknown): boolean {
  */
 export function diffDraft(original: PanelDraft, draft: PanelDraft, user?: unknown): SettingsOp[] {
   const ops: SettingsOp[] = [];
+  for (const oldName of retiredProfileNames(original, draft)) {
+    // One unset of the row's own subtree removes the row whole: every field it
+    // ever carried, including `apiKey`, which the page cannot restate because
+    // the Host never sent it. Field-by-field unsets would leave a key behind.
+    ops.push({ op: 'unset', path: ['systemOne', 'profiles', oldName] });
+  }
   // The user layer this panel will replace. A group write is a whole-section
   // value, so anything already stored there under a sibling key would be deleted
   // by the save; those keys are merged back in below.

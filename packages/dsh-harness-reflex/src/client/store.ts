@@ -482,12 +482,44 @@ export class PanelStore {
 
   /**
    * Edit the draft in place.
+   *
+   * A rename carries the activation with the row (g-065): `active` is a *name*,
+   * so renaming the row the document has activated would otherwise leave
+   * `active` pointing at a name that no longer exists — the document would then
+   * name a missing profile (`activeProfileMissing`) even though the row the user
+   * activated is right there under its new name. The row's identity is what ties
+   * the two together, exactly as it does in {@link removeProfile}.
    * @param mutate - receives the current draft; returns the next one.
    */
   edit(mutate: (draft: PanelDraft) => PanelDraft): void {
-    const draft = mutate(this.#state.draft);
+    const draft = this.#followRenamedActivation(this.#state.draft, mutate(this.#state.draft));
     const { errors, values } = validateDraft(draft);
     this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
+  }
+
+  /**
+   * Re-point `active` at the row it named, when that row was just renamed.
+   *
+   * Only a rename is followed: when the old name still belongs to a row in the
+   * next draft, nothing was renamed away from it and the marker is left alone.
+   * A name the user typed into `active` by other means is unaffected, because
+   * the transition is detected per row identity, not by reading `active` alone.
+   * @param before - the draft before the edit.
+   * @param after - the draft the edit produced.
+   * @returns `after`, with `active` moved to the renamer's new name if needed.
+   */
+  #followRenamedActivation(before: PanelDraft, after: PanelDraft): PanelDraft {
+    const active = after.backend.active.trim();
+    if (active.length === 0) return after;
+    // A row still carries the activated name: no rename moved it away.
+    if (after.backend.profiles.some((row) => row.name.trim() === active)) return after;
+    const wasActive = before.backend.profiles.find((row) => row.name.trim() === active);
+    if (wasActive === undefined) return after;
+    // The same row, under whatever name it now carries (blank = unnamed again,
+    // which cannot be activated; the marker is cleared with the row).
+    const renamed = after.backend.profiles.find((row) => row.id === wasActive.id);
+    if (renamed === undefined) return after;
+    return { ...after, backend: { ...after.backend, active: renamed.name.trim() } };
   }
 
   /**
@@ -630,6 +662,12 @@ export class PanelStore {
 
   /**
    * Write the draft's changed groups to the Host.
+   *
+   * A renamed or deleted row is retired in the *same* operation list as the
+   * write of its new path (g-065): the old `systemOne.profiles.<old>` subtree is
+   * an `unset` and the new name's fields are `set`s in one `mutate`, so the Host
+   * applies both or neither and can never keep a renamed-away profile behind.
+   * {@link diffDraft} derives both sides from `original` versus `draft`.
    *
    * A no-op when nothing changed; a refusal (rather than a throw) when the draft
    * is invalid or the document is read-only, so the page can show the reason

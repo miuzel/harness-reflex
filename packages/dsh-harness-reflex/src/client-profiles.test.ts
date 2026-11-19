@@ -543,3 +543,231 @@ test('profileRowsFrom seeds rows in authored order and drops malformed entries',
   assert.equal(rows[1].baseUrl, 'http://c');
   assert.equal(rows[1].timeoutMs, '900');
 });
+
+//#region renaming and deleting saved rows (g-065)
+
+/**
+ * A profile is addressed by the name the user typed, so renaming one is a
+ * *different settings path* rather than an edit of the old one. Without an
+ * explicit delete the old `systemOne.profiles.<old>` subtree survived the save:
+ * the Host accumulated abandoned profiles, and a document could name a profile
+ * that no longer had a row.
+ *
+ * Both halves must travel in one `mutate` call, so the Host applies the delete
+ * and the write together or neither.
+ */
+
+/** The profile-path operations of one save, as `op path` lines. */
+function profileOps(ops: { op: string; path: string[]; value?: unknown }[]): string[] {
+  return ops
+    .filter((op) => op.path[0] === 'systemOne' && op.path[1] === 'profiles')
+    .map((op) => `${op.op} ${op.path.join('.')}`);
+}
+
+/** The exact `unset` of one profile's whole subtree. */
+function hasSubtreeUnset(ops: { op: string; path: string[] }[], name: string): boolean {
+  return ops.some((op) => op.op === 'unset' && op.path.length === 3 && op.path[0] === 'systemOne' && op.path[1] === 'profiles' && op.path[2] === name);
+}
+
+/** Rename one row by identity, the way the name input does. */
+function renameRow(store: { edit(mutate: (draft: any) => any): void; getState(): any }, id: string, name: string): void {
+  store.edit((current) => ({
+    ...current,
+    backend: { ...current.backend, profiles: current.backend.profiles.map((row: any) => (row.id === id ? { ...row, name } : row)) }
+  }));
+}
+
+test('renaming a saved row unsets the old name and writes the row under the new one', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { oldname: { model: 'm1', baseUrl: 'http://a' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'oldname');
+  assert.ok(saved !== undefined, 'the saved row is seeded');
+
+  renameRow(store, saved.id, 'newname');
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+  assert.equal(store.getState().notice, 'saved');
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  // One subtree unset, not one per field: `apiKey` is `role('secret')`, never
+  // sent to the page, so a field-by-field delete would leave the key behind.
+  assert.equal(hasSubtreeUnset(ops, 'oldname'), true, `the old name was not deleted: ${profileOps(ops).join(' | ')}`);
+  const setNew = ops.find(
+    (op) => op.op === 'set' && op.path[0] === 'systemOne' && op.path[1] === 'profiles' && op.path[2] === 'newname' && op.path[3] === 'model'
+  );
+  assert.equal(setNew?.value, 'm1', 'the row must survive under the new name');
+  // The retired name is never written to, on either side.
+  assert.equal(
+    ops.some((op) => op.op === 'set' && op.path[2] === 'oldname'),
+    false,
+    `the retired name was written to: ${profileOps(ops).join(' | ')}`
+  );
+  // And both halves are in the same write, which is what makes it atomic.
+  assert.equal(form.mutations.length, 1, 'the delete and the write must be one mutate call');
+});
+
+test('renaming several rows at once retires every old name', async () => {
+  const { store, form } = makeStore({
+    backend: 'jev',
+    systemOne: { profiles: { alpha: { model: 'a' }, beta: { model: 'b' }, gamma: { model: 'g' } } }
+  });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const alpha = rows().find((row) => row.name === 'alpha')!;
+  const beta = rows().find((row) => row.name === 'beta')!;
+
+  renameRow(store, alpha.id, 'alpha2');
+  renameRow(store, beta.id, 'beta2');
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'alpha'), true, `alpha not deleted: ${profileOps(ops).join(' | ')}`);
+  assert.equal(hasSubtreeUnset(ops, 'beta'), true, `beta not deleted: ${profileOps(ops).join(' | ')}`);
+  // The untouched row is left exactly as it was. `backend` is one group, so a
+  // group write may restate it — but nothing may *delete* it, and its own value
+  // must be carried over unchanged.
+  assert.equal(hasSubtreeUnset(ops, 'gamma'), false, 'an untouched row must not be deleted');
+  const gammaModel = ops.find((op) => op.op === 'set' && op.path.join('.') === 'systemOne.profiles.gamma.model');
+  assert.equal(gammaModel?.value, 'g', 'the untouched row must keep its value');
+  assert.equal(form.mutations.length, 1, 'one save, one atomic write');
+});
+
+test('renaming a row while editing its fields deletes the old name and writes the new values', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { oldname: { model: 'm1', baseUrl: 'http://a' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'oldname')!;
+
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) =>
+        row.id === saved.id ? { ...row, name: 'newname', model: 'm2', apiKeyEnv: 'NEW_KEY' } : row
+      )
+    }
+  }));
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'oldname'), true, `the old name was not deleted: ${profileOps(ops).join(' | ')}`);
+  const valueAt = (field: string): unknown =>
+    ops.find((op) => op.op === 'set' && op.path.join('.') === `systemOne.profiles.newname.${field}`)?.value;
+  assert.equal(valueAt('model'), 'm2', 'the edited value must land under the new name');
+  assert.equal(valueAt('apiKeyEnv'), 'NEW_KEY', 'the newly typed value must land under the new name');
+  assert.equal(valueAt('baseUrl'), 'http://a', 'the untouched value travels with the row');
+});
+
+test('renaming the active row moves the activation with it', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { active: 'oldname', profiles: { oldname: { model: 'm1' }, other: { model: 'm2' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'oldname')!;
+  assert.equal(store.getState().draft.backend.active, 'oldname', 'the row starts active');
+
+  renameRow(store, saved.id, 'newname');
+  // The activation is visible before the save, exactly like the rename itself.
+  assert.equal(store.getState().draft.backend.active, 'newname', 'the activation did not follow the row');
+
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'oldname'), true, 'the old name is still deleted');
+  const active = ops.find((op) => op.op === 'set' && op.path.join('.') === 'systemOne.active');
+  // The document must not keep naming a profile that no longer exists: that
+  // resolved as `activeProfileMissing` and silently dropped to the flat block.
+  assert.equal(active?.value, 'newname', 'the document would name a deleted profile');
+});
+
+test('deleting a saved row deletes its whole settings subtree', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { target: { model: 'm1', baseUrl: 'http://t' }, keep: { model: 'm2' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const target = rows().find((row) => row.name === 'target')!;
+
+  store.removeProfile(target.id);
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'target'), true, `the deleted row was left behind: ${profileOps(ops).join(' | ')}`);
+  assert.equal(hasSubtreeUnset(ops, 'keep'), false, 'a surviving row must not be deleted');
+});
+
+test('swapping two rows names deletes nothing, because both names survive', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { a: { model: 'ma' }, b: { model: 'mb' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const a = rows().find((row) => row.name === 'a')!;
+  const b = rows().find((row) => row.name === 'b')!;
+
+  // Each row keeps its own fields but takes the other's name: every name in the
+  // old document is still in use, so deleting either would delete a live row.
+  renameRow(store, a.id, 'b');
+  renameRow(store, b.id, 'a');
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'a'), false, `swapping deleted a live row: ${profileOps(ops).join(' | ')}`);
+  assert.equal(hasSubtreeUnset(ops, 'b'), false, `swapping deleted a live row: ${profileOps(ops).join(' | ')}`);
+});
+
+test('renaming onto a name the document never held deletes only the old one', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { a: { model: 'ma' }, keep: { model: 'mk' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const a = rows().find((row) => row.name === 'a')!;
+
+  renameRow(store, a.id, 'fresh');
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.equal(hasSubtreeUnset(ops, 'a'), true, 'the old name is deleted');
+  assert.equal(hasSubtreeUnset(ops, 'fresh'), false, 'a name the document never held cannot be deleted');
+  assert.equal(hasSubtreeUnset(ops, 'keep'), false, 'the other saved row is untouched');
+});
+
+test('renaming a row and back to its saved name writes nothing about the profile', async () => {
+  const { store, form } = makeStore({ backend: 'jev', systemOne: { profiles: { stable: { model: 'm' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'stable')!;
+
+  renameRow(store, saved.id, 'scratch');
+  renameRow(store, saved.id, 'stable');
+  // A round trip is not a change: the diff must not delete the row it keeps.
+  assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+  const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[] }[];
+  assert.equal(hasSubtreeUnset(ops, 'stable'), false, `a no-op rename deleted the live row: ${profileOps(ops).join(' | ')}`);
+  assert.equal(hasSubtreeUnset(ops, 'scratch'), false, 'the scratch name was never saved');
+});
+
+test('an explicit activation choice wins over following a rename', async () => {
+  // Following the renamed row is a *default*, not an override: a draft that sets
+  // `active` deliberately — to another row, or to none at all — is the user's
+  // decision and must be written as asked on the same save.
+  for (const [chosen, expected] of [
+    ['b', 'b'],
+    ['', '']
+  ] as const) {
+    const { store, form } = makeStore({ backend: 'jev', systemOne: { active: 'a', profiles: { a: { model: 'ma' }, b: { model: 'mb' } } } });
+    const rows = () => store.getState().draft.backend.profiles as any[];
+    const a = rows().find((row) => row.name === 'a')!;
+    store.edit((current) => ({
+      ...current,
+      backend: {
+        ...current.backend,
+        active: chosen,
+        profiles: current.backend.profiles.map((row: any) => (row.id === a.id ? { ...row, name: 'a2' } : row))
+      }
+    }));
+    assert.equal(store.getState().draft.backend.active, expected, `renaming overrode the chosen activation (${JSON.stringify(chosen)})`);
+    assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
+    const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
+    const written = ops.find((op) => op.path.join('.') === 'systemOne.active');
+    // An empty activation is an explicit `unset`, a chosen row is a `set` — and
+    // in both cases it is what the user asked for, not what the rename implies.
+    if (chosen.length === 0) assert.equal(written?.op, 'unset', 'clearing the activation must be an unset');
+    else assert.equal(written?.value, chosen, 'the chosen row must be the one written');
+    assert.equal(hasSubtreeUnset(ops, 'a'), true, 'the old name is still deleted');
+  }
+});
+
+test('renaming an inactive row leaves the activation where it is', async () => {
+  const { store } = makeStore({ backend: 'jev', systemOne: { active: 'b', profiles: { a: { model: 'ma' }, b: { model: 'mb' } } } });
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  renameRow(store, rows().find((row) => row.name === 'a')!.id, 'a2');
+  // The activated row (`b`) was not the one renamed, so its name stays put.
+  assert.equal(store.getState().draft.backend.active, 'b', 'an unrelated rename stole the activation');
+});
+
+//#endregion

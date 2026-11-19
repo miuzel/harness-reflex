@@ -1722,6 +1722,7 @@ window.__ModuleLoader__.load({
 			exports.unnamedFilledRows = unnamedFilledRows;
 			exports.validateDraft = validateDraft;
 			exports.groupWrites = groupWrites;
+			exports.retiredProfileNames = retiredProfileNames;
 			exports.diffDraft = diffDraft;
 			exports.withPreservedSiblings = withPreservedSiblings;
 			exports.dirtyGroups = dirtyGroups;
@@ -2698,6 +2699,36 @@ window.__ModuleLoader__.load({
 			    return false;
 			}
 			/**
+			 * The saved profile names a save must delete, because no row answers for them.
+			 *
+			 * A profile is addressed by name, and its name is the *user's* label for it, so
+			 * a rename is a different settings path, not an edit of one: the old
+			 * `systemOne.profiles.<old>` subtree keeps existing unless it is deleted
+			 * explicitly, and the page would then hold two rows — the ghost of the old name
+			 * and the real row under the new one. The same holds for a deleted row (g-065).
+			 *
+			 * Rows are matched by identity, never by name (g-062): `id` is what survives a
+			 * rename, so `same id, different name` is exactly a rename. A name is retired
+			 * only when *no* row in the draft still carries it, which keeps a name that was
+			 * reassigned in the same save — swapping two rows' names, or renaming onto a
+			 * name that was just freed — from deleting the row that now owns it.
+			 *
+			 * @param original - the draft seeded from the Host, whose rows are the saved ones.
+			 * @param draft - the edited draft.
+			 * @returns the names to unset, each once, in the original's row order.
+			 */
+			function retiredProfileNames(original, draft) {
+			    const surviving = new Set(draft.backend.profiles.map((row) => row.name.trim()));
+			    const retired = [];
+			    for (const row of original.backend.profiles) {
+			        const name = row.name.trim();
+			        if (name.length === 0 || surviving.has(name) || retired.includes(name))
+			            continue;
+			        retired.push(name);
+			    }
+			    return retired;
+			}
+			/**
 			 * Diff two drafts into the path operations that turn the first into the second.
 			 *
 			 * Group granularity is deliberate: a group is dirty or it is not, and a dirty
@@ -2713,6 +2744,12 @@ window.__ModuleLoader__.load({
 			 */
 			function diffDraft(original, draft, user) {
 			    const ops = [];
+			    for (const oldName of retiredProfileNames(original, draft)) {
+			        // One unset of the row's own subtree removes the row whole: every field it
+			        // ever carried, including `apiKey`, which the page cannot restate because
+			        // the Host never sent it. Field-by-field unsets would leave a key behind.
+			        ops.push({ op: 'unset', path: ['systemOne', 'profiles', oldName] });
+			    }
 			    // The user layer this panel will replace. A group write is a whole-section
 			    // value, so anything already stored there under a sibling key would be deleted
 			    // by the save; those keys are merged back in below.
@@ -3398,12 +3435,47 @@ window.__ModuleLoader__.load({
 			    }
 			    /**
 			     * Edit the draft in place.
+			     *
+			     * A rename carries the activation with the row (g-065): `active` is a *name*,
+			     * so renaming the row the document has activated would otherwise leave
+			     * `active` pointing at a name that no longer exists — the document would then
+			     * name a missing profile (`activeProfileMissing`) even though the row the user
+			     * activated is right there under its new name. The row's identity is what ties
+			     * the two together, exactly as it does in {@link removeProfile}.
 			     * @param mutate - receives the current draft; returns the next one.
 			     */
 			    edit(mutate) {
-			        const draft = mutate(this.#state.draft);
+			        const draft = this.#followRenamedActivation(this.#state.draft, mutate(this.#state.draft));
 			        const { errors, values } = (0, panel_1.validateDraft)(draft);
 			        this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
+			    }
+			    /**
+			     * Re-point `active` at the row it named, when that row was just renamed.
+			     *
+			     * Only a rename is followed: when the old name still belongs to a row in the
+			     * next draft, nothing was renamed away from it and the marker is left alone.
+			     * A name the user typed into `active` by other means is unaffected, because
+			     * the transition is detected per row identity, not by reading `active` alone.
+			     * @param before - the draft before the edit.
+			     * @param after - the draft the edit produced.
+			     * @returns `after`, with `active` moved to the renamer's new name if needed.
+			     */
+			    #followRenamedActivation(before, after) {
+			        const active = after.backend.active.trim();
+			        if (active.length === 0)
+			            return after;
+			        // A row still carries the activated name: no rename moved it away.
+			        if (after.backend.profiles.some((row) => row.name.trim() === active))
+			            return after;
+			        const wasActive = before.backend.profiles.find((row) => row.name.trim() === active);
+			        if (wasActive === undefined)
+			            return after;
+			        // The same row, under whatever name it now carries (blank = unnamed again,
+			        // which cannot be activated; the marker is cleared with the row).
+			        const renamed = after.backend.profiles.find((row) => row.id === wasActive.id);
+			        if (renamed === undefined)
+			            return after;
+			        return { ...after, backend: { ...after.backend, active: renamed.name.trim() } };
 			    }
 			    /**
 			     * Edit the routing draft's model pools.
@@ -3538,6 +3610,12 @@ window.__ModuleLoader__.load({
 			    }
 			    /**
 			     * Write the draft's changed groups to the Host.
+			     *
+			     * A renamed or deleted row is retired in the *same* operation list as the
+			     * write of its new path (g-065): the old `systemOne.profiles.<old>` subtree is
+			     * an `unset` and the new name's fields are `set`s in one `mutate`, so the Host
+			     * applies both or neither and can never keep a renamed-away profile behind.
+			     * {@link diffDraft} derives both sides from `original` versus `draft`.
 			     *
 			     * A no-op when nothing changed; a refusal (rather than a throw) when the draft
 			     * is invalid or the document is read-only, so the page can show the reason
