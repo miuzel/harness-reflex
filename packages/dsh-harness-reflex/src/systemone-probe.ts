@@ -57,7 +57,14 @@ export const PROBE_TIMEOUT_MIN_MS = 250;
  * not the protocol this plugin expects; `misconfigured` → the plugin cannot even
  * build a request (no URL for the backend type it resolved).
  */
-export type ProbeStatus = 'ok' | 'auth-failed' | 'unreachable' | 'timeout' | 'bad-response' | 'misconfigured';
+export type ProbeStatus =
+  | 'ok'
+  | 'auth-failed'
+  | 'unreachable'
+  | 'timeout'
+  | 'bad-response'
+  | 'misconfigured'
+  | 'model-unusable';
 
 /** What one probe answers. */
 export interface ProbeResult {
@@ -86,6 +93,12 @@ export interface ProbeTarget {
   /** The key to present; read by this module and never returned. */
   apiKey?: string;
   timeoutMs?: number;
+  /**
+   * This connection's model cannot be sent (g-066 att-002), so there is nothing
+   * honest to test: the probe reports it instead of guessing a model. Only ever
+   * set, never inferred — a target without it carries the model it means.
+   */
+  modelUnusable?: boolean;
 }
 
 /** Options of one probe. */
@@ -170,6 +183,16 @@ export function buildProbeRequest(
   const timeoutMs = clampTimeout(target.timeoutMs);
   if (backend === 'mock') {
     return { status: 'misconfigured', detail: 'this profile resolves to the mock backend: there is no remote endpoint to test' };
+  }
+  // A connection whose selected model cannot be sent is refused here, before the
+  // key is read and long before any address is used: the runtime builds no
+  // transport for it either, so a probe that sent something would report on a
+  // request nobody can make (g-066 att-002).
+  if (target.modelUnusable === true) {
+    return {
+      status: 'model-unusable',
+      detail: 'the selected model is not in this profile\'s model list, so nothing runs and there is nothing to test'
+    };
   }
   // The key follows the runtime's chain exactly — {@link resolveApiKeyWithSource}
   // is the one implementation of it, so a "test connection" button can never send
@@ -371,6 +394,21 @@ async function readBodyText(response: Response): Promise<string> {
 }
 
 /**
+ * The `model` of one built request body.
+ * @param body - the JSON the spec sends.
+ * @returns the model id, or `undefined` when the body carries none.
+ */
+function modelOfSpec(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const model = (parsed as { model?: unknown } | null)?.model;
+    return typeof model === 'string' && model.length > 0 ? model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Probe one System One connection.
  *
  * Never throws: every failure is classified, because a test button that reports
@@ -394,7 +432,10 @@ export async function probeSystemOne(target: ProbeTarget, options: ProbeOptions 
   // The same "auto means Jev" resolution `buildProbeRequest` applied, so the
   // success-envelope check below looks for the protocol actually spoken.
   const backend = target.backend === 'auto' ? 'jev' : target.backend;
-  const model = target.model ?? (backend === 'vllm' ? LOGITS_DEFAULT_MODEL : JEV_DEFAULT_MODEL);
+  // The model the request *carries*, read back out of the built body rather than
+  // recomputed: a second `?? DEFAULT` here could name a model the spec does not
+  // send (g-066 att-002).
+  const model = modelOfSpec(spec.body) ?? (backend === 'vllm' ? LOGITS_DEFAULT_MODEL : JEV_DEFAULT_MODEL);
 
   const controller = new AbortController();
   let timedOut = false;

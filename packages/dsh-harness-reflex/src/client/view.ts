@@ -1042,12 +1042,21 @@ function ModelSelection(props: {
   // `useState` (its `(?)` disclosure), and calling a stateful component as a
   // plain function puts that hook into the caller's sequence — the #310 crash
   // this page already shipped once. `client-hooks.test.ts` guards it.
-  return h(Field, {
-    label: t('profileSelectedModel'),
-    path: 'systemOne.profiles.selectedModel',
-    help: t('helpSelectedModel'),
-    helpLabel: interpolate(t('helpAbout'), { field: t('profileSelectedModel') }),
-    children: h(
+  // The control is the **third argument**, the same way every other `Field` on
+  // the page is built (see `GuidedField`). Passing it as `children` *inside* the
+  // props object loses it: `h` treats the third argument as the children and
+  // overwrites `props.children` with an empty array, so the field rendered with
+  // its label and `(?)` but no radio buttons at all (g-066 att-002 — caught by
+  // the page-level regression, not by any unit test of the group).
+  return h(
+    Field,
+    {
+      label: t('profileSelectedModel'),
+      path: 'systemOne.profiles.selectedModel',
+      help: t('helpSelectedModel'),
+      helpLabel: interpolate(t('helpAbout'), { field: t('profileSelectedModel') })
+    },
+    h(
       'span',
       { style: { ...S.row, alignItems: 'center' }, 'data-profile-model-selection': profile.id },
       ids.length === 1
@@ -1087,7 +1096,7 @@ function ModelSelection(props: {
           )
         : null
     )
-  });
+  );
 }
 
 /**
@@ -1183,6 +1192,8 @@ function ProfileRow(props: {
         return t('profileTestBadResponse');
       case 'misconfigured':
         return t('profileTestMisconfigured');
+      case 'model-unusable':
+        return t('profileTestModelUnusable');
       default:
         return status ?? '—';
     }
@@ -1350,7 +1361,12 @@ function ProfileRow(props: {
     // The one model in force (g-066). A radio group over the ids the list field
     // holds — never a free-text box — so the selection can only name a model
     // that exists: the runtime sends this id and the connection test probes it.
-    ModelSelection({ t, profile, disabled, onEdit }),
+    //
+    // Rendered as an **element**, not invoked: it returns a `Field`, which owns a
+    // `useState` (its `(?)` disclosure). Calling it as a plain function would put
+    // that hook into *this* row's sequence — the #310 crash this file warns
+    // about — and it would still look correct in a render that never re-runs.
+    h(ModelSelection, { t, profile, disabled, onEdit }),
     h(
       'div',
       { style: S.row },
@@ -1408,7 +1424,8 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   const activeName = draft.backend.active.trim();
   // Whether anything connects (g-066). The snapshot decides it, never a guess
   // about which fields look filled in: `unconfigured` is set by the resolution
-  // exactly when no active profile resolved, and it also says *why*.
+  // exactly when no connection resolved — no active profile, or an active one
+  // whose model cannot be sent — and it also says *why*.
   const unconfigured = systemOne?.unconfigured;
   // The key readiness of the connection in force, from the snapshot's
   // provenance: say what supplied the key ("from the configuration" / "from
@@ -1423,6 +1440,10 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
         : systemOne.apiKeySource === 'fallback'
           ? t('apiKeyFromFallback').replace('{name}', systemOne.apiKeyVariable ?? '—')
           : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
+  // The connection in force, named for the copy: the snapshot's active profile
+  // when it reports one, else the draft's (the banner only uses it to point at
+  // the row the user has to fix).
+  const connectionName = (systemOne?.activeProfile ?? activeName) || '—';
   const unconfiguredCopy =
     unconfigured === undefined
       ? undefined
@@ -1432,7 +1453,14 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
           ? t('unconfiguredNoProfiles')
           : unconfigured === 'active-profile-missing'
             ? t('unconfiguredActiveMissing').replace('{name}', activeName || '—')
-            : t('unconfiguredNoActive');
+            : unconfigured === 'model-selection-invalid'
+              ? // g-066 att-002: an active profile whose *selected* model is not
+                // in its list is not "no selection" — nothing runs for it, so the
+                // page says so instead of offering a connection that refuses.
+                t('unconfiguredModelInvalid').replace('{name}', connectionName)
+              : unconfigured === 'model-selection-unusable'
+                ? t('unconfiguredModelUnusable').replace('{name}', connectionName)
+                : t('unconfiguredNoActive');
   const activeMissing = systemOne?.activeProfileMissing === true;
   // Which rows the Host has actually read: the probe route resolves the *saved*
   // document, so this set is what decides whether "测试" can do anything. The

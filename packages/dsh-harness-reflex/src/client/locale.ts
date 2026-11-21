@@ -292,6 +292,7 @@ export const zh = {
   profileTestTimeout: '超时',
   profileTestBadResponse: '响应异常',
   profileTestMisconfigured: '配置不完整',
+  profileTestModelUnusable: '未选择可用模型',
   profileLatency: '{ms} ms',
   activeProfileMissing: '激活的配置「{name}」不存在：当前没有任何连接生效。',
   unconfiguredTitle: '未配置连接。',
@@ -300,6 +301,10 @@ export const zh = {
   unconfiguredActiveMissing: '激活名「{name}」不对应任何已保存的连接配置。System 1 不会回退到其他配置。',
   unconfiguredLegacy:
     '设置文档里只有连接地址、模型这类顶层字段，它们不构成一套连接配置。请在上方新增一套连接配置并设为激活；顶层字段保持原样，不会被改写。',
+  unconfiguredModelInvalid:
+    '当前激活的连接「{name}」所选的模型不在它的模型列表里，因此不运行任何模型、也不发送任何请求。请在模型列表里重新选一个。',
+  unconfiguredModelUnusable:
+    '当前激活的连接「{name}」没有可确定的模型：后端无法判断该向哪个模型发请求，因此不发起连接。请在模型列表里填一个模型，或设置明确的后端实现。',
   unconfiguredEffect: '此时决策使用本地确定性启发式，不发出任何外部请求。',
   labelModelIds: '模型 ID（可多个，每行一个）',
   profileModelIdsHint: '这一套连接可用的模型。留空表示由后端决定默认模型。',
@@ -731,6 +736,7 @@ export const en: Record<keyof typeof zh, string> = {
   profileTestTimeout: 'Timed out',
   profileTestBadResponse: 'Bad response',
   profileTestMisconfigured: 'Incomplete configuration',
+  profileTestModelUnusable: 'No usable model selected',
   profileLatency: '{ms} ms',
   activeProfileMissing: 'The active profile "{name}" does not exist: no connection is in force.',
   unconfiguredTitle: 'No connection configured.',
@@ -739,6 +745,10 @@ export const en: Record<keyof typeof zh, string> = {
   unconfiguredActiveMissing: 'The active name "{name}" matches no saved profile. System 1 does not fall back to another one.',
   unconfiguredLegacy:
     'The document only carries top-level connection fields (address, model, key variable), which do not form a connection profile. Add a profile above and set it active; the top-level fields are left exactly as they are.',
+  unconfiguredModelInvalid:
+    'The active connection "{name}" selects a model that is not in its model list, so no model runs and no request is sent. Select a listed model again.',
+  unconfiguredModelUnusable:
+    'The active connection "{name}" has no model that can be determined, so the backend cannot tell which model to ask for and no connection is made. List a model, or pin an explicit backend implementation.',
   unconfiguredEffect: 'Decisions use the local deterministic heuristics and make no external request.',
   labelModelIds: 'Model ids (any number, one per line)',
   profileModelIdsHint: 'The models this connection may ask for. Blank lets the backend apply its default model.',

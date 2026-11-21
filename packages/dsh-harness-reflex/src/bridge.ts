@@ -1026,9 +1026,16 @@ export function createBackend(
   // which would otherwise make `backend: 'mock'` impossible to ask for without
   // also authoring a profile that the mock never uses.
   if (backend === 'mock') return new MockDecisionBackend();
-  // No active profile, no connection (g-066). Checked before the key chain and
-  // before the provider selector below, because both of them read the
-  // environment: reaching either would be the implicit request this removes.
+  // No active profile — or an active profile whose model cannot be sent — no
+  // connection (g-066 att-002). Checked before the key chain and before the
+  // provider selector below, because both of them read the environment:
+  // reaching either would be the implicit request this removes.
+  //
+  // The model reasons are here for a reason the review found the hard way: a
+  // transport built for a broken selection still sends *something*, because
+  // every implementation fills an absent `model` with `|| DEFAULT_MODEL`. The
+  // only place that fallback can be kept from firing is "no transport at all",
+  // and `UnconfiguredBackend` issues no request.
   if (config.systemOne.unconfigured !== undefined) {
     return new UnconfiguredBackend(config.systemOne.unconfigured);
   }

@@ -306,6 +306,9 @@ export function createSystemOneProbe(
     // The same projection the runtime uses, including the profile's *selected*
     // model: testing a connection tests the request the next decision sends.
     const target = connectionTarget(effective, name, targetProfile);
+    // A row whose model cannot be sent is reported from its own projection — the
+    // runtime builds no transport for it either — but the probe still runs so
+    // the answer carries the same shape as every other one (g-066 att-002).
     const result = await probeSystemOne(target, { env, signal, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
     return {
       ok: result.ok,

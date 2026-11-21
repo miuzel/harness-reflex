@@ -468,22 +468,34 @@ export interface ResolvedSystemOneConfig {
    * - `no-profiles`: the document authors no profile at all;
    * - `active-profile-missing`: `active` names no authored profile;
    * - `legacy-config-required`: the document carries only the pre-g-066 flat
-   *   fields, which no longer connect anything.
+   *   fields, which no longer connect anything;
+   * - `model-selection-unusable`: the active profile resolved, but the model its
+   *   configuration puts in force cannot be sent (owner-authored refusal);
+   * - `model-selection-invalid`: the active profile's *selected* model is not in
+   *   its list, so nothing runs (see {@link activeProfileModelMissing}).
    *
-   * Absent exactly when an active profile resolved. The panel renders it as the
-   * "unconfigured" state and the backend refuses to build.
+   * Absent exactly when an active profile resolved **and** its model is
+   * sendable. The panel renders it as the "unconfigured" state and the backend
+   * refuses to build, so an unusable model never becomes a request to some other
+   * model (g-066 att-002).
    */
   unconfigured?:
     | 'no-active-profile'
     | 'no-profiles'
     | 'active-profile-missing'
-    | 'legacy-config-required';
+    | 'legacy-config-required'
+    | 'model-selection-unusable'
+    | 'model-selection-invalid';
   /**
    * The active profile names a `selectedModel` that is not in its `modelIds`.
    *
    * Reported, and the resolved {@link model} is left absent rather than falling
    * back to the first id: a connection whose *selected* model does not exist is
-   * a broken selection, not an invitation to run a different model.
+   * a broken selection, not an invitation to run a different model. Since
+   * g-066 att-002 it is also *final*: {@link unconfigured} is set with
+   * `model-selection-invalid` and {@link createBackend} builds no transport, so
+   * the backend's own `|| DEFAULT_MODEL` fallback can never turn "nothing was
+   * selected" into a request for a model nobody picked.
    */
   activeProfileModelMissing?: boolean;
 }
@@ -919,7 +931,7 @@ function resolveProfileModels(
   // "both shapes authored" would reject every pre-g-066 connection the moment it
   // passes through the schema — the exact compatibility this rule protects.
   if (Array.isArray(authored) && authored.length === 0 && legacy !== undefined) {
-    return { modelIds: [legacy], ...(selectedModel === undefined ? {} : { selectedModel }) };
+    return checkedSelection(name, [legacy], selectedModel);
   }
   if (authored !== undefined && authored !== null) {
     if (!Array.isArray(authored)) {
@@ -940,15 +952,45 @@ function resolveProfileModels(
       // one id would let the page show a selection that is not a selection.
       if (!modelIds.includes(id)) modelIds.push(id);
     }
-    return {
-      modelIds,
-      ...(selectedModel === undefined ? {} : { selectedModel })
-    };
+    return checkedSelection(name, modelIds, selectedModel);
   }
-  return {
-    modelIds: legacy === undefined ? [] : [legacy],
-    ...(selectedModel === undefined ? {} : { selectedModel })
-  };
+  return checkedSelection(name, legacy === undefined ? [] : [legacy], selectedModel);
+}
+
+/**
+ * Refuse the one authored selection that can never run.
+ *
+ * A `selectedModel` **outside** `modelIds` is not a preference to be re-resolved
+ * later: it names a model this connection does not offer, and every consumer —
+ * runtime, connection test, panel — would have to invent an answer. g-066
+ * att-002 closes it here, at the write, so it cannot be saved in the first
+ * place. A selection beside an **empty** list is the same mistake with nothing
+ * to select: it is refused rather than silently kept as "select nothing".
+ *
+ * (The resolution still reports such a document — {@link
+ * ResolvedSystemOneConfig.activeProfileModelMissing} — because a file edited by
+ * hand reaches it without passing through here, and the runtime then refuses to
+ * connect instead of running another model.)
+ *
+ * @param name - profile name, for the message.
+ * @param modelIds - the normalized list.
+ * @param selectedModel - the authored selection, when one was.
+ * @returns the normalized list and selection.
+ * @throws Error when the selection names nothing in the list.
+ */
+function checkedSelection(
+  name: string,
+  modelIds: string[],
+  selectedModel: string | undefined
+): { modelIds: string[]; selectedModel?: string } {
+  if (selectedModel !== undefined && !modelIds.includes(selectedModel)) {
+    throw new Error(
+      `systemOne.profiles["${name}"].selectedModel "${selectedModel}" is not one of its modelIds (${
+        modelIds.length === 0 ? 'the list is empty' : modelIds.join(', ')
+      }); select a listed model instead`
+    );
+  }
+  return { modelIds, ...(selectedModel === undefined ? {} : { selectedModel }) };
 }
 
 /**
@@ -1040,8 +1082,8 @@ export function resolveSystemOneConfig(
   }
 
   // The profile's *selected* model: the one the runtime sends and the probe
-  // tests. A selection outside the list is reported and resolves to nothing —
-  // never to "the first one", which would run a model nobody picked.
+  // tests. A selection outside the list is reported — never resolved to "the
+  // first one", which would run a model nobody picked.
   const modelIds = activeProfile.modelIds ?? [];
   const selectedModel = modelForProfile(activeProfile, modelIds);
   const modelSelectionBroken = selectedModel?.missing === true;
@@ -1050,7 +1092,10 @@ export function resolveSystemOneConfig(
   // second copy of the predicate here would be a check nothing can reach, and
   // the mutation control proved it — disabling *this* line left every test green.
   const timeoutMs = activeProfile.timeoutMs;
-  return {
+  // Which model the transport would *really* send (g-066 att-002), decided by
+  // the one function the connection test reads as well.
+  const planned = plannedModel(modelIds, activeProfile.backend ?? selected, selectedModel);
+  const connection = {
     ...authoredShape,
     backend: activeProfile.backend ?? selected,
     ...(activeProfile.baseUrl === undefined ? {} : { baseUrl: activeProfile.baseUrl }),
@@ -1060,6 +1105,105 @@ export function resolveSystemOneConfig(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(modelSelectionBroken ? { activeProfileModelMissing: true } : {})
   };
+  // A model the configuration puts in force but the runtime cannot honour is a
+  // refusal, not a connection: `unconfigured` means "build no transport", which
+  // is the only way the backend's default can never stand in for it.
+  if (planned.unusable !== undefined) return { ...connection, unconfigured: planned.unusable };
+  // Spread conditionally: `model: undefined` would still be a *present* key, and
+  // "absent" is what the panel and the probe read as "names no model".
+  return planned.model === undefined ? connection : { ...connection, model: planned.model };
+}
+
+/**
+ * The model a connection would actually send, or why it can send none.
+ *
+ * The single implementation of the rule the runtime and the connection test both
+ * obey (g-066 att-002). It exists because `model === undefined` did *not* mean
+ * "no model": every remote backend fills an absent `model` with `|| DEFAULT`, and
+ * `auto` may additionally take a `SYSTEM_ONE_MODEL` from the environment. Left
+ * to the backend, a broken selection became a live request for a model nobody
+ * chose, while the probe — which has no such default — sent nothing. Both ends
+ * now ask this one function, in the same process, so they cannot disagree.
+ *
+ * - the profile lists ids and selects one: that id;
+ * - its selection is outside the list: **unusable** (`model-selection-invalid`),
+ *   never the first id and never an implementation default;
+ * - it lists no id: the default of the implementation that would be built, read
+ *   from the same environment the backend reads — unless that implementation is
+ *   not determinable, in which case it is **unusable**
+ *   (`model-selection-unusable`) rather than a guess between two defaults;
+ * - `mock` connects nowhere and names no model.
+ *
+ * @param modelIds - the profile's model list.
+ * @param backend - the effective implementation selector.
+ * @param selected - what {@link modelForProfile} answered for the profile.
+ * @param env - the environment the backend would read.
+ * @returns the model to send, or the refusal tag.
+ */
+function plannedModel(
+  modelIds: readonly string[],
+  backend: 'auto' | 'mock' | 'jev' | 'vllm',
+  selected: { model?: string; missing?: boolean },
+  env: Record<string, string | undefined> = process.env
+): { model?: string; unusable?: 'model-selection-invalid' | 'model-selection-unusable' } {
+  if (selected.missing === true) return { unusable: 'model-selection-invalid' };
+  if (selected.model !== undefined) return { model: selected.model };
+  const fallback = defaultModelAnswer(backend, env);
+  if (fallback.unusable === true) return { unusable: 'model-selection-unusable' };
+  return fallback.model === undefined ? {} : { model: fallback.model };
+}
+
+/**
+ * The model a backend would fall back to, for a connection that names none.
+ *
+ * Only the *defaults* of the two remote implementations are modelled, under the
+ * same environment precedence as the backend classes (explicit option, then
+ * `SYSTEM_ONE_MODEL`, then the per-implementation variable, then the constant).
+ * The in-process mock is not configured by any of this and has never touched an
+ * endpoint, so it names no model.
+ *
+ * `unusable` is the "there is a model, but no backend here could send it"
+ * answer: an `auto` provider chosen from the environment by a URL rather than an
+ * explicit provider.
+ *
+ * @param backend - the effective implementation selector.
+ * @param env - the environment the backend would read; the process environment by
+ *   default, so the runtime and the probe (in that same process) agree.
+ * @returns the model that would be sent, and whether it is unusable.
+ */
+function defaultModelAnswer(
+  backend: 'auto' | 'mock' | 'jev' | 'vllm',
+  env: Record<string, string | undefined> = process.env
+): { model?: string; unusable?: true } {
+  const named = optionalText(env.SYSTEM_ONE_MODEL);
+  if (backend === 'mock') return {};
+  if (backend === 'jev') return { model: named ?? optionalText(env.JEV_MODEL) ?? 'jev-latest' };
+  if (backend === 'vllm') {
+    return { model: named ?? optionalText(env.VLLM_MODEL) ?? 'Qwen/Qwen2.5-7B-Instruct' };
+  }
+  // `auto`: the vendored factory picks the implementation from the environment.
+  // It is modelled exactly as far as it is deterministic — an explicit provider
+  // variable selects one — and anything else is refused rather than guessed.
+  const provider = (env.SYSTEM_ONE_BACKEND ?? env.REFLEX_BACKEND ?? '').trim().toLowerCase();
+  if (provider === 'jev') return { model: named ?? optionalText(env.JEV_MODEL) ?? 'jev-latest' };
+  if (provider === 'vllm' || provider === 'simple-jev' || provider === 'logits') {
+    return { model: named ?? optionalText(env.VLLM_MODEL) ?? 'Qwen/Qwen2.5-7B-Instruct' };
+  }
+  if (provider.length === 0) {
+    if (!named && (env.SYSTEM_ONE_API_KEY || env.JEV_API_KEY)) {
+      return { model: optionalText(env.JEV_MODEL) ?? 'jev-latest' };
+    }
+    if (!named && (env.VLLM_BASE_URL || env.OPENAI_BASE_URL)) {
+      return { model: optionalText(env.VLLM_MODEL) ?? 'Qwen/Qwen2.5-7B-Instruct' };
+    }
+    // Neither credential nor endpoint: the factory would build the in-process
+    // mock. That is still *not* "no model" — the runtime would answer from
+    // heuristics while the panel showed a configured connection — so it is
+    // refused like any other undeterminable implementation. A deployment that
+    // wants the in-process answer asks for it (`backend: mock`).
+  }
+  // A model was named but no implementation can be determined to send it.
+  return { unusable: true };
 }
 
 /**
@@ -1315,6 +1459,12 @@ export interface ConnectionTarget {
   /** The key to present. Stays in this process; never serialized. */
   apiKey?: string;
   timeoutMs?: number;
+  /**
+   * This connection's model cannot be sent (g-066 att-002): its `selectedModel`
+   * is not in its list, or no implementation could be sure which model to ask
+   * for when it names none. A probe reports this instead of guessing a model.
+   */
+  modelUnusable?: boolean;
 }
 
 /**
@@ -1329,7 +1479,14 @@ export interface ConnectionTarget {
  *
  * The model is derived rather than read from {@link ConnectionTarget.model}, so a
  * probe can never test a model the runtime does not run: one `selectedModel`
- * outside `modelIds` makes both of them absent (and the panel says why).
+ * outside `modelIds` makes both of them **absent** (and the panel says why,
+ * while {@link resolveSystemOneConfig} refuses to connect at all). A profile that
+ * lists no model is the one case where the answer is the implementation default
+ * — the same {@link plannedModel} the resolved connection uses, so the two can
+ * never disagree about which model a connection asks for.
+ *
+ * `modelUnusable` is the probe's whole answer for a connection whose model
+ * cannot be sent: it must not guess one instead.
  *
  * @param flat - the resolved block, supplying the backend fallback only.
  * @param name - profile name (the probe's label).
@@ -1342,16 +1499,19 @@ export function connectionTarget(
   profile: ResolvedSystemOneProfile
 ): ConnectionTarget {
   const baseUrl = optionalText(profile.baseUrl);
-  const selected = modelForProfile(profile, profile.modelIds ?? []);
-  const model = optionalText(selected.missing === true ? undefined : selected.model);
+  const backend = profile.backend ?? flat.backend ?? 'auto';
+  const modelIds = profile.modelIds ?? [];
+  const resolved = plannedModel(modelIds, backend, modelForProfile(profile, modelIds));
+  const model = resolved.model === undefined ? undefined : optionalText(resolved.model);
   const apiKeyEnv = optionalText(profile.apiKeyEnv);
   const apiKey = optionalText(profile.apiKey);
   const timeoutMs = profile.timeoutMs;
   return {
     name,
-    backend: profile.backend ?? flat.backend ?? 'auto',
+    backend,
     ...(baseUrl === undefined ? {} : { baseUrl }),
     ...(model === undefined ? {} : { model }),
+    ...(resolved.unusable === undefined ? {} : { modelUnusable: true }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(apiKey === undefined ? {} : { apiKey }),
     ...(timeoutMs === undefined ? {} : { timeoutMs })

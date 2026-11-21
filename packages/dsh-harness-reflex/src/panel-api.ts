@@ -357,14 +357,23 @@ export interface PanelSystemOneView {
   activeProfileMissing: boolean;
   /**
    * Why nothing connects, when nothing does (g-066): no profiles, none
-   * activated, the active name missing, or only the pre-g-066 flat fields.
+   * activated, the active name missing, only the pre-g-066 flat fields, or an
+   * active profile whose model cannot be sent.
    *
-   * Absent exactly when an active profile resolved, so the page renders its
+   * Absent exactly when a connection resolved, so the page renders its
    * "unconfigured" state from this and never from a guess about the fields.
    */
-  unconfigured?: 'no-active-profile' | 'no-profiles' | 'active-profile-missing' | 'legacy-config-required';
+  unconfigured?:
+    | 'no-active-profile'
+    | 'no-profiles'
+    | 'active-profile-missing'
+    | 'legacy-config-required'
+    | 'model-selection-unusable'
+    | 'model-selection-invalid';
   /** The active profile's selected model is not in its list; nothing runs. */
   activeProfileModelMissing?: boolean;
+  /** The active profile's model cannot be sent, so nothing connects (g-066 att-002). */
+  activeProfileModelUnusable?: boolean;
   /**
    * Live gateway health, when the backend keeps any. Backends that answer every
    * call in-process (mock) omit it; the absence is not an outage.
@@ -703,6 +712,7 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
     activeProfileMissing: systemOne.activeProfileMissing === true,
     ...(systemOne.unconfigured === undefined ? {} : { unconfigured: systemOne.unconfigured }),
     ...(systemOne.activeProfileModelMissing === true ? { activeProfileModelMissing: true } : {}),
+    ...(systemOne.unconfigured === 'model-selection-unusable' ? { activeProfileModelUnusable: true } : {}),
     ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),
     ...(systemOne.active === undefined ? {} : { activeProfile: systemOne.active }),
     ...(systemOne.baseUrl === undefined ? {} : { baseUrl: systemOne.baseUrl }),

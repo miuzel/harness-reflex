@@ -1691,9 +1691,17 @@ export interface PanelSnapshotLike {
      * the fields it can see, because only the Host's resolution knows whether
      * an active profile actually resolved.
      */
-    unconfigured?: 'no-active-profile' | 'no-profiles' | 'active-profile-missing' | 'legacy-config-required';
+    unconfigured?:
+      | 'no-active-profile'
+      | 'no-profiles'
+      | 'active-profile-missing'
+      | 'legacy-config-required'
+      | 'model-selection-unusable'
+      | 'model-selection-invalid';
     /** The active profile's selected model is not in its list. */
     activeProfileModelMissing?: boolean;
+    /** The active profile's model cannot be sent, so nothing connects (g-066 att-002). */
+    activeProfileModelUnusable?: boolean;
     /**
      * Live gateway health. Absent for a backend that answers in-process; only
      * `available === false` means the decisions are degraded.

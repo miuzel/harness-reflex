@@ -3065,6 +3065,199 @@ test('the banner is absent while the backend is healthy or when it publishes no 
 
 //#endregion
 
+//#region choosing the model in force: radio group, no write before save (g-066 criterion 2)
+
+/**
+ * A configuration whose active connection lists three models and selects the
+ * second one — the shape that renders a radio group rather than a statement.
+ */
+const MULTI_MODEL = {
+  ...AUTHORED,
+  systemOne: {
+    active: 'multi',
+    profiles: {
+      multi: { baseUrl: 'http://multi.example', modelIds: ['alpha', 'beta', 'gamma'], selectedModel: 'beta' },
+      // One listed id: the group degenerates to a plain statement — there is
+      // nothing to choose, so a single radio would be a decision to re-confirm.
+      single: { baseUrl: 'http://single.example', modelIds: ['solo'] },
+      // The pre-g-066 single-model spelling still opens with a selection.
+      legacy: { baseUrl: 'http://legacy.example', model: 'old-model' }
+    }
+  }
+} as unknown as ReflexConfig;
+
+/** Facts for {@link MULTI_MODEL}, with no stored keys to trip the rename guard. */
+function multiModelFacts(): PanelRuntimeFacts {
+  return { ...facts(false), config: resolveConfig(MULTI_MODEL), profileKeys: {} };
+}
+
+/** The radio inputs of one row, in render order. */
+function modelRadios(row: Element): Element[] {
+  return elements(row).filter((element) => element.type === 'input' && element.props.type === 'radio');
+}
+
+/** The value of one model-list field of a row (there is exactly one textarea). */
+function modelListOf(row: Element): Element | undefined {
+  return elements(row).find((element) => element.type === 'textarea');
+}
+
+test('a connection listing several models offers one radio group with exactly one selection', async () => {
+  const { form } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  const tree = await mounted.runtime.flush();
+
+  const row = namedRow(tree, 'multi');
+  assert.ok(row !== undefined, 'the multi-model row is missing');
+  const radios = modelRadios(row);
+  assert.deepEqual(
+    radios.map((radio) => String(radio.props.value)),
+    ['alpha', 'beta', 'gamma'],
+    'one radio per listed id, in authored order'
+  );
+  // Single-select semantics: every radio shares one group name (per row), so the
+  // browser makes choosing one clear the others — and the checked one is the
+  // *saved* selection.
+  const names = new Set(radios.map((radio) => String(radio.props.name)));
+  assert.equal(names.size, 1, 'the group must be one mutual-exclusion group');
+  const checked = radios.filter((radio) => radio.props.checked === true);
+  assert.deepEqual(checked.map((radio) => String(radio.props.value)), ['beta'], 'exactly the saved selection is checked');
+  // A different row's group is a different group: selecting in one cannot clear
+  // the other row's choice.
+  const single = namedRow(tree, 'single');
+  assert.ok(single !== undefined);
+  const singleRadios = modelRadios(single);
+  assert.equal(singleRadios.length, 0, 'a one-model connection renders no radio to re-confirm');
+  assert.ok(valuesOf(single).includes('solo'), 'and states the model it runs');
+  assert.equal(singleRadios.length, 0, 'the single-model row adds no group of its own');
+  // The legacy single-model row opens with its id selected — no silent conversion.
+  const legacy = namedRow(tree, 'legacy');
+  assert.ok(legacy !== undefined);
+  assert.ok(valuesOf(legacy).includes('old-model'), 'a legacy connection does not lose its model');
+  mounted.unmount();
+});
+
+test('choosing another model writes nothing, and a save writes it as the selected model', async () => {
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  const row = namedRow(tree, 'multi');
+  assert.ok(row !== undefined);
+  const gamma = modelRadios(row).find((radio) => String(radio.props.value) === 'gamma');
+  assert.ok(gamma !== undefined, 'no radio for the third model');
+  fire(gamma, 'onChange', { target: { value: 'gamma' } });
+  tree = await mounted.runtime.flush();
+
+  // The click is a draft edit and nothing more: a running transport must not
+  // change because someone looked at the list.
+  assert.deepEqual(mutations, [], 'choosing a model wrote to the document before Save');
+  const after = namedRow(tree, 'multi');
+  assert.ok(after !== undefined);
+  assert.deepEqual(
+    modelRadios(after).filter((radio) => radio.props.checked === true).map((radio) => String(radio.props.value)),
+    ['gamma'],
+    'the selection did not move within the draft'
+  );
+
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  const saves: { ops: unknown; revision: unknown }[] = mutations;
+  assert.equal(saves.length, 1, `the save did not reach the Host: ${textOf(tree).slice(0, 200)}`);
+  const ops = plain(saves[0]?.ops) as { op: string; path: string[]; value: unknown }[];
+  const selected = ops.filter((op) => op.path.join('.') === 'systemOne.profiles.multi.selectedModel');
+  assert.deepEqual(selected.map((op) => [op.op, op.value]), [['set', 'gamma']], 'the selected model was not written');
+  // Nothing else about the model moved: the list is untouched, and the other
+  // rows are not rewritten by this edit.
+  assert.deepEqual(
+    ops.filter((op) => op.path.join('.') === 'systemOne.profiles.multi.modelIds'),
+    [],
+    'the model list was rewritten by a selection change'
+  );
+  assert.deepEqual(
+    ops.filter((op) => op.path[2] === 'single' || op.path[2] === 'legacy'),
+    [],
+    'untouched rows were rewritten'
+  );
+  mounted.unmount();
+});
+
+test('choosing the first listed model clears the stored selection instead of writing it', async () => {
+  // The first id is the implicit selection, so writing it would store a
+  // redundant field — and a later list edit would leave that field pointing at
+  // an id that no longer exists.
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  const row = namedRow(tree, 'multi');
+  assert.ok(row !== undefined);
+  fire(modelRadios(row).find((radio) => String(radio.props.value) === 'alpha'), 'onChange', { target: { value: 'alpha' } });
+  tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const saves: { ops: unknown }[] = mutations;
+  assert.equal(saves.length, 1);
+  const ops = plain(saves[0]?.ops) as { op: string; path: string[]; value: unknown }[];
+  const selected = ops.filter((op) => op.path.join('.') === 'systemOne.profiles.multi.selectedModel');
+  assert.deepEqual(selected.map((op) => [op.op, op.value]), [['unset', undefined]], 'the first id must clear the field');
+  mounted.unmount();
+});
+
+test('a selection that is no longer in the list is refused, and the row says why', async () => {
+  // Editing the list under a selection is how an unusable state arises — the
+  // radio group cannot produce it, but typing can. The save must be refused,
+  // with the row named, rather than written out as "select nothing".
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  const row = namedRow(tree, 'multi');
+  assert.ok(row !== undefined);
+  type(modelListOf(row), 'alpha\ngamma');
+  tree = await mounted.runtime.flush();
+  const edited = namedRow(tree, 'multi');
+  assert.ok(edited !== undefined);
+  const missing = elements(edited).find((element) => element.props['data-profile-model-missing'] === 'true');
+  assert.ok(missing !== undefined, `the row does not explain the broken selection: ${textOf(edited)}`);
+  assert.ok(textOf(missing).includes('beta'), 'the warning does not name the selected model');
+
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.deepEqual(mutations, [], 'a broken selection reached the Host');
+  assert.ok(textOf(tree).includes('不在模型列表里'), `the refusal is not explained: ${textOf(tree).slice(0, 300)}`);
+  mounted.unmount();
+});
+
+test('a saved connection that selects a missing model shows the unconfigured banner', async () => {
+  // The Host-side snapshot is the authority: it reports the refusal, and the page
+  // must render it as "nothing connects" rather than as a working connection.
+  const refused = { ...facts(false), config: resolveConfig(MULTI_MODEL), profileKeys: {} } as PanelRuntimeFacts;
+  const { form } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({
+    facts: {
+      ...refused,
+      config: {
+        ...refused.config,
+        systemOne: { ...refused.config.systemOne, unconfigured: 'model-selection-invalid' as const }
+      }
+    },
+    form
+  });
+  openTab(mounted.tree, 'System 1 后端');
+  const tree = await mounted.runtime.flush();
+  const banner = elements(tree).find((element) => element.props['data-unconfigured'] === 'model-selection-invalid');
+  assert.ok(banner !== undefined, 'the page does not report the refused connection');
+  assert.ok(textOf(banner).includes('不在它的模型列表里'), `the banner does not explain why: ${textOf(banner)}`);
+  assert.ok(textOf(banner).includes('不发出任何外部请求'), 'the banner does not state that nothing is requested');
+  mounted.unmount();
+});
+
+//#endregion
+
 //#region editing a connection name, one keystroke at a time (g-066 criterion 3)
 
 /**

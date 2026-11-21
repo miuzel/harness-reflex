@@ -156,7 +156,7 @@ DSH plugin config):
 | --- | --- | --- |
 | `baseUrl` | unset | System 1 endpoint; unset lets the backend use its environment/default |
 | `modelIds` | unset | The **list of model ids** this connection may ask for. `model` is the single-model spelling, identical to a one-entry list |
-| `selectedModel` | first listed id | The **one model in force**: the runtime sends it and the Test button probes it. It must be one of `modelIds`; a selection outside the list runs no model, and the panel says why |
+| `selectedModel` | first listed id | The **one model in force**: the runtime sends it and the Test button probes it. It must be one of `modelIds`: the save refuses a selection outside the list, and a hand-edited file that still carries one builds **no connection at all** (the panel shows "not configured") instead of asking for a different model |
 | `apiKey` | unset | The secret itself, **write-only**: it is stored on save and never shown again. A **rename does not carry it** — retype it after renaming (see below) |
 | `apiKeyEnv` | unset | Stores the **variable name only**. Unset names nothing and the backend falls back to `SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`; naming a variable locks onto it, with no fallback |
 | `timeoutMs` | unset | Per-decision timeout; unset uses the **backend default — 10000 ms for `jev`, 8000 ms for `simple-jev`**, not one shared value |

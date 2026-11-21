@@ -83,7 +83,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * No test was deleted: the two survivors assert the row is still never written
  * *and* is now refused with the row number.
  */
-const EXPECTED_TESTS = 728;
+const EXPECTED_TESTS = 735;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -1233,13 +1233,43 @@ const MUTATIONS = [
     to: '  void config.systemOne.unconfigured;'
   },
   {
+    // The radio group must reach the page as `Field`'s control. Passing it as a
+    // `children` key of the props object loses it (h overwrites it with the empty
+    // third-argument list), so the row rendered its label and help but no radios
+    // at all — invisible to every unit test of the group itself.
+    name: 'model-radios-never-render',
+    area: 'the multi-model selection renders as radios on the page',
+    file: 'src/client/view.ts',
+    from: '  if (ids.length === 0) return null;\n  // Rendered through `Field`',
+    to: '  if (ids.length >= 0) return null;\n  // Rendered through `Field`'
+  },
+  {
     // A broken selection must resolve to *no* model. Falling back to the first
-    // id is the "runs a model I did not pick" behaviour.
+    // id is the "runs a model I did not pick" behaviour (g-066 att-002).
     name: 'invalid-selection-runs-the-first-model',
-    area: 'a selection outside the list resolves to no model',
+    area: 'a selection outside the list never runs another model',
     file: 'src/config.ts',
-    from: '  return modelIds.includes(chosen) ? { model: chosen } : { missing: true };',
-    to: '  return modelIds.includes(chosen) || modelIds.length === 0 ? { model: chosen } : { model: modelIds[0] };'
+    from: "  if (selected.missing === true) return { unusable: 'model-selection-invalid' };",
+    to: '  if (selected.missing === true) return { model: modelIds[0] };'
+  },
+  {
+    // The refusal that stops a transport being built for an unusable model.
+    // Without it the backend's own `|| DEFAULT_MODEL` sends a model nobody
+    // selected — the finding that blocked att-001.
+    name: 'unusable-model-still-connects',
+    area: 'an unusable model builds no transport at all',
+    file: 'src/config.ts',
+    from: '  if (planned.unusable !== undefined) return { ...connection, unconfigured: planned.unusable };',
+    to: '  if (planned.unusable !== undefined) return { ...connection, model: planned.model };'
+  },
+  {
+    // The selection must be refused where it is authored, not stored and
+    // re-interpreted later.
+    name: 'author-a-selection-outside-the-list',
+    area: 'a selection outside the list is refused on save',
+    file: 'src/config.ts',
+    from: '  if (selectedModel !== undefined && !modelIds.includes(selectedModel)) {',
+    to: '  if (false) {'
   },
   {
     // The probe must test the *selected* model. Probing the first one reports on
@@ -1247,8 +1277,8 @@ const MUTATIONS = [
     name: 'probe-tests-another-model',
     area: 'the connection test probes the selected model',
     file: 'src/config.ts',
-    from: '  const selected = modelForProfile(profile, profile.modelIds ?? []);',
-    to: '  const selected = { model: (profile.modelIds ?? [])[0], missing: false };'
+    from: '  const resolved = plannedModel(modelIds, backend, modelForProfile(profile, modelIds));',
+    to: '  const resolved = { model: modelIds[0] };'
   },
   {
     // The rename guard is the only thing standing between a rename and a lost

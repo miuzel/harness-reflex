@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { Config, connectionTarget, resolveApiKey, resolveConfig, resolveSystemOneConfig } from './config.js';
+import { buildProbeRequest, probeSystemOne } from './systemone-probe.js';
 
 /**
  * System One connections: the active profile is the *only* connection (g-066),
@@ -82,12 +83,13 @@ test('a profile states every field it uses, and nothing is inherited from anywhe
   assert.equal(resolved.apiKeyEnv, undefined, 'an unstated field stays undefined: the backend decides');
   assert.deepEqual(Object.keys(resolved.profiles ?? {}), ['fast', 'slow'], 'every profile is carried, in authored order');
 
-  // A bare profile resolves bare: it borrows neither the other profile's address
-  // nor any block's.
+  // A bare profile borrows neither the other profile's address nor any block's.
+  // (Its *model* is the implementation default now — see the closed-default test
+  // below, which is the deliberate correction of "the backend decides".)
   const bare = resolveSystemOneConfig('jev', { active: 'bare', profiles: { bare: {}, other: { baseUrl: 'http://other' } } });
   assert.equal(bare.unconfigured, undefined);
   assert.equal(bare.baseUrl, undefined);
-  assert.equal(bare.model, undefined);
+  assert.equal(bare.model, 'jev-latest', 'a jev connection with no listed model runs jev-latest, and says so');
 });
 
 test('a profile may override the backend for itself only', () => {
@@ -137,15 +139,20 @@ test('a connection lists any number of models and runs the selected one', () => 
   assert.equal(target.model, 'b', 'the connection test probes the selected model');
 });
 
-test('a selection outside the list resolves to no model, and is reported', () => {
-  const resolved = resolveSystemOneConfig('jev', {
-    active: 'gw',
-    profiles: { gw: { modelIds: ['a', 'b'], selectedModel: 'c' } }
-  });
-  assert.equal(resolved.model, undefined, 'never silently runs the first id instead');
-  assert.equal(resolved.activeProfileModelMissing, true);
-  // ... and the probe sends no model either, so the two cannot disagree.
-  assert.equal(connectionTarget(resolved, 'gw', resolved.profiles!.gw).model, undefined);
+test('a selection outside the list is refused when it is authored', () => {
+  // g-066 att-002: the page cannot author it (its radio group only offers listed
+  // ids, and its validator refuses a hand-typed one), so the document is refused
+  // where it is written rather than stored and re-interpreted later.
+  assert.throws(
+    () => resolveSystemOneConfig('jev', { active: 'gw', profiles: { gw: { modelIds: ['a', 'b'], selectedModel: 'c' } } }),
+    /selectedModel "c" is not one of its modelIds \(a, b\)/,
+    'a selection outside the list must not be storable'
+  );
+  assert.throws(
+    () => resolveSystemOneConfig('jev', { active: 'gw', profiles: { gw: { modelIds: ['a'], selectedModel: 'b' } } }),
+    /selectedModel "b" is not one of its modelIds/,
+    'a one-entry list is a list too'
+  );
 });
 
 test('a one-model connection is the same shape either way it is authored', () => {
@@ -287,7 +294,8 @@ test('connectionTarget projects one profile and nothing else', () => {
   assert.equal(fast.timeoutMs, undefined);
 
   const bare = connectionTarget(resolved, 'bare', resolved.profiles!.bare);
-  assert.equal(bare.model, undefined, 'a bare profile inherits nothing — not even from the active profile');
+  assert.equal(bare.model, 'jev-latest', 'a bare profile inherits no model — it gets the implementation default, not the active one');
+  assert.notEqual(bare.model, 'fast-model', 'nothing is borrowed from the active profile');
   assert.equal(bare.apiKey, undefined, 'a profile without a key does not inherit one');
   assert.equal(bare.baseUrl, undefined);
   assert.equal(bare.backend, 'jev', 'the implementation fallback is the only inherited fact');
@@ -355,22 +363,118 @@ test('an inactive profile does not affect what the runtime sends', () => {
   assert.equal(idle.baseUrl, 'http://b');
 });
 
-test('an invalid selection degrades to "no model", never to a different one', () => {
-  // The three ways a selection can be unusable, each answered the same way.
-  const cases: { label: string; profile: Record<string, unknown> }[] = [
-    { label: 'not in the list', profile: { modelIds: ['a', 'b'], selectedModel: 'zzz' } },
-    { label: 'list emptied under the selection', profile: { modelIds: [], selectedModel: 'a' } },
-    { label: 'legacy id replaced', profile: { model: 'a', selectedModel: 'b' } }
-  ];
-  for (const { label, profile } of cases) {
-    const resolved = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: profile as never } });
-    assert.equal(resolved.model, undefined, `${label}: nothing may be sent`);
-    assert.equal(resolved.activeProfileModelMissing, true, `${label}: the panel must be able to say why`);
-    // The rest of the connection still resolves: the model is the broken part,
-    // and refusing the whole activation would take every tool down for it.
-    assert.equal(resolved.unconfigured, undefined, `${label}: the connection itself is configured`);
+//#region an unusable selection at the request boundary (g-066 att-002)
+
+/**
+ * An unusable selection at the request boundary (g-066 att-002).
+ *
+ * The review that blocked att-001 found the exact failure this region pins: the
+ * runtime resolved `model: undefined`, the backend turned that into
+ * `|| jev-latest`, and a real request went out for a model nobody selected —
+ * while the connection test sent no model at all. "Nothing runs" therefore has to
+ * mean *no transport*, because every remote backend has that `||`.
+ *
+ * The three shapes can no longer be **authored** (the profile validator refuses
+ * them, see the `selectedModel` test above), but a hand-edited file reaches the
+ * lower layers without passing through it, so each one is also pinned where it
+ * lands: the probe, and `createBackend` in `key-chain.test.ts`.
+ */
+const UNUSABLE_SELECTIONS: { label: string; modelIds?: string[]; model?: string; selectedModel: string }[] = [
+  { label: 'an empty list with a selection', modelIds: [], selectedModel: 'a' },
+  { label: 'a non-empty list and an out-of-range selection', modelIds: ['a', 'b'], selectedModel: 'zzz' },
+  { label: 'a legacy model with an out-of-range selection', model: 'a', selectedModel: 'b' }
+];
+
+test('the connection test refuses an unusable selection instead of guessing a model', async () => {
+  for (const { label, modelIds, model, selectedModel } of UNUSABLE_SELECTIONS) {
+    // Projected the way the residency layer would from a hand-edited file: the
+    // list as authored, the selection as authored, nothing reconciled.
+    const target = connectionTarget({ backend: 'jev' }, 'p', {
+      baseUrl: 'http://gw',
+      ...(modelIds === undefined ? {} : { modelIds }),
+      ...(model === undefined ? {} : { modelIds: [model] }),
+      selectedModel
+    });
+    assert.equal(target.model, undefined, `${label}: the probe must not name a model`);
+    assert.equal(target.modelUnusable, true, `${label}: and must say why it cannot test`);
+    let requests = 0;
+    const fetchImpl = (async () => {
+      requests += 1;
+      return new Response('{}');
+    }) as unknown as typeof fetch;
+    const result = await probeSystemOne(target, { env: {}, fetch: fetchImpl });
+    assert.equal(requests, 0, `${label}: the probe sent a request for a connection the runtime refuses`);
+    assert.equal(result.ok, false, `${label}: not ok`);
+    assert.equal(result.status, 'model-unusable', `${label}: the answer names the real problem`);
+    // And the build-level refusal agrees: no request spec at all.
+    const built = buildProbeRequest(target, {});
+    assert.equal('spec' in built, false, `${label}: a request spec was built for a refused connection`);
   }
 });
+
+test('a connection that names no model runs a deterministic default, never a guess', () => {
+  // The quiet version of the same failure: with `model` absent, the *backend*
+  // used to decide (`jev-latest` or `Qwen/...`, or `auto`'s provider choice), so
+  // the runtime and the connection test could name different models — or the
+  // runtime could pick one nobody chose. The resolution now answers, and the
+  // probe reads that same answer.
+  const env = process.env;
+  const saved = {
+    SYSTEM_ONE_BACKEND: env.SYSTEM_ONE_BACKEND,
+    REFLEX_BACKEND: env.REFLEX_BACKEND,
+    SYSTEM_ONE_MODEL: env.SYSTEM_ONE_MODEL,
+    JEV_MODEL: env.JEV_MODEL,
+    VLLM_MODEL: env.VLLM_MODEL,
+    SYSTEM_ONE_API_KEY: env.SYSTEM_ONE_API_KEY,
+    JEV_API_KEY: env.JEV_API_KEY,
+    VLLM_BASE_URL: env.VLLM_BASE_URL,
+    OPENAI_BASE_URL: env.OPENAI_BASE_URL
+  };
+  for (const variable of Object.keys(saved)) delete env[variable];
+  try {
+    // A pinned implementation has no ambiguity at all: its documented default.
+    const jev = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: { baseUrl: 'http://gw' } } });
+    assert.equal(jev.model, 'jev-latest');
+    assert.equal(connectionTarget(jev, 'p', jev.profiles!.p).model, 'jev-latest', 'the probe tests the same id');
+    const vllm = resolveSystemOneConfig('vllm', { active: 'p', profiles: { p: { baseUrl: 'http://gw' } } });
+    assert.equal(vllm.model, 'Qwen/Qwen2.5-7B-Instruct');
+    assert.equal(connectionTarget(vllm, 'p', vllm.profiles!.p).model, 'Qwen/Qwen2.5-7B-Instruct');
+    // ... and it is the *environment* the backend would read, at both ends.
+    env.JEV_MODEL = 'from-env';
+    const jevEnv = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: { baseUrl: 'http://gw' } } });
+    assert.equal(jevEnv.model, 'from-env');
+    assert.equal(connectionTarget(jevEnv, 'p', jevEnv.profiles!.p).model, 'from-env');
+    delete env.JEV_MODEL;
+
+    // `mock` connects nowhere, so it names no model and needs none.
+    const mock = resolveSystemOneConfig('mock', { active: 'p', profiles: { p: {} } });
+    assert.equal(mock.unconfigured, undefined);
+    assert.equal(mock.model, undefined);
+
+    // `auto` with nothing in the environment to pick an implementation from: two
+    // different defaults are possible, so both ends refuse rather than guess.
+    const auto = resolveSystemOneConfig('auto', { active: 'p', profiles: { p: { baseUrl: 'http://gw' } } });
+    assert.equal(auto.unconfigured, 'model-selection-unusable', 'the runtime must refuse, not guess a default');
+    assert.equal(auto.model, undefined);
+    const target = connectionTarget(auto, 'p', auto.profiles!.p);
+    assert.equal(target.modelUnusable, true, 'and so must the probe');
+    assert.equal(target.model, undefined);
+
+    // Pinning the implementation makes it deterministic again.
+    env.SYSTEM_ONE_BACKEND = 'jev';
+    const pinned = resolveSystemOneConfig('auto', { active: 'p', profiles: { p: { baseUrl: 'http://gw' } } });
+    assert.equal(pinned.unconfigured, undefined, 'a pinned implementation resolves');
+    assert.equal(pinned.model, 'jev-latest', 'its own documented default');
+    assert.equal(connectionTarget(pinned, 'p', pinned.profiles!.p).model, 'jev-latest', 'and the probe tests that same id');
+  } finally {
+    for (const [variable, value] of Object.entries(saved)) {
+      if (value === undefined) delete env[variable];
+      else env[variable] = value;
+    }
+  }
+});
+
+//#endregion
 
 test('a legacy connection keeps working and can still be given a selection', () => {
   // The compatibility half of criterion 2: `model` alone is a one-entry list.

@@ -14,7 +14,7 @@ import {
 import { createBackend } from './bridge.js';
 import { apiKeyFacts, profileKeyPresence } from './panel-mount.js';
 import { buildProbeRequest } from './systemone-probe.js';
-import { UnconfiguredBackend } from './unconfigured-backend.js';
+import { UnconfiguredBackend, UNCONFIGURED_BACKEND_MODEL } from './unconfigured-backend.js';
 import { JevDecisionBackend } from './vendor/harness-reflex/backend/jev.js';
 import { SimpleJevDecisionBackend } from './vendor/harness-reflex/backend/simple-jev.js';
 import { createSystemOneBackend } from './vendor/harness-reflex/backend/factory.js';
@@ -325,6 +325,50 @@ test('createBackend connects nothing without an active profile, whatever the env
     assert.equal(backend.name, 'unconfigured', `${label}: the name must say what is wrong`);
     assert.notEqual(backend.name, 'mock-heuristic-v1', `${label}: "unconfigured" must not look like a deliberate mock`);
     assert.equal(backend.health()?.available, false, `${label}: health must report the missing connection`);
+  }
+});
+
+test('createBackend builds no transport for an unusable model selection, so no default can stand in', () => {
+  // g-066 att-002, the review's blocking finding. Before this, the resolver
+  // reported `model: undefined` and the backend — every remote one — filled that
+  // with `config.model || <env> || DEFAULT_MODEL`. A request went out for
+  // `jev-latest` that nobody selected, while the connection test sent nothing.
+  //
+  // The environment below is the worst case: it names a model of its own, so a
+  // backend that *did* get built would send that one.
+  const env = { JEV_API_KEY: 'sk-only-in-the-environment', JEV_MODEL: 'env-model' };
+  const base = profileConfig({ backend: 'jev' }, CONNECTION).systemOne;
+  // The resolver refuses these documents at authoring time (its `selectedModel`
+  // check) — that is the first line of defence, pinned in
+  // `systemone-profiles.test.ts`. This test is about the *second*: a resolved
+  // configuration object that still carries one (a file written by hand, an
+  // older build, a future resolver bug) must not become a transport either. So
+  // the refused resolution is rebuilt here from the same fields, which is also
+  // what a regression in the resolver would leave behind.
+  const shapes: { label: string; modelIds?: string[]; selectedModel: string }[] = [
+    { label: 'empty list + selection', modelIds: [], selectedModel: 'a' },
+    { label: 'out-of-range selection', modelIds: ['a', 'b'], selectedModel: 'zzz' },
+    { label: 'legacy model + out-of-range selection', modelIds: ['a'], selectedModel: 'b' }
+  ];
+  for (const { label, modelIds, selectedModel } of shapes) {
+    const config = {
+      ...profileConfig({ backend: 'jev' }, CONNECTION),
+      systemOne: {
+        ...base,
+        ...(modelIds === undefined ? {} : { profiles: { p: { ...base.profiles!.p, modelIds } } }),
+        selectedModel,
+        activeProfileModelMissing: true,
+        unconfigured: 'model-selection-invalid' as const
+      }
+    };
+    assert.equal(config.systemOne.unconfigured, 'model-selection-invalid', `${label}: the resolution must refuse`);
+    const backend = createBackend(config, env);
+    assert.ok(backend instanceof UnconfiguredBackend, `${label}: no transport may be built, got ${backend.name}`);
+    // The strongest form of "no model was substituted": the only model the
+    // activation reports is the one that means "there is no connection".
+    assert.equal(backend.model, UNCONFIGURED_BACKEND_MODEL, `${label}: a model was substituted for the broken selection`);
+    assert.notEqual(backend.model, 'env-model', `${label}: the environment model reached the activation`);
+    assert.equal(backend.health()?.available, false, `${label}: health must report the refusal`);
   }
 });
 
