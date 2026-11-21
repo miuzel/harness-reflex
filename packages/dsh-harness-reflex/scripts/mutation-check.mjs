@@ -1020,11 +1020,16 @@ const MUTATIONS = [
     // g-066: there is no `flat` object any more, so the group write it used to
     // guard against is expressed with the row it would replace: one `set` on the
     // whole `systemOne` subtree deletes every stored secret it does not restate.
+    // The activation is written as a narrow path plus the rows, never as a whole
+    // `systemOne` group: a group write re-states the block from what the page
+    // knows, which does not include the stored `apiKey` (g-066), so it would
+    // silently delete every key. g-067 moved the activation out of `groupWrites`
+    // and into `diffDraft`; the invariant is the same, so the probe follows it.
     name: 'panel-writes-the-whole-system-one-group',
     area: 'the page writes the connection block on narrow paths only',
     file: 'src/client/panel.ts',
-    from: "      else writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });",
-    to: "      else writes.push({ path: ['systemOne'], value: { active: draft.backend.active.trim() } });"
+    from: "  if (activationTarget.length > 0 && activationTarget !== storedActivation) {\n    ops.push({ op: 'set', path: ['systemOne', 'active'], value: activationTarget });",
+    to: "  if (activationTarget.length > 0 && activationTarget !== storedActivation) {\n    ops.push({ op: 'set', path: ['systemOne'], value: { active: activationTarget } });"
   },
   {
     // Empty input means "leave the stored key alone": treating it as a write
