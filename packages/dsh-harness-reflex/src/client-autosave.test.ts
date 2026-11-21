@@ -45,6 +45,8 @@ interface AnyStore {
 }
 
 /** Evaluate one built CommonJS client module in a sandbox and return its exports. */
+
+const T = (what: string): void => {};
 function loadModule(name: string): Record<string, any> {
   const file = fileURLToPath(new URL(`../dist-client/${name}.js`, import.meta.url));
   const module = { exports: {} as Record<string, any> };
@@ -69,6 +71,11 @@ function loadModule(name: string): Record<string, any> {
 }
 
 const storeModule = loadModule('store') as unknown as StoreModule;
+
+/** The `./panel` module of the built client, for the group comparison it exports. */
+const panelModule = loadModule('panel') as unknown as { dirtyGroups(original: unknown, draft: unknown): string[] };
+
+// TEMP trace
 
 /** The authored document every test starts from. */
 const AUTHORED = {
@@ -529,7 +536,7 @@ test('the kept draft can be discarded, which re-seeds the page from the Host', a
 
 test('a slow older write never lands on top of a newer draft', async () => {
   const ns = namespace('staleness');
-  const { store, form } = makeStore({ namespace: ns });
+  const { store, form, clock } = makeStore({ namespace: ns });
 
   // A write is in flight carrying `rv_first`…
   const gate = form.hold();
@@ -543,8 +550,15 @@ test('a slow older write never lands on top of a newer draft', async () => {
   assert.equal(form.writes.length, 1, 'a second write raced the one in flight');
   assert.equal(store.getState().autosave.phase, 'pending', 'the newer change is not shown as waiting');
 
+  // The slow answer lands. The newer draft is *not* written on its (later) beat:
+  // typing keeps its own timing, so it waits for the pause its keystroke armed.
   gate.release();
   await settle();
+  assert.equal(form.writes.length, 1, 'the typing was written at the slow write\'s release instead of at its pause');
+  assert.equal(clock.armed().length, 1, 'the pause the typing armed did not survive the slow write');
+  clock.fireLast();
+  await settle();
+
   assert.equal(form.writes.length, 2, 'the newer draft was never sent');
   const second = form.writes[1]?.ops.find((op) => op.path.join('.') === 'toolPrefix');
   assert.equal(second?.value, 'rv_newer', 'the write after the slow one is not the newer draft');
@@ -564,7 +578,7 @@ test('every write is fenced by the revision its draft was read at', async () => 
 
 test('edits made while a write is in flight do not each cause a write', async () => {
   const ns = namespace('coalesce-inflight');
-  const { store, form } = makeStore({ namespace: ns });
+  const { store, form, clock } = makeStore({ namespace: ns });
 
   const gate = form.hold();
   store.edit((draft: any) => ({ ...draft, runtime: { ...draft.runtime, toolPrefix: 'rv_a' } }));
@@ -573,7 +587,12 @@ test('edits made while a write is in flight do not each cause a write', async ()
   await settle();
   assert.equal(form.writes.length, 1, 'typing while a write ran started a second write');
 
+  // Four keystrokes, one pause, one write — and the pause is what writes them,
+  // not the release of the write they queued behind (g-069).
   gate.release();
+  await settle();
+  assert.equal(form.writes.length, 1, 'the burst was written at the write\'s release rather than at its pause');
+  clock.fireLast();
   await settle();
   assert.equal(form.writes.length, 2, 'the coalesced typing was not written once');
   const written = form.writes[1]?.ops.filter((op) => op.path.join('.') === 'toolPrefix');
@@ -970,6 +989,188 @@ test('a write fenced by a revision the Host has moved past fails visibly and kee
   // Nothing was lost: the typed draft is still on the page for a retry.
   assert.equal(toolPrefix(store), 'rv_behind', 'the refused draft left the page');
   store.dispose();
+});
+
+//#endregion
+
+//#region a Host push that mints the unsaved value: the draft is not "saved"
+
+/**
+ * What the Host's document holds for the row every test edits.
+ * @param form - the fixture's form.
+ * @returns the stored `modelIds` array.
+ */
+function hostModelIds(form: ReturnType<typeof makeForm>): unknown {
+  return JSON.parse(JSON.stringify(storedDocument(form).value.systemOne?.profiles?.primary?.modelIds));
+}
+
+/**
+ * Hold one write open across a Host push, the way the review's sequence did.
+ *
+ * The shape being pinned (g-069): a *decision* is in flight when the Host pushes
+ * a document that **already contains that decision's value**, plus an unrelated
+ * field the page never touched. A text edit — valid on its own — is then typed
+ * behind the held write. When the write is released, the re-seed hands the page a
+ * row whose `name` matches by identity and whose *content* the Host still holds
+ * at the pre-edit value; carrying the page's row across that re-seed (the g-062
+ * identity rule) used to drag the unsaved text in with it, so the page's draft
+ * equalled the Host's document and the edit was reported saved and never written.
+ * @param form - the fixture's form.
+ * @param store - the page.
+ * @param clock - the fixture's clock.
+ * @returns the gate, so the caller releases the held write explicitly.
+ */
+function holdDecisionThenType(
+  form: ReturnType<typeof makeForm>,
+  store: AnyStore,
+  clock: ReturnType<typeof makeClock>
+): { release: (accept?: boolean) => void; reject: (error: unknown) => void } {
+  const gate = form.hold();
+  toggleRouting(store, false);
+  return gate;
+}
+
+/**
+ * A Host snapshot built from the authored document, with fields overlaid.
+ *
+ * Built from {@link AUTHORED} rather than from the page's draft: the fixture's
+ * `push` replaces the stored document outright, which is what a snapshot pushed
+ * by the Host is.
+ * @param patch - fields to overlay onto the authored document, by dotted path.
+ * @returns the document the Host will serve next.
+ */
+function authoredWith(patch: Record<string, unknown>): Record<string, any> {
+  const next = JSON.parse(JSON.stringify(AUTHORED)) as Record<string, any>;
+  for (const [path, value] of Object.entries(patch)) {
+    const keys = path.split('.');
+    const parent = keys.slice(0, -1).reduce<Record<string, any>>((node, key) => (node[key] ??= {}), next);
+    parent[keys[keys.length - 1] as string] = value;
+  }
+  return next;
+}
+
+test('a Host push that already carries the decision does not save the text typed behind it', async () => {
+  // The review's sequence, end to end. The decision is held open; the Host's
+  // document then moves on *to the decision's own value* and also to an unrelated
+  // timeout; a valid text edit is typed behind the held write. Releasing the write
+  // must leave the text unsaved — neither reported saved nor lost — until the
+  // pause carries it, and the Host's own moves must survive.
+  const ns = namespace('push-mints-value');
+  const { store, form, clock } = makeStore({ namespace: ns });
+  await settle();
+
+  const gate = holdDecisionThenType(form, store, clock);
+  await settle();
+  assert.equal(form.writes.length, 1, 'the decision did not start writing');
+
+  // The Host's document now holds the decision, and a timeout the page never
+  // touched. The row's `modelIds` is still the authored one.
+  form.push(authoredWith({ 'routing.enabled': false, 'systemOne.profiles.primary.timeoutMs': 9000 }));
+  await settle();
+  // The text edit: valid on its own — `jev-latest` stays listed and selected.
+  store.edit(
+    (draft: any) => ({
+      ...draft,
+      backend: { ...draft.backend, profiles: draft.backend.profiles.map((p: any) => ({ ...p, modelIds: 'jev-latest, typed-local' })) }
+    }),
+    'text'
+  );
+  await settle();
+  assert.equal(modelIds(store), 'jev-latest, typed-local', 'the typed row value is not on the page');
+  assert.equal(clock.armed().length, 1, 'the typing did not arm its pause');
+
+  // Release the decision and let everything settle *without* firing the pause.
+  gate.release();
+  await settle();
+  assert.deepEqual(hostModelIds(form), ['jev-latest'], 'the typed list reached the Host before its pause');
+  // A re-seed of the page may not *invent* the typed list either: the Host does
+  // not hold it, so the page's draft is still an unsaved edit and nothing may
+  // report it saved. (This is the false "已保存" the review saw.)
+  assert.notEqual(store.getState().autosave.phase, 'saved', 'the page reported the typed edit saved while the Host does not hold it');
+  // The typed edit is still the page's unsaved draft — the decision landing may
+  // not re-seed it away, which is what made the page read as "saved".
+  const afterRelease = store.getState();
+  assert.equal(modelIds(store), 'jev-latest, typed-local', 'the decision landing dropped the text typed behind it');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(panelModule.dirtyGroups(afterRelease.original, afterRelease.draft))).sort(),
+    ['backend'],
+    'the page does not see the typed row as still unsaved'
+  );
+
+  // Now the pause fires — exactly as it would have — and the typed list lands.
+  assert.equal(clock.armed().length, 1, 'the pause the typing armed was cancelled by the decision landing');
+  clock.fireLast();
+  await settle();
+
+  const writesForModelIds = form.writes.filter((write) => pathsOf(write).includes('systemOne.profiles.primary.modelIds'));
+  assert.equal(writesForModelIds.length, 1, 'the typed list was written more than once, or never');
+  assert.deepEqual(hostModelIds(form), ['jev-latest', 'typed-local'], 'the typed list never reached the Host');
+  // The Host's own unrelated move is left alone, and so is the decision.
+  const host = storedDocument(form).value;
+  assert.equal(host.systemOne.profiles.primary.timeoutMs, 9000, 'the write reverted a timeout the Host had set');
+  assert.equal(host.routing.enabled, false, 'the write reverted the decision the Host already held');
+  assert.equal(store.getState().autosave.phase, 'saved', 'the page never reported the write that did land');
+  store.dispose();
+});
+
+test('two decisions in a row are written as the pair the user left, not one then a revert', async () => {
+  // The second observation from the review: consecutive selections could roll
+  // the earlier one back. Two decisions in one burst must reach the Host as the
+  // combined state, and the Host must end on both.
+  const ns = namespace('related-decisions');
+  const { store, form, clock } = makeStore({ namespace: ns });
+  await settle();
+
+  const gate = form.hold();
+  toggleRouting(store, false);
+  await settle();
+  store.edit((draft: any) => ({ ...draft, effort: { ...draft.effort, enabled: false } }));
+  await settle();
+  gate.release();
+  await settle();
+  if (clock.armed().length > 0) clock.fireLast();
+  await settle();
+
+  const host = storedDocument(form).value;
+  assert.equal(host.routing.enabled, false, 'the first decision was rolled back by the second');
+  assert.equal(host.effort.enabled, false, 'the second decision never reached the Host');
+  assert.equal(form.writes.length, 2, 'the two decisions were not written as two ordered requests');
+  store.dispose();
+});
+
+test('a re-seed that mints an unrelated Host value still keeps typing beyond the close/reopen', async () => {
+  // The close/reopen path the feature is about: a decision in flight when the
+  // page unmounts, a Host push, then a text edit in the reopened page. The
+  // reopened page's own write must still land the text once.
+  const ns = namespace('reopen-push');
+  const { store, form, clock } = makeStore({ namespace: ns });
+  await settle();
+
+  const gate = holdDecisionThenType(form, store, clock);
+  await settle();
+  store.dispose();
+  form.push(authoredWith({ 'routing.enabled': false, 'systemOne.profiles.primary.timeoutMs': 9000 }));
+  await settle();
+  gate.release();
+  await settle();
+
+  // The dialog is reopened in the same client lifetime and adopts the queue.
+  const reopened = makeStore({ namespace: ns, form });
+  await settle();
+  reopened.store.edit(
+    (draft: any) => ({
+      ...draft,
+      backend: { ...draft.backend, profiles: draft.backend.profiles.map((p: any) => ({ ...p, modelIds: 'jev-latest, typed-local' })) }
+    }),
+    'text'
+  );
+  await settle();
+  if (reopened.clock.armed().length > 0) reopened.clock.fireLast();
+  await settle();
+
+  assert.deepEqual(hostModelIds(form), ['jev-latest', 'typed-local'], 'the reopened page never landed the typed list');
+  assert.equal(storedDocument(form).value.systemOne.profiles.primary.timeoutMs, 9000, 'the reopened write reverted the Host timeout');
+  reopened.store.dispose();
 });
 
 //#endregion

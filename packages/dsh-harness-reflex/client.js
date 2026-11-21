@@ -388,8 +388,16 @@ window.__ModuleLoader__.load({
 			        // first write stranded the follow-up: the debounce fired while a write was
 			        // running, returned immediately, and its draft then sat in `#pending` with no
 			        // one left to send it (g-069).
+			        //
+			        // The chain stops at a draft that is *waiting for its own pause*. That sweep
+			        // sent every queued draft as soon as the write it queued behind settled, so
+			        // typing behind a running write was written at the write's release rather than
+			        // at the pause — the page's status line could then show "saved" for a draft
+			        // whose keystrokes were still in the user's hands, and the pause that was
+			        // armed wrote it a second time (g-069, att-005). A waiting draft stays queued
+			        // and its own timer drains it, which is the timing a keystroke always has.
 			        const run = this.#write(entry).then(async (accepted) => {
-			            while (this.#pending !== null) {
+			            while (this.#pending !== null && this.#timer === undefined) {
 			                const next = this.#pending;
 			                this.#pending = null;
 			                if (!next.writable || next.errors.length > 0 || !this.#differs(next.draft))
@@ -2687,6 +2695,22 @@ window.__ModuleLoader__.load({
 			 * The rule is therefore: a fresh row is matched to the row on screen that the
 			 * document already answers for; the very same row object is kept, id and all.
 			 *
+			 * ## Identity is carried; *values* are not (g-069)
+			 *
+			 * Keeping the row object used to keep its unsaved values *and* its id. That is
+			 * only right when the row on screen mentions the same fields the document does:
+			 * a field the user typed into and the document still holds at the old value is
+			 * an unsaved edit, so the seed must win. When the document later answers for the
+			 * very fields the page typed into — the Host pushed a snapshot that already
+			 * carried the edit, or the write that carried it landed — the page's row is no
+			 * longer "the document plus unsaved fields", and carrying it across the re-seed
+			 * presents the unsaved value as the Host's own. The page then reads its draft as
+			 * equal to the document, reports the edit saved, and never writes it.
+			 *
+			 * So the row object (id, page identity, order) is kept and its *fields* are
+			 * taken from the document, except for the fields the page moved and the document
+			 * still holds at the value it had before the page moved them.
+			 *
 			 * Matching order, weakest last:
 			 *   1. by name — a named row resolves uniquely in the document;
 			 *   2. by position among the unnamed rows;
@@ -2698,9 +2722,14 @@ window.__ModuleLoader__.load({
 			 * `previous` being empty means the first seed, which keeps the fresh rows.
 			 * @param previous - the rows the page is showing.
 			 * @param seeded - the rows read back from the settings document.
+			 * @param stored - the same rows as the document holds them *before* the page's
+			 *   own edits, when the caller knows them (see {@link PanelStore}'s `original`).
+			 *   A field the page moved away from this value, while the document still holds
+			 *   it, is the page's unsaved edit and stays on the row. `undefined` means the
+			 *   caller cannot tell, so the page's row values win as they always have.
 			 * @returns the rows to put in the re-seeded draft.
 			 */
-			function reseedProfileRows(previous, seeded) {
+			function reseedProfileRows(previous, seeded, stored = undefined) {
 			    if (previous.length === 0)
 			        return seeded.map((row) => ({ ...row }));
 			    const content = (row) => [row.baseUrl, row.modelIds, row.selectedModel, row.apiKeyEnv, row.timeoutMs, row.backend]
@@ -2746,9 +2775,95 @@ window.__ModuleLoader__.load({
 			        kept[index] = match;
 			    }
 			    // Fresh rows nobody claimed are new: they get an id now and sort first below.
-			    const result = seeded.map((row, index) => kept[index] ?? { ...row });
+			    const result = seeded.map((row, index) => {
+			        const match = kept[index];
+			        return match === undefined ? { ...row } : mergeReseededRow(row, match, stored, index);
+			    });
 			    // The user's own unnamed rows survive the save, in the order they had.
 			    return [...result, ...previous.filter((row) => !claimed.has(row))];
+			}
+			/**
+			 * The row a re-seed keeps: the page's identity, the document's values.
+			 *
+			 * A field the page moved and the document still holds at the pre-edit value is
+			 * kept from the page — that is the unsaved edit the user is still making. Every
+			 * other field is the document's, so an edit the document has meanwhile answered
+			 * for cannot ride along as if it were stored (g-069). Every field of
+			 * {@link ProfileDraft} is named here on purpose, so a field added to the row is a
+			 * type error here rather than a silently mis-carried value.
+			 * @param seeded - the row as the document holds it.
+			 * @param previous - the row on screen.
+			 * @param stored - the rows as the document held them before the page's edits.
+			 * @param index - the position of `seeded` among the document's rows.
+			 * @returns the merged row.
+			 */
+			function mergeReseededRow(seeded, previous, stored, index) {
+			    // The page's own baseline row for this identity. Matched by *name*, not by
+			    // `id`: the id is minted per page session (`createProfileRowId`), and a
+			    // re-seed that rebuilds `original` from the document mints fresh ids, so an id
+			    // lookup would find nothing exactly when it matters most.
+			    //
+			    // `before` is the value the *document* held before the page's edits, and
+			    // `seeded` is the value it holds now. Reading the difference as "the page is
+			    // still typing this field" is what keeps a genuine unsaved edit on screen; it
+			    // is deliberately measured against `before`, never against the page's previous
+			    // row, because a page row that merely *repeats* its own unsaved value says
+			    // nothing about what the document holds (g-069).
+			    // Matched by *position*, not by name: a row the user is renaming no longer
+			    // carries the document's name (that is the edit), so a name lookup would miss
+			    // exactly the row whose unsaved fields matter most (g-069). The seed rows and
+			    // the baseline rows are the same document read one fold apart, so their i-th
+			    // rows are the same profile.
+			    const before = stored?.[index];
+			    // Facts the page never authors — they are folded in from the live snapshot by
+			    // profile name. They describe the row as the Host reports it, so whichever row
+			    // already carries them (the page's row for a profile being renamed, the seed's
+			    // for an untouched one) is authoritative; the baseline has none.
+			    const REPORTED = new Set([
+			        'apiKeyPresent',
+			        'apiKeyFromProfile',
+			        'apiKeyVariable',
+			        'apiKeySource',
+			        'apiKeyLocked'
+			    ]);
+			    const keep = (field) => {
+			        if (REPORTED.has(field)) {
+			            const page = previous[field];
+			            if (page !== undefined && page !== '' && page !== false)
+			                return previous[field];
+			            return seeded[field];
+			        }
+			        // The page has not moved this field away from the document: the document wins.
+			        if (String(previous[field] ?? '') === String(seeded[field] ?? ''))
+			            return seeded[field];
+			        // The page moved it, but the document moved too: the document has answered
+			        // (it already carries the edit, or it was changed elsewhere) — the document wins.
+			        if (before === undefined)
+			            return seeded[field];
+			        if (String(before[field] ?? '') !== String(seeded[field] ?? ''))
+			            return seeded[field];
+			        // The page moved it and the document still holds the pre-edit value: the
+			        // user's unsaved edit, kept on the row.
+			        return previous[field];
+			    };
+			    return {
+			        id: previous.id,
+			        name: keep('name'),
+			        baseUrl: keep('baseUrl'),
+			        modelIds: keep('modelIds'),
+			        selectedModel: keep('selectedModel'),
+			        legacyModelShape: keep('legacyModelShape'),
+			        apiKeyEnv: keep('apiKeyEnv'),
+			        timeoutMs: keep('timeoutMs'),
+			        backend: keep('backend'),
+			        apiKey: keep('apiKey'),
+			        apiKeyPresent: keep('apiKeyPresent'),
+			        apiKeyFromProfile: keep('apiKeyFromProfile'),
+			        apiKeyVariable: keep('apiKeyVariable'),
+			        apiKeySource: keep('apiKeySource'),
+			        apiKeyLocked: keep('apiKeyLocked'),
+			        clearKey: keep('clearKey')
+			    };
 			}
 			/**
 			 * Merge two virtual-model pool lists, keeping both sides.
@@ -4163,13 +4278,19 @@ window.__ModuleLoader__.load({
 			 *
 			 * @param form - the settings form snapshot.
 			 * @param previous - the profile rows currently on screen, if any.
+			 * @param stored - the same rows as the document held them before this page's
+			 *   edits (`PanelState.original`). A row field the page moved, while the
+			 *   document still holds its pre-edit value, is an unsaved edit and stays on the
+			 *   row; every other field is the document's (g-069). `undefined` keeps the
+			 *   page's row values for fields the document has unanswered for, which is the
+			 *   first seed's rule.
 			 * @returns the draft to edit.
 			 */
-			function draftFromFormKeepingRows(form, previous) {
+			function draftFromFormKeepingRows(form, previous, stored = undefined) {
 			    const seeded = draftFromForm(form);
 			    if (previous.length === 0)
 			        return seeded;
-			    return { ...seeded, backend: { ...seeded.backend, profiles: (0, panel_1.reseedProfileRows)(previous, seeded.backend.profiles) } };
+			    return { ...seeded, backend: { ...seeded.backend, profiles: (0, panel_1.reseedProfileRows)(previous, seeded.backend.profiles, stored) } };
 			}
 			/**
 			 * Observable state of the Reflex settings page.
@@ -4519,6 +4640,10 @@ window.__ModuleLoader__.load({
 			            // The user's draft still wins: `#foldReseed` keeps a newer draft (typing
 			            // behind a running write, a draft kept from a failed write) on top of the
 			            // seed, and re-seeds the draft from the Host only when nothing is pending.
+			            // The live snapshot contributes only the facts this page has no other
+			            // source for (key presence, pool membership) on top of the draft's own
+			            // groups; the profile rows belong to the settings document and are re-seeded
+			            // from it by `#foldReseed` (see `#baselineDraft`), never from this answer.
 			            const seed = (0, panel_1.draftFromSnapshot)(body, this.#state.draft);
 			            this.#foldReseed(seed, { phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
 			        }
@@ -4602,19 +4727,32 @@ window.__ModuleLoader__.load({
 			     * @param accepted - whether the write the queue attempted was taken.
 			     */
 			    #settleAutosave(accepted) {
-			        if (accepted) {
-			            this.#set({ autosave: { phase: 'saved', reason: null, retained: false } });
-			            return;
-			        }
 			        const failure = this.#queue?.failure ?? null;
 			        if (failure !== null) {
 			            this.#set({ autosave: { phase: 'failed', reason: failure, retained: true } });
 			            return;
 			        }
-			        // Nothing was attempted (an invalid or unchanged draft): in step if there is
-			        // nothing to write, still waiting if the draft has to be fixed first.
+			        // "Saved" is a claim about the *page*, not about one request: a write can be
+			        // accepted (`accepted === true`) while the draft on screen still says
+			        // something the Host does not hold — typing that arrived behind the write
+			        // that just landed. Reporting `saved` there is the false "已保存" the review
+			        // found (g-069, att-005), so the status line follows the same comparison the
+			        // dirty badge uses and never claims more than the Host holds.
 			        const unchanged = !this.#differsFrom(this.#state.original, this.#state.draft);
-			        this.#set({ autosave: { phase: unchanged ? 'idle' : 'pending', reason: null, retained: this.#state.autosave.retained } });
+			        if (unchanged) {
+			            this.#set({ autosave: { phase: accepted ? 'saved' : 'idle', reason: null, retained: this.#state.autosave.retained } });
+			            return;
+			        }
+			        if (!accepted) {
+			            this.#set({ autosave: { phase: 'pending', reason: null, retained: this.#state.autosave.retained } });
+			            return;
+			        }
+			        // Something is still unsaved (typing behind the write that just landed, a
+			        // draft whose own validation refuses it, a read-only document): still
+			        // waiting, never "saved". A refusal that *did* happen already reported itself
+			        // as `failed` above with the Host's reason; an invalid draft's problems are
+			        // listed on the page, and the user's next edit carries them.
+			        this.#set({ autosave: { phase: 'pending', reason: null, retained: this.#state.autosave.retained } });
 			    }
 			    /**
 			     * Write a draft the Host never received — the page's retry (g-069).
@@ -4744,26 +4882,167 @@ window.__ModuleLoader__.load({
 			            this.#set({ ...extra, original: seeded, draft: kept, errors: validation.errors, errorValues: validation.values });
 			            return;
 			        }
+			        // The *baseline* is the document, with the page's own rows folded in only for
+			        // the fields the document has not answered (an unnamed row, a field the user
+			        // typed into while the Host still holds the old value). The seed handed in
+			        // also carries fields the document *has* answered — a row field the Host moved
+			        // under the page — and recording those as "what the Host holds" is exactly the
+			        // false-saved defect (g-069, att-005): the page then reads its draft as equal
+			        // to `original` and reports an edit the Host never received as saved.
+			        const original = this.#baselineDraft();
 			        // A draft newer than the running write (typing that arrived while it ran) is
-			        // kept on top of the seed while it still says something the seed does not.
+			        // kept on top of the baseline while it still says something the baseline does
+			        // not.
 			        const newer = this.#newerDraft;
-			        if (newer !== null && this.#differsFrom(seeded, newer)) {
+			        if (newer !== null && this.#differsFrom(original, newer)) {
 			            const validation = (0, panel_1.validateDraft)(newer);
-			            this.#set({ ...extra, original: seeded, draft: newer, errors: validation.errors, errorValues: validation.values });
+			            this.#set({ ...extra, original, draft: newer, errors: validation.errors, errorValues: validation.values });
 			            return;
 			        }
-			        this.#set({ ...extra, original: seeded, draft: seeded });
+			        // The rows the Host reports facts for (`apiKeyFromProfile` and friends, folded
+			        // in from the live snapshot) are not authored by this page, so they belong to
+			        // the baseline as much as to the draft: the stored-key rule reads them off the
+			        // *saved* row (g-066), and a baseline without them would let a rename that
+			        // drops a stored key through. (`#withReportedKeyFacts` returns its input
+			        // unchanged when the facts are already right.)
+			        const folded = this.#withReportedKeyFacts(original, seeded.backend.profiles);
+			        // The draft is the seed plus every row the page shows that the seed does not —
+			        // matched by identity, because a row being named or renamed is the same row on
+			        // the page and the seed may not know it yet. A blank scratch row authors no
+			        // Host path, so `#differsFrom` cannot see it and the seed cannot describe it;
+			        // it must survive the re-seed for the user to name it (g-064).
+			        const shown = new Set(seeded.backend.profiles.map((row) => row.id));
+			        const pageOnly = this.#state.draft.backend.profiles.filter((row) => !shown.has(row.id));
+			        const draft = pageOnly.length === 0
+			            ? seeded
+			            : { ...seeded, backend: { ...seeded.backend, profiles: [...seeded.backend.profiles, ...pageOnly] } };
+			        if (this.#differsFrom(folded, draft)) {
+			            this.#set({ ...extra, original: folded, draft });
+			            return;
+			        }
+			        // Nothing unsaved: one object serves both. The explicit page reads
+			        // `state.draft === state.original` to know it has nothing to write, and the
+			        // page's rows (a blank scratch row included) are what belongs on both sides.
+			        const settled = this.#sameRows(folded, draft);
+			        this.#set({ ...extra, original: settled, draft: settled });
 			    }
+			    /**
+			     * The baseline, with the draft's rows.
+			     *
+			     * The two drafts are equal as far as the Host is concerned (no group differs), so
+			     * one object can serve both; what the page shows is the draft's rows, which is
+			     * the one place a blank scratch row lives.
+			     * @param folded - the baseline.
+			     * @param draft - the draft.
+			     * @returns `draft`, carrying the baseline's other groups.
+			     */
+			    #sameRows(folded, draft) {
+			        return { ...folded, backend: draft.backend };
+			    }
+			    /**
+			     * The baseline: the Host's document, plus the row fields it has not answered.
+			     *
+			     * The document alone is not the whole baseline, because a row the page keeps by
+			     * identity can carry an unsaved field the document has never been told about —
+			     * an unnamed row, or a row whose typed value no write has sent yet. Recording
+			     * only the document would make such a draft look *more* saved than it is; but
+			     * recording the page's row wholesale is the opposite error, and the one the
+			     * review found: the seed handed to {@link #foldReseed} already folds the page's
+			     * rows in, so taking *its* rows as the baseline let a field the Host itself had
+			     * moved — or the very edit that was waiting — be recorded as "the Host holds
+			     * this", after which the page read its draft as clean and reported "saved" for a
+			     * write that never went out (g-069, att-005).
+			     *
+			     * So this is the merge `reseedProfileRows` performs, with the page's row as the
+			     * candidate and the baseline recorded *before* this re-seed as the answer for
+			     * "what the document held": a row field the page moved while the document still
+			     * holds its pre-edit value stays on the baseline; every other field is the
+			     * document's.
+			     * @returns the baseline draft.
+			     */
+			    #baselineDraft() {
+			        const form = this.#options.form.getSnapshot();
+			        // The rows the page shows, and the ones it showed before this re-seed: a row
+			        // being named keeps its identity, and the seed carries it under its new name.
+			        // The baseline describes that row as the document had it, so its fields are
+			        // the document's, not the page's unsaved values.
+			        const shown = this.#state.draft.backend.profiles;
+			        const before = this.#state.original.backend.profiles.filter((row) => row.name.trim().length > 0);
+			        const previous = shown.filter((row) => row.name.trim().length > 0 || before.some((was) => was.id === row.id));
+			        // `null` before the page has folded its first re-seed in: the document's own
+			        // seed is the whole truth then, and `reseedProfileRows` keeps each previous
+			        // row's values (its documented meaning). Afterwards the baseline recorded by
+			        // the last fold is what the document held before this page's edits, so a row
+			        // field the document has since answered is not kept.
+			        const baseline = this.#baselineRows;
+			        const merged = previous.length === 0
+			            ? draftFromForm(form)
+			            : baseline === null
+			                ? draftFromFormKeepingRows(form, previous)
+			                : draftFromFormKeepingRows(form, previous, baseline);
+			        return this.#withReportedKeyFacts(merged, previous);
+			    }
+			    /**
+			     * Carry the Host's key facts from the document seed onto a merged draft.
+			     *
+			     * `apiKeyPresent`/`apiKeyFromProfile`/… are not authored anywhere: they are
+			     * folded in from the live snapshot, *matched by profile name*. A baseline built
+			     * from rows therefore misses them for a row being renamed — and a rename is
+			     * exactly the edit the stored-key rule inspects (g-066), so the rule must read
+			     * the same facts the page shows. Position is taken from the document itself.
+			     * @param merged - a draft whose rows came from the page's baseline.
+			     * @param previous - the rows on screen, the source of each reported fact.
+			     * @returns `merged`, with each row's reported facts taken from the page.
+			     */
+			    #withReportedKeyFacts(merged, previous) {
+			        // The page's own row is the source when the page holds this profile: a row
+			        // being renamed is no longer findable by name in the document, but the page's
+			        // row carries the fact the snapshot gave it.
+			        const FIELDS = ['apiKeyPresent', 'apiKeyFromProfile', 'apiKeyVariable', 'apiKeySource', 'apiKeyLocked'];
+			        let changed = false;
+			        const profiles = merged.backend.profiles.map((row, index) => {
+			            const reported = previous[index];
+			            if (reported === undefined)
+			                return row;
+			            if (FIELDS.every((field) => row[field] === reported[field]))
+			                return row;
+			            changed = true;
+			            return {
+			                ...row,
+			                apiKeyPresent: reported.apiKeyPresent,
+			                apiKeyFromProfile: reported.apiKeyFromProfile,
+			                apiKeyVariable: reported.apiKeyVariable,
+			                apiKeySource: reported.apiKeySource,
+			                apiKeyLocked: reported.apiKeyLocked
+			            };
+			        });
+			        // Unchanged drafts are returned as the same object: the explicit page checks
+			        // `state.draft === state.original` to know it has nothing unsaved.
+			        return changed ? { ...merged, backend: { ...merged.backend, profiles } } : merged;
+			    }
+			    /**
+			     * The rows `this.#state.original` held when the current re-seed began.
+			     *
+			     * Captured at the top of {@link #foldReseed} so a chained re-seed (a write's
+			     * own, then the read it starts) measures a row field against the baseline in
+			     * force before that re-seed, not against the one it just wrote.
+			     */
+			    #baselineRows = null;
 			    /**
 			     * The Host's document as a draft, in this page's comparable shape.
 			     *
-			     * The same seeding the write path applies after a write (`draftFromFormKeepingRows`
-			     * over this page's rows), computed without mutating the state: it is what the
-			     * queue records as "what the Host now holds" once its write landed.
-			     * @returns the seeded draft.
+			     * This answers one question — "what does the Host now hold?" — so it is the
+			     * document and nothing else. It used to re-seed through
+			     * `draftFromFormKeepingRows`, which keeps the page's rows; that is right for a
+			     * *re-seed of the page*, but wrong for this baseline: the page's rows can carry
+			     * fields no write has sent (an unnamed row, a typed list behind a running
+			     * write), and melting those into the baseline told the queue the Host already
+			     * held them. The pending draft then matched `#lastWritten`, was dropped as a
+			     * no-op, and the page reported "saved" for a write that never went out (g-069).
+			     * @returns the Host's document as this page would seed it.
 			     */
 			    #seededFromHost() {
-			        return draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
+			        return draftFromForm(this.#options.form.getSnapshot());
 			    }
 			    /**
 			     * Re-seed `original` and `draft` from the Host, keeping this page's own rows.
@@ -4776,7 +5055,11 @@ window.__ModuleLoader__.load({
 			    #reseedFromHost() {
 			        if (this.#disposed)
 			            return;
-			        this.#foldReseed(draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles));
+			        // The rows on screen are folded into the seed, not re-applied by `#foldReseed`:
+			        // a re-seed must land the document exactly as read (a field the Host changed
+			        // underneath the page is adopted), while keeping the rows by identity so an
+			        // unnamed row is not wiped (see `reseedProfileRows`).
+			        this.#foldReseed(draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles, this.#state.original.backend.profiles));
 			    }
 			    /**
 			     * Re-point `active` at the row it named, when that row was just renamed.
@@ -4934,7 +5217,7 @@ window.__ModuleLoader__.load({
 			        // An explicit reset is the one re-seed that may drop the user's work, but a
 			        // row's page identity survives it: the Host answers for the same saved rows,
 			        // so the markers it drives would otherwise be renumbered under the pointer.
-			        const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
+			        const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles, this.#state.original.backend.profiles);
 			        // A pending autosave would otherwise write the draft the user just threw
 			        // away (g-069): the queue is emptied first, so "discard" means discarded.
 			        this.#queue?.cancel();
@@ -5151,8 +5434,13 @@ window.__ModuleLoader__.load({
 			        if (this.#disposed)
 			            return;
 			        const form = this.#options.form.getSnapshot();
-			        const seeded = draftFromFormKeepingRows(form, this.#state.draft.backend.profiles);
-			        this.#foldReseed(seeded, { configStatus: form.status, writable: form.writable, revision: form.revision });
+			        // The seed folds the page's rows in by identity (so an unnamed row survives),
+			        // while a field the Host moved is adopted from the document (g-069).
+			        this.#foldReseed(draftFromFormKeepingRows(form, this.#state.draft.backend.profiles, this.#state.original.backend.profiles), {
+			            configStatus: form.status,
+			            writable: form.writable,
+			            revision: form.revision
+			        });
 			    }
 			    /** Schedule the next poll, unless polling is disabled. */
 			    #schedule() {

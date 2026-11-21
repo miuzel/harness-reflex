@@ -706,6 +706,22 @@ let PROFILE_ROW_SEQUENCE = 0;
  * The rule is therefore: a fresh row is matched to the row on screen that the
  * document already answers for; the very same row object is kept, id and all.
  *
+ * ## Identity is carried; *values* are not (g-069)
+ *
+ * Keeping the row object used to keep its unsaved values *and* its id. That is
+ * only right when the row on screen mentions the same fields the document does:
+ * a field the user typed into and the document still holds at the old value is
+ * an unsaved edit, so the seed must win. When the document later answers for the
+ * very fields the page typed into — the Host pushed a snapshot that already
+ * carried the edit, or the write that carried it landed — the page's row is no
+ * longer "the document plus unsaved fields", and carrying it across the re-seed
+ * presents the unsaved value as the Host's own. The page then reads its draft as
+ * equal to the document, reports the edit saved, and never writes it.
+ *
+ * So the row object (id, page identity, order) is kept and its *fields* are
+ * taken from the document, except for the fields the page moved and the document
+ * still holds at the value it had before the page moved them.
+ *
  * Matching order, weakest last:
  *   1. by name — a named row resolves uniquely in the document;
  *   2. by position among the unnamed rows;
@@ -717,9 +733,18 @@ let PROFILE_ROW_SEQUENCE = 0;
  * `previous` being empty means the first seed, which keeps the fresh rows.
  * @param previous - the rows the page is showing.
  * @param seeded - the rows read back from the settings document.
+ * @param stored - the same rows as the document holds them *before* the page's
+ *   own edits, when the caller knows them (see {@link PanelStore}'s `original`).
+ *   A field the page moved away from this value, while the document still holds
+ *   it, is the page's unsaved edit and stays on the row. `undefined` means the
+ *   caller cannot tell, so the page's row values win as they always have.
  * @returns the rows to put in the re-seeded draft.
  */
-export function reseedProfileRows(previous: readonly ProfileDraft[], seeded: readonly ProfileDraft[]): ProfileDraft[] {
+export function reseedProfileRows(
+  previous: readonly ProfileDraft[],
+  seeded: readonly ProfileDraft[],
+  stored: readonly ProfileDraft[] | undefined = undefined
+): ProfileDraft[] {
   if (previous.length === 0) return seeded.map((row) => ({ ...row }));
   const content = (row: ProfileDraft): string =>
     [row.baseUrl, row.modelIds, row.selectedModel, row.apiKeyEnv, row.timeoutMs, row.backend]
@@ -761,9 +786,97 @@ export function reseedProfileRows(previous: readonly ProfileDraft[], seeded: rea
   }
 
   // Fresh rows nobody claimed are new: they get an id now and sort first below.
-  const result = seeded.map((row, index) => kept[index] ?? { ...row });
+  const result = seeded.map((row, index) => {
+    const match = kept[index];
+    return match === undefined ? { ...row } : mergeReseededRow(row, match, stored, index);
+  });
   // The user's own unnamed rows survive the save, in the order they had.
   return [...result, ...previous.filter((row) => !claimed.has(row))];
+}
+
+/**
+ * The row a re-seed keeps: the page's identity, the document's values.
+ *
+ * A field the page moved and the document still holds at the pre-edit value is
+ * kept from the page — that is the unsaved edit the user is still making. Every
+ * other field is the document's, so an edit the document has meanwhile answered
+ * for cannot ride along as if it were stored (g-069). Every field of
+ * {@link ProfileDraft} is named here on purpose, so a field added to the row is a
+ * type error here rather than a silently mis-carried value.
+ * @param seeded - the row as the document holds it.
+ * @param previous - the row on screen.
+ * @param stored - the rows as the document held them before the page's edits.
+ * @param index - the position of `seeded` among the document's rows.
+ * @returns the merged row.
+ */
+function mergeReseededRow(
+  seeded: ProfileDraft,
+  previous: ProfileDraft,
+  stored: readonly ProfileDraft[] | undefined,
+  index: number
+): ProfileDraft {
+  // The page's own baseline row for this identity. Matched by *name*, not by
+  // `id`: the id is minted per page session (`createProfileRowId`), and a
+  // re-seed that rebuilds `original` from the document mints fresh ids, so an id
+  // lookup would find nothing exactly when it matters most.
+  //
+  // `before` is the value the *document* held before the page's edits, and
+  // `seeded` is the value it holds now. Reading the difference as "the page is
+  // still typing this field" is what keeps a genuine unsaved edit on screen; it
+  // is deliberately measured against `before`, never against the page's previous
+  // row, because a page row that merely *repeats* its own unsaved value says
+  // nothing about what the document holds (g-069).
+  // Matched by *position*, not by name: a row the user is renaming no longer
+  // carries the document's name (that is the edit), so a name lookup would miss
+  // exactly the row whose unsaved fields matter most (g-069). The seed rows and
+  // the baseline rows are the same document read one fold apart, so their i-th
+  // rows are the same profile.
+  const before = stored?.[index];
+  // Facts the page never authors — they are folded in from the live snapshot by
+  // profile name. They describe the row as the Host reports it, so whichever row
+  // already carries them (the page's row for a profile being renamed, the seed's
+  // for an untouched one) is authoritative; the baseline has none.
+  const REPORTED: ReadonlySet<keyof ProfileDraft> = new Set([
+    'apiKeyPresent',
+    'apiKeyFromProfile',
+    'apiKeyVariable',
+    'apiKeySource',
+    'apiKeyLocked'
+  ]);
+  const keep = <K extends keyof ProfileDraft>(field: K): ProfileDraft[K] => {
+    if (REPORTED.has(field)) {
+      const page = previous[field] as unknown;
+      if (page !== undefined && page !== '' && page !== false) return previous[field];
+      return seeded[field];
+    }
+    // The page has not moved this field away from the document: the document wins.
+    if (String(previous[field] ?? '') === String(seeded[field] ?? '')) return seeded[field];
+    // The page moved it, but the document moved too: the document has answered
+    // (it already carries the edit, or it was changed elsewhere) — the document wins.
+    if (before === undefined) return seeded[field];
+    if (String(before[field] ?? '') !== String(seeded[field] ?? '')) return seeded[field];
+    // The page moved it and the document still holds the pre-edit value: the
+    // user's unsaved edit, kept on the row.
+    return previous[field];
+  };
+  return {
+    id: previous.id,
+    name: keep('name'),
+    baseUrl: keep('baseUrl'),
+    modelIds: keep('modelIds'),
+    selectedModel: keep('selectedModel'),
+    legacyModelShape: keep('legacyModelShape'),
+    apiKeyEnv: keep('apiKeyEnv'),
+    timeoutMs: keep('timeoutMs'),
+    backend: keep('backend'),
+    apiKey: keep('apiKey'),
+    apiKeyPresent: keep('apiKeyPresent'),
+    apiKeyFromProfile: keep('apiKeyFromProfile'),
+    apiKeyVariable: keep('apiKeyVariable'),
+    apiKeySource: keep('apiKeySource'),
+    apiKeyLocked: keep('apiKeyLocked'),
+    clearKey: keep('clearKey')
+  };
 }
 
 /**

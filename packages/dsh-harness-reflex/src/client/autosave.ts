@@ -468,8 +468,16 @@ export class Autosave<T> {
     // first write stranded the follow-up: the debounce fired while a write was
     // running, returned immediately, and its draft then sat in `#pending` with no
     // one left to send it (g-069).
+    //
+    // The chain stops at a draft that is *waiting for its own pause*. That sweep
+    // sent every queued draft as soon as the write it queued behind settled, so
+    // typing behind a running write was written at the write's release rather than
+    // at the pause — the page's status line could then show "saved" for a draft
+    // whose keystrokes were still in the user's hands, and the pause that was
+    // armed wrote it a second time (g-069, att-005). A waiting draft stays queued
+    // and its own timer drains it, which is the timing a keystroke always has.
     const run = this.#write(entry).then(async (accepted) => {
-      while (this.#pending !== null) {
+      while (this.#pending !== null && this.#timer === undefined) {
         const next = this.#pending;
         this.#pending = null;
         if (!next.writable || next.errors.length > 0 || !this.#differs(next.draft)) continue;
