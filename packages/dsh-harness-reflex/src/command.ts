@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { CommandResult } from '@deepseek-ai/dsh-commands';
 
 import type { ReflexLedgerResult, ReflexRuntime } from './bridge.js';
+import { describeAttribution, type LedgerAttribution } from './attribution.js';
 import type { BackendHealth } from './vendor/harness-reflex/index.js';
 
 /**
@@ -63,6 +64,12 @@ function latencyOf(latencyMs: number): string {
 
 /**
  * Render one entry as a single line: time, type, and the facts that entry owns.
+ *
+ * The provenance (g-068) comes last: the connection the call used and the model
+ * it requested, plus its source whenever that source is not a plain remote
+ * answer. An entry recorded before g-068 simply has none of these, and
+ * {@link describeAttribution} returns `undefined` for it rather than inventing
+ * a connection from today's settings.
  * @param entry - one ledger record.
  * @returns the line, without a trailing newline.
  */
@@ -73,6 +80,8 @@ function entryLine(entry: LedgerEntry): string {
   if (entry.type === 'stagnation') facts.push(entry.isStuck ? '判定停滞' : '未见停滞');
   if (entry.shadow) facts.push('shadow');
   if (entry.skipReason) facts.push(`跳过：${entry.skipReason}`);
+  const provenance = describeAttribution((entry.details ?? {}) as Partial<LedgerAttribution>);
+  if (provenance !== undefined) facts.push(provenance);
   return `- ${clockOf(entry.timestamp)} ${entry.type} · ${facts.join(' · ')}`;
 }
 

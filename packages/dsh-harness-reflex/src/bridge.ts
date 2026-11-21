@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+
 import type { Agent } from '@deepseek-ai/dsh-agent';
 
 import {
@@ -41,12 +43,37 @@ import type { DelegationHealth } from './delegation-health.js';
 import type { InterventionEngine } from './interventions.js';
 import { UnconfiguredBackend } from './unconfigured-backend.js';
 import { VirtualModelRouter } from './router.js';
+import {
+  attributionOf,
+  callIdentity,
+  classifySource,
+  ledgerAttribution,
+  MOCK_CONNECTION_NAME,
+  UNCONFIGURED_CONNECTION_NAME,
+  type Attribution,
+  type CallIdentity,
+  type CallSource
+} from './attribution.js';
+
+/**
+ * What one dispatch observed about itself.
+ *
+ * `identity` is taken *before* the call is awaited (see {@link callIdentity}),
+ * so a profile switch during an in-flight call cannot restate it; `source` is
+ * filled once the call settles. The pair travels together into the tool payload
+ * and the ledger entry, which is what keeps the two surfaces agreeing.
+ */
+interface DispatchOutcome {
+  readonly identity: CallIdentity;
+  readonly source: CallSource;
+  readonly detail?: string;
+}
 
 /** Payload of the `choice` operation, mirroring the stdio MCP surface. */
-export type ReflexChoiceResult = ChoiceResponse & { calibratedConfidence?: number };
+export type ReflexChoiceResult = ChoiceResponse & { calibratedConfidence?: number } & Attribution;
 
 /** Payload of the `prune` operation, mirroring the stdio MCP surface. */
-export interface ReflexPruneResult {
+export interface ReflexPruneResult extends Attribution {
   tokensSaved: number;
   reductionPercentage: string;
   shadow: boolean;
@@ -137,6 +164,66 @@ class LiveBackend {
   currentHealth(): BackendHealth | undefined {
     const health = (this.#target as Partial<DecisionBackend>).health;
     return typeof health === 'function' ? health.call(this.#target) : undefined;
+  }
+}
+
+/**
+ * The slice of {@link DecisionLedger} a decision service uses.
+ *
+ * Declared structurally so this decorator never pretends to be the ledger: the
+ * services only ever call `record`, and the runtime keeps the real ledger for
+ * every other read.
+ */
+type LedgerSink = Pick<DecisionLedger, 'record'>;
+
+/**
+ * A ledger sink that stamps the in-flight call's provenance onto every entry a
+ * service writes for it.
+ *
+ * ## Why a decorator rather than fields on the entry (g-068)
+ *
+ * `ReflexGateService` and `ReflexRouter` write their *own* ledger entry while
+ * they run, and that entry is the one a reader sees. The runtime cannot add
+ * fields to it afterwards without rewriting the JSONL line, and recording a
+ * second, attributed entry beside it would double-count the call and leave the
+ * un-attributed one first. Decorating the sink keeps exactly one entry per call
+ * and makes that entry truthful, with no change to the shared `DecisionLedger`
+ * (which the root stdio MCP package also owns — g-068 must not touch it).
+ *
+ * The stamp is set immediately before the service is awaited and cleared in a
+ * `finally`, so an entry written later by a concurrent call can never pick up
+ * an older call's identity. That is the "in-flight" property, and it is why the
+ * stamp is per-dispatch rather than a field on the runtime.
+ */
+class StampingLedger {
+  #stamp: Record<string, unknown> | undefined;
+
+  /**
+   * @param target - the activation's real ledger sink.
+   */
+  constructor(private readonly target: LedgerSink) {}
+
+  /**
+   * Stamp the provenance for the call about to be made.
+   * @param provenance - the flat fields to merge into that call's `details`.
+   * @returns a function that clears the stamp, for a `finally`.
+   */
+  begin(provenance: Record<string, unknown>): () => void {
+    this.#stamp = provenance;
+    return () => {
+      this.#stamp = undefined;
+    };
+  }
+
+  /**
+   * Record one entry, merging the in-flight provenance into its `details`.
+   * @param entry - the entry the service built.
+   * @returns the stored entry.
+   */
+  record(entry: Parameters<DecisionLedger['record']>[0]): ReturnType<DecisionLedger['record']> {
+    const stamp = this.#stamp;
+    if (stamp === undefined) return this.target.record(entry);
+    return this.target.record({ ...entry, details: { ...entry.details, ...stamp } } as typeof entry);
   }
 }
 
@@ -252,6 +339,11 @@ export class ReflexRuntime {
 
   /** The stable delegate all decision services dispatch through. */
   readonly #liveBackend: LiveBackend;
+  /**
+   * Ledger sink the decision services write through, so an entry a service owns
+   * carries the provenance of the call that produced it (see {@link StampingLedger}).
+   */
+  readonly #stamping: StampingLedger;
   /** Whether this runtime owns the backend and may rebuild it on a config save. */
   readonly #backendSwappable: boolean;
   /** Identity of the backend configuration currently in force. */
@@ -302,11 +394,14 @@ export class ReflexRuntime {
     this.#ledgerPath = config.ledgerPath;
     this.#routingConfig = config.routing;
     this.calibrator = config.calibrationPath ? new Calibrator(config.calibrationPath) : new Calibrator();
-    this.gateService = new ReflexGateService(this.backend, this.ledger, this.calibrator);
-    this.pruneService = new ToolResultPruner(this.backend, this.ledger, config.pruneThreshold);
-    this.stagnationService = new StagnationDetector(this.backend, this.ledger);
-    this.routeService = new ReflexRouter(this.backend, this.ledger);
-    this.screenService = new ReflexScreenService(this.backend, this.ledger);
+    // Services that write their own ledger entry go through the stamper, so the
+    // entry they own carries the same provenance the tool payload reports.
+    this.#stamping = new StampingLedger(this.ledger);
+    this.gateService = new ReflexGateService(this.backend, this.#stamping as unknown as DecisionLedger, this.calibrator);
+    this.pruneService = new ToolResultPruner(this.backend, this.#stamping as unknown as DecisionLedger, config.pruneThreshold);
+    this.stagnationService = new StagnationDetector(this.backend, this.#stamping as unknown as DecisionLedger);
+    this.routeService = new ReflexRouter(this.backend, this.#stamping as unknown as DecisionLedger);
+    this.screenService = new ReflexScreenService(this.backend, this.#stamping as unknown as DecisionLedger);
     this.#source = dependencies.configSource;
     this.#warn = dependencies.warn ?? (() => {});
     this.#interventionsConfig = config.interventions;
@@ -379,58 +474,226 @@ export class ReflexRuntime {
   }
 
   /**
+   * The connection identity a call dispatched *now* would carry.
+   *
+   * Public so the panel and a test can ask the same question the dispatch path
+   * asks, without going through a call. It reads the live resolved connection
+   * block, never the activation-time snapshot, so a config-only commit is
+   * reflected immediately (and a profile switch cannot lag one call behind).
+   * @returns the identity to snapshot into the next call.
+   */
+  currentCallIdentity(): CallIdentity {
+    return callIdentity(this.#systemOneConfig, this.#backendSelector);
+  }
+
+  /**
+   * Take the identity, run one call, and classify where its answer came from —
+   * the single place provenance is decided.
+   *
+   * The identity is snapshotted **before** `run()` is called, so the call keeps
+   * the connection it was dispatched under even if the backend is swapped while
+   * it is in flight. A thrown call is captured rather than rethrown here: some
+   * services answer locally after a remote failure (prune, stagnation), others
+   * refuse (choice, score, route, screen), and the caller decides.
+   *
+   * ## Absorbed failures
+   *
+   * Not every remote failure arrives as a rejection. `ReflexGateService` turns a
+   * gateway failure into a fail-closed `escalate` verdict and *returns* it, so
+   * `run()` resolves normally and the reader would otherwise be told a local
+   * verdict came `remote` — the exact falsehood g-068 removed. The backend's own
+   * health record is the evidence: a completed call that incremented
+   * `consecutiveFailures` rejected its request and had the failure absorbed, and
+   * that is reported as `rejected` with the gateway's reason.
+   * @param run - the call to make.
+   * @param options - how to read the outcome (`answered`, `localFallback`).
+   * @returns the value, or the failure with the classified outcome.
+   */
+  async #dispatch<T>(
+    run: () => Promise<T>,
+    options: { answered(value: T): boolean; localFallback?: (value: T) => boolean }
+  ): Promise<{ result?: T; outcome: DispatchOutcome; failure?: string }> {
+    this.#assertLive();
+    const identity = this.currentCallIdentity();
+    // A connection with no active profile, and the in-process mock, send
+    // nothing. Naming them apart is the whole point, so it is read from the
+    // identity rather than inferred from an empty health record.
+    const localOnly =
+      identity.connectionName === UNCONFIGURED_CONNECTION_NAME || identity.connectionName === MOCK_CONNECTION_NAME;
+    const failuresBefore = this.#liveBackend.currentHealth()?.consecutiveFailures ?? 0;
+    // The identity is fixed; the *source* is not known until the call settles, so
+    // a service that writes its own entry is stamped with what is knowable before
+    // it runs — and corrected after, for the entries this runtime writes itself.
+    let result: T | undefined;
+    let failure: string | undefined;
+    const clearStamp = this.#stamping.begin({
+      systemOneConnection: identity.connectionName,
+      systemOneModel: identity.requestedModel
+    });
+    try {
+      result = await run();
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    } finally {
+      clearStamp();
+    }
+    if (failure !== undefined) {
+      return { outcome: { identity, ...classifySource(false, failure, false, localOnly) }, failure };
+    }
+    // A rejection the service absorbed shows up here and nowhere else: the call
+    // resolved, and the health record says its request failed.
+    const absorbed = this.#liveBackend.currentHealth();
+    const absorbedReason =
+      localOnly || absorbed === undefined || absorbed.consecutiveFailures <= failuresBefore
+        ? undefined
+        : absorbed.lastFailureReason ?? 'the System One request failed';
+    const classified = classifySource(
+      options.answered(result as T),
+      absorbedReason,
+      options.localFallback?.(result as T) === true,
+      localOnly
+    );
+    const outcome: DispatchOutcome = { identity, ...classified };
+    // Correct the entry the service already wrote, which could only carry the
+    // identity at that time: the source is known now, and the ledger must not
+    // disagree with the payload about where the answer came from.
+    this.#stampLastEntry(outcome);
+    return { result: result as T, outcome };
+  }
+
+  /**
+   * Rewrite the source fields of the entry the finished call just appended.
+   *
+   * The stamper gives a service's entry the identity before the call runs; the
+   * classified source only exists afterwards. Only the newest entry is touched,
+   * and only when it already carries this call's connection name, so a concurrent
+   * call's entry is never overwritten.
+   * @param outcome - the settled outcome.
+   */
+  #stampLastEntry(outcome: DispatchOutcome): void {
+    const entries = this.ledger.getEntries();
+    const last = entries[entries.length - 1];
+    if (last === undefined || last.details?.systemOneConnection !== outcome.identity.connectionName) return;
+    const attribution = attributionOf(outcome.identity, outcome);
+    const fields = ledgerAttribution(attribution);
+    last.details = { ...last.details, ...fields };
+    // The service wrote its line before the answer settled, so the *file* has the
+    // identity but not the source. Rewriting the last line keeps the JSONL sink
+    // and the in-memory ledger saying the same thing — a reader of the file must
+    // not see a rejection as a remote success. A sink that cannot be rewritten
+    // (read-only filesystem, no sink at all) is left alone: the in-memory entry
+    // is still correct, and a stale *source* word in a file is the one thing that
+    // would be worse than its absence.
+    const logPath = this.ledger.getLogPath();
+    if (logPath === null) return;
+    try {
+      const lines = readFileSync(logPath, 'utf8').split('\n');
+      let index = -1;
+      for (let cursor = lines.length - 1; cursor >= 0; cursor -= 1) {
+        if (lines[cursor]?.trim()) {
+          index = cursor;
+          break;
+        }
+      }
+      if (index === -1) return;
+      const persisted = JSON.parse(lines[index] as string) as { id?: string };
+      // Only the entry this call produced: an id mismatch means another writer
+      // appended in between, and that writer's line is not ours to rewrite.
+      if (persisted.id !== last.id) return;
+      lines[index] = JSON.stringify(last);
+      writeFileSync(logPath, lines.join('\n'), 'utf8');
+    } catch {
+      // A sink that cannot be rewritten keeps the identity it already has.
+    }
+  }
+
+  /**
+   * Append the attribution to one ledger entry's `details`.
+   *
+   * The four provenance facts ride in `details` rather than as new top-level
+   * `LedgerEntry` fields, because `DecisionLedger` is shared with the root stdio
+   * MCP package: adding keys there would be a contract change to a surface g-068
+   * must leave alone. `details` is already the entry's open bag, and a JSONL
+   * reader greps it all the same.
+   * @param outcome - the dispatch outcome.
+   * @returns the flat provenance fields to merge into `details`.
+   */
+  #provenance(outcome: DispatchOutcome): Record<string, unknown> {
+    return { ...ledgerAttribution(attributionOf(outcome.identity, outcome)) };
+  }
+
+  /**
    * Multi-class choice, with the deployment's calibration curve applied to the
    * winning confidence when one is loaded.
    * @param request - question, options, and optional context.
-   * @returns the choice response plus the calibrated confidence, when available.
+   * @returns the choice response plus the calibrated confidence and the
+   *   attribution (connection, requested model, source), when available.
+   * @throws Error when the connection produced no answer: a choice tool must not
+   *   invent a distribution, and the ledger still records the rejected attempt.
    */
   async choice(request: { question: string; options: string[]; context?: string }): Promise<ReflexChoiceResult> {
-    this.#assertLive();
     const started = performance.now();
-    const result = await this.backend.choice(request);
+    const { result, outcome, failure } = await this.#dispatch(() => this.backend.choice(request), {
+      answered: (value) => value !== undefined
+    });
+    const record = (): void => {
+      this.ledger.record({
+        type: 'choice',
+        backend: this.backend.name,
+        latencyMs: Math.round(performance.now() - started),
+        details: { action: 'choice', options: request.options.length, ...this.#provenance(outcome) }
+      });
+    };
+
+    if (result === undefined) {
+      record();
+      throw new Error(failure ?? 'the System One connection produced no answer');
+    }
 
     let calibratedConfidence: number | undefined;
     if (this.calibrator.isLoaded()) {
       calibratedConfidence = this.calibrator.calibrate(result.confidence).calibrated;
     }
-
-    this.ledger.record({
-      type: 'choice',
-      backend: this.backend.name,
-      latencyMs: Math.round(performance.now() - started),
-      details: { action: 'choice', options: request.options.length }
-    });
-
-    return { ...result, calibratedConfidence };
+    record();
+    return { ...result, calibratedConfidence, ...attributionOf(outcome.identity, outcome) };
   }
 
   /**
    * Continuous 0.0 – 1.0 scoring projected from one choice call.
    * @param request - statement, rubric, and optional context.
-   * @returns the score response recorded in the ledger.
+   * @returns the score response, recorded in the ledger with its attribution.
    */
-  async score(request: { statement: string; criteria?: string; context?: string }): Promise<Awaited<ReturnType<typeof scoreStatement>>> {
-    this.#assertLive();
-    const result = await scoreStatement(this.backend, request);
-
+  async score(request: {
+    statement: string;
+    criteria?: string;
+    context?: string;
+  }): Promise<Awaited<ReturnType<typeof scoreStatement>> & Attribution> {
+    const started = performance.now();
+    const { result, outcome, failure } = await this.#dispatch(() => scoreStatement(this.backend, request), {
+      answered: (value) => value !== undefined
+    });
     this.ledger.record({
       type: 'choice',
       backend: this.backend.name,
-      latencyMs: result.latencyMs,
-      details: { action: 'score', score: result.score }
+      latencyMs: result?.latencyMs ?? Math.round(performance.now() - started),
+      details: { action: 'score', ...(result === undefined ? {} : { score: result.score }), ...this.#provenance(outcome) }
     });
-
-    return result;
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    return { ...result, ...attributionOf(outcome.identity, outcome) };
   }
 
   /**
    * Rank candidate skills/tools against a goal.
    * @param request - goal, candidates, and how many to return.
-   * @returns the ranked candidates.
+   * @returns the ranked candidates with their attribution.
    */
-  async route(request: { goal: string; candidates: CandidateItem[]; topK?: number }): Promise<RouteResponse> {
-    this.#assertLive();
-    return this.routeService.selectBest(request.goal, request.candidates, request.topK ?? 3);
+  async route(request: { goal: string; candidates: CandidateItem[]; topK?: number }): Promise<RouteResponse & Attribution> {
+    const { result, outcome, failure } = await this.#dispatch(
+      () => this.routeService.selectBest(request.goal, request.candidates, request.topK ?? 3),
+      { answered: (value) => value !== undefined }
+    );
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    return { ...result, ...attributionOf(outcome.identity, outcome) };
   }
 
   /**
@@ -442,24 +705,41 @@ export class ReflexRuntime {
     content: string;
     source?: 'tool_output' | 'web_page' | 'user_input' | 'file_content';
     strict?: boolean;
-  }): Promise<ScreenResult> {
-    this.#assertLive();
-    return this.screenService.screen(request);
+  }): Promise<ScreenResult & Attribution> {
+    const { result, outcome, failure } = await this.#dispatch(() => this.screenService.screen(request), {
+      answered: (value) => value !== undefined
+    });
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    return { ...result, ...attributionOf(outcome.identity, outcome) };
   }
 
   /**
    * Fail-closed verification of assertions against evidence.
+   *
+   * A remote rejection is *not* rethrown: the gate's contract is a verdict, and
+   * every assertion escalates. What changes is the honesty of that verdict —
+   * the attribution says `rejected` and carries the reason, so a local
+   * fail-closed escalation can no longer be read as a System One judgement.
    * @param request - assertions, evidence, and optional strictness.
-   * @returns one outcome per assertion plus the overall verdict.
+   * @returns one outcome per assertion plus the overall verdict and attribution.
    */
   async gate(request: {
     assertions: Array<{ statement: string; criteria?: string }>;
     evidence: string;
     strictness?: 'high' | 'normal' | 'lenient';
-  }): Promise<GateResponse> {
-    this.#assertLive();
-    return this.gateService.verify(request.assertions, request.evidence, { strictness: request.strictness });
+  }): Promise<GateResponse & Attribution> {
+    const { result, outcome, failure } = await this.#dispatch(
+      () => this.gateService.verify(request.assertions, request.evidence, { strictness: request.strictness }),
+      { answered: (value) => value !== undefined }
+    );
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    // The service absorbs a gateway rejection into a fail-closed verdict, so a
+    // thrown call is impossible there; the *reason* it absorbed must still reach
+    // the reader. The service's own explanation already carries it, and this
+    // layer adds the source so the verdict is not read as a remote judgement.
+    return { ...result, ...attributionOf(outcome.identity, outcome) };
   }
+
 
   /**
    * Prune bulky output, preserving the lines the intent depends on.
@@ -470,18 +750,38 @@ export class ReflexRuntime {
    * @param request - raw output, lookup intent, and shadow-mode flag.
    * @returns the compacted payload and the measured token savings.
    */
-  async prune(request: { rawOutput: string; intent?: string; shadowMode?: boolean }): Promise<ReflexPruneResult> {
-    this.#assertLive();
-    const result: PruneResponse = await this.pruneService.prune(request.rawOutput, {
-      intent: request.intent,
-      shadowMode: request.shadowMode
-    });
+  async prune(request: { rawOutput: string; intent?: string; shadowMode?: boolean }): Promise<ReflexPruneResult & Attribution> {
+    const { result, outcome, failure } = await this.#dispatch(
+      () =>
+        this.pruneService.prune(request.rawOutput, {
+          intent: request.intent,
+          shadowMode: request.shadowMode
+        }),
+      {
+        answered: (value) => value !== undefined,
+        // Prune is the one capability that answers locally on purpose. `judgePath`
+        // is its own account of which path produced the text: `local` sent no
+        // request at all (the payload is below the judge threshold), and
+        // `fallback` means the segmented request was tried and failed. Either is
+        // a local answer and must never be rendered as a System One judgement.
+        localFallback: (value) => {
+          const path = (value as PruneResponse).judgePath;
+          return path === 'fallback' || path === 'local';
+        }
+      }
+    );
 
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    // A gateway failure that prune absorbed as a local fallback is still a
+    // rejection: `judgePath: 'fallback'` and the health record agree, and the
+    // reason the fallback happened is the more useful of the two to report.
+    const reason = (result as PruneResponse).fallbackReason ?? outcome.detail;
     return {
       tokensSaved: result.estimatedTokensSaved,
       reductionPercentage: `${result.reductionPercentage}%`,
       shadow: result.shadow,
-      processedOutput: result.processedOutput
+      processedOutput: result.processedOutput,
+      ...attributionOf(outcome.identity, { ...outcome, ...(reason === undefined ? {} : { detail: reason }) })
     };
   }
 

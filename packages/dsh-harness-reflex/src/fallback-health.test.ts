@@ -183,8 +183,10 @@ test('the degraded notice never reaches model-facing payloads or request message
   );
   const restore = stubFetch(() => ({ error: new TypeError('fetch failed') }));
   try {
-    // The host-side pruning response carries the fallback facts, the tool-facing
-    // payload stays the four documented fields.
+    // The host-side pruning response carries the fallback facts. The tool-facing
+    // payload keeps its four reduction fields and gained the g-068 provenance
+    // (connection, requested model, source, reason) — but never the health
+    // *notice*, which is the leak this test exists to stop.
     const detailed = await runtime.pruneService.prune(raw);
     assert.equal(detailed.judgePath, 'fallback');
     assert.equal(detailed.compression, 'template');
@@ -195,7 +197,12 @@ test('the degraded notice never reaches model-facing payloads or request message
       `the plugin path reduced only ${String(detailed.reductionPercentage)}%`
     );
     const toolPayload = await runtime.prune({ rawOutput: raw, intent: 'find the failure' });
-    assert.deepEqual(Object.keys(toolPayload).sort(), ['processedOutput', 'reductionPercentage', 'shadow', 'tokensSaved']);
+    for (const field of ['processedOutput', 'reductionPercentage', 'shadow', 'tokensSaved']) {
+      assert.ok(field in toolPayload, `the tool payload lost its ${field} field`);
+    }
+    // g-068: a pruning that fell back locally says so instead of reading remote.
+    assert.equal(toolPayload.source, 'local-fallback');
+    assert.match(toolPayload.detail ?? '', /fetch failed/);
     const noticePattern = /System One 后端不可用|decisions degraded|降级为本地压缩/;
     assert.doesNotMatch(JSON.stringify(detailed), noticePattern, 'the health notice leaked into the prune response');
     assert.doesNotMatch(JSON.stringify(toolPayload), noticePattern, 'the health notice leaked into the tool payload');

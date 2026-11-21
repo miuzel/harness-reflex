@@ -80,11 +80,23 @@ test('reflex_score projects a 0-1 rating that matches the shared scoring module'
     const expected = await scoreStatement(new MockDecisionBackend(), request);
 
     // Each call measures its own wall clock, so the two payloads are compared
-    // with the timing field pinned; the value itself is only type-checked.
-    assert.equal(typeof (result as { latencyMs?: unknown }).latencyMs, 'number');
-    assert.deepEqual({ ...result, latencyMs: 0 }, { ...JSON.parse(JSON.stringify(expected)), latencyMs: 0 });
-    assert.ok(result.score >= 0 && result.score <= 1);
-    const buckets = Object.values(result.distribution).reduce((sum, value) => sum + value, 0);
+    // with the timing field pinned; the value itself is only type-checked. The
+    // g-068 provenance is asserted separately below rather than folded in: it is
+    // transport metadata this module cannot produce, not part of the projection.
+    const { connectionName, requestedModel, source, detail, ...decision } = result as typeof result & {
+      connectionName?: string;
+      requestedModel?: string | null;
+      source?: string;
+      detail?: string;
+    };
+    assert.equal(typeof (decision as { latencyMs?: unknown }).latencyMs, 'number');
+    assert.deepEqual({ ...decision, latencyMs: 0 }, { ...JSON.parse(JSON.stringify(expected)), latencyMs: 0 });
+    assert.equal(connectionName, 'mock');
+    assert.equal(requestedModel, null);
+    assert.equal(source, 'local');
+    assert.ok(detail);
+    assert.ok(decision.score >= 0 && decision.score <= 1);
+    const buckets = Object.values(decision.distribution).reduce((sum, value) => sum + value, 0);
     assert.ok(Math.abs(buckets - 1) < 1e-6, `distribution sums to 1, got ${buckets}`);
   });
 });
