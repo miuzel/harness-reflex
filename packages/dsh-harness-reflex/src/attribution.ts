@@ -23,11 +23,15 @@
  *   request, never an observation: a gateway may rewrite it, and this plugin
  *   never sees what an upstream really served. Nothing here may ever be
  *   presented as "the model that answered".
- * - `source` — where the answer came from, in three states that must never be
- *   collapsed: `remote`, `local-fallback` (a remote attempt happened and its
- *   failure was absorbed locally) and `rejected` (the call failed and no answer
- *   was invented). A fourth value, `unknown`, is for a caller that cannot prove
- *   any of them.
+ * - `source` — where the answer came from, in states that must never be
+ *   collapsed: `remote`, `local` (this connection sends nothing),
+ *   `local-fallback` (a remote attempt happened and its failure was absorbed
+ *   locally) and `rejected` (the call failed and no answer was invented). A
+ *   fifth value, `unknown`, is what a call reports when nothing it could observe
+ *   *proves* any of the others — see {@link classifyEvidence}. It is a real
+ *   state, not a placeholder: a backend that publishes no failure record leaves
+ *   a settled call with no positive evidence that a request was answered, and
+ *   claiming `remote` there is exactly the falsehood this goal removes.
  * - `detail` — the reason a non-remote call is non-remote, kept so a reader can
  *   tell "no connection configured" from "the gateway refused the model".
  *
@@ -184,6 +188,109 @@ export function classifySource(
   if (localOnly) return { source: 'local', detail: `no request is sent by this connection` };
   if (localFallback) return { source: 'local-fallback', detail: 'the answer was produced locally, not by System One' };
   return { source: 'remote' };
+}
+
+/**
+ * What one dispatch could prove about where its answer came from.
+ *
+ * Every field is something the runtime *observed*; none is inferred from a
+ * request id or from the settings in force at read time.
+ */
+export interface SourceEvidence {
+  /** Whether the call produced a decision at all. */
+  readonly answered: boolean;
+  /** The thrown failure, when the call threw. */
+  readonly failure?: string;
+  /** Whether the answered value was produced locally after a remote failure. */
+  readonly localFallback?: boolean;
+  /** Whether this connection sends no request at all. */
+  readonly localOnly: boolean;
+  /**
+   * Whether the backend exposes a failure record this module may read.
+   *
+   * Only `JevDecisionBackend` has one. The vLLM logits backend has no
+   * `health()`, and its services absorb a gateway failure into a fail-closed
+   * verdict the same way the JEV one does — so without a record, a settled call
+   * here has **no positive evidence** that a request was made and answered.
+   */
+  readonly healthReadable: boolean;
+  /** `consecutiveFailures` before the call, when the record is readable. */
+  readonly failuresBefore?: number;
+  /** `consecutiveFailures` after the call, when the record is readable. */
+  readonly failuresAfter?: number;
+  /** The backend's reason for its most recent failure, when readable. */
+  readonly lastFailureReason?: string;
+  /**
+   * Whether the ledger entry this call produced arrived **after** the call
+   * settled — in which case the source written on the entry cannot be trusted
+   * to be this call's.
+   */
+  readonly entryArrivedLate?: boolean;
+}
+
+/**
+ * Classify a settled attempt from evidence, preferring `unknown` to a claim.
+ *
+ * This is {@link classifySource} with the one question the first version got
+ * wrong added: a call that resolved and *looked* remote may have had its
+ * request rejected and its failure absorbed — by the gate, or by a prune that
+ * fell back — and claiming `remote` for it is the precise falsehood g-068
+ * forbids. Three states are therefore never guessed:
+ *
+ * - a **late entry** means this call's provenance could not be tied to the
+ *   entry that carried it, so the source is `unknown` (the ledger line itself
+ *   also says `unknown`; the two surfaces agree);
+ * - a connection that sends nothing is `local` by construction, without asking;
+ * - a **settled, non-local call on a backend with no readable failure record**
+ *   has no positive evidence for `remote`, so it is `unknown`. The fail-closed
+ *   verdict the caller still receives is unchanged; only the claim about its
+ *   provenance is withdrawn.
+ *
+ * Everything the first version handled keeps its old answer: a thrown call is
+ * `rejected`, a local answer after a failure is `local-fallback`, and a local
+ * path that is reported by the service itself stays `local`/`local-fallback`.
+ * @param evidence - the facts the dispatch observed.
+ * @returns the source, and the detail for a non-remote one.
+ */
+export function classifyEvidence(evidence: SourceEvidence): { source: CallSource; detail?: string } {
+  const isLocal = evidence.localOnly;
+  if (evidence.entryArrivedLate === true) {
+    return {
+      source: isLocal ? 'local' : 'unknown',
+      ...(isLocal
+        ? {}
+        : { detail: 'the ledger entry for this call could not be tied to it, so its source is unproven' })
+    };
+  }
+  if (evidence.failure !== undefined) return classifySource(false, evidence.failure, false, isLocal);
+  if (!evidence.answered) return classifySource(false, undefined, false, isLocal);
+  if (isLocal) return classifySource(true, undefined, false, true);
+
+  // A readable record proves a failure when the failure count rose across the
+  // call. It proves a *success* only when the backend has one and did not rise;
+  // without one, `remote` would be a guess.
+  const before = evidence.failuresBefore ?? 0;
+  const after = evidence.failuresAfter;
+  const absorbed =
+    after !== undefined && after > before
+      ? (evidence.lastFailureReason ?? 'the System One request failed')
+      : undefined;
+  if (absorbed !== undefined) {
+    // A failure the service absorbed is a rejection unless the caller says the
+    // answered value was produced *locally* afterwards. A gate that turns a
+    // gateway failure into a fail-closed `escalate` verdict made no decision of
+    // its own, so it is `rejected` — not `local-fallback`, which would claim a
+    // local judgment replaced the failed one.
+    return classifySource(true, absorbed, evidence.localFallback === true, false);
+  }
+
+  if (evidence.healthReadable !== true || after === undefined) {
+    return {
+      source: 'unknown',
+      detail: 'this connection exposes no failure record, so no evidence proves the request was answered'
+    };
+  }
+  return classifySource(true, undefined, evidence.localFallback === true, false);
 }
 
 /**

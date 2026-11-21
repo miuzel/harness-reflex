@@ -83,6 +83,7 @@ import {
 } from './config.js';
 import { appendInterventionRecord, pruneLocator, type InterventionAuditRecord } from './session-audit.js';
 import type { ReflexGateService, StagnationDetector, ToolResultPruner } from './vendor/harness-reflex/index.js';
+import type { Attribution } from './attribution.js';
 import type { PruneResponse, StagnationCheckResponse } from './vendor/harness-reflex/index.js';
 import { claimCandidates } from './vendor/harness-reflex/core/closing.js';
 import {
@@ -579,6 +580,19 @@ export interface InterventionEngineOptions {
   prune: Pick<ToolResultPruner, 'prune'>;
   /** Verification plus the closing-claim classification that precedes it. */
   gate: Pick<ReflexGateService, 'verify' | 'classifyClaims'>;
+  /**
+   * Run one outbound decision inside the runtime's per-call attribution.
+   *
+   * The engine spends real System One judgments at Host hook points, and g-068
+   * requires every such call to be attributed on the ledger and in any payload
+   * it returns. Absent for a bare construction (a test, an embedding Host), in
+   * which case the call runs as it always did; the ledger then records it as
+   * `unknown` rather than letting it read as a remote success.
+   */
+  attribute?: <T>(
+    run: () => Promise<T>,
+    options: { answered(value: T): boolean; localFallback?: (value: T) => boolean }
+  ) => Promise<{ result: T; attribution: Attribution }>;
   /** Names of this plugin's own tools: their output is already optimized. */
   ownTools?: readonly string[];
   /** Clock seam. */
@@ -722,6 +736,31 @@ export class InterventionEngine {
   readonly #stagnation: Pick<StagnationDetector, 'check'>;
   readonly #prune: Pick<ToolResultPruner, 'prune'>;
   readonly #gate: Pick<ReflexGateService, 'verify' | 'classifyClaims'>;
+  readonly #attribute: InterventionEngineOptions['attribute'];
+
+  /**
+   * Spend one decision inside the runtime's per-call attribution, when wired.
+   *
+   * Kept as one helper so every outbound judgment this engine makes — the three
+   * stagnation purchases, the two closing-gate calls and the prune judge — goes
+   * through the same seam. A construction without the seam runs the call
+   * unchanged, which is what keeps a bare `InterventionEngine` (tests, embedding
+   * Hosts) working.
+   * @param run - the decision to make.
+   * @param answered - whether the value counts as an answer.
+   * @param localFallback - whether the value is a local answer produced after a
+   *   remote failure (prune's own judge path).
+   * @returns whatever the decision returned.
+   */
+  async #decide<T>(
+    run: () => Promise<T>,
+    answered: (value: T) => boolean,
+    localFallback?: (value: T) => boolean
+  ): Promise<T> {
+    if (this.#attribute === undefined) return run();
+    const { result } = await this.#attribute(run, localFallback === undefined ? { answered } : { answered, localFallback });
+    return result;
+  }
   readonly #now: () => number;
   readonly #retain?: (session: unknown, request: PruneRetentionRequest) => PruneRetention | undefined;
   readonly #audit?: (record: InterventionAuditRecord, session: unknown) => void;
@@ -748,6 +787,7 @@ export class InterventionEngine {
     this.#stagnation = options.stagnation;
     this.#prune = options.prune;
     this.#gate = options.gate;
+    this.#attribute = options.attribute;
     this.#now = options.now ?? (() => Date.now());
     this.#retain = options.retain;
     this.#audit = options.audit;
@@ -953,7 +993,7 @@ export class InterventionEngine {
       budget: () => state,
       // One purchase: the service's answer, latency included. The purchase around
       // it (memo, budgets, latency split, charge) is the shared layer's.
-      buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
+      buy: async (step) => this.#decide(() => this.#stagnation.check(step.goal, [...step.history]), (value) => value !== undefined),
       clock: () => ({ now: () => this.#now() }),
       serves: () => this.#config.enabled,
       toolName: () => exec.name,
@@ -1156,7 +1196,7 @@ export class InterventionEngine {
       const port: HostStagnationPort<PreStepDecision, PreStepDecision> = {
         policy: () => this.#config,
         budget: () => state,
-        buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
+        buy: async (step) => this.#decide(() => this.#stagnation.check(step.goal, [...step.history]), (value) => value !== undefined),
         clock: () => ({ now: () => this.#now() }),
         serves: () => this.#config.enabled,
         toolName: () => state.steps[state.steps.length - 1]?.tool ?? '',
@@ -1276,18 +1316,18 @@ export class InterventionEngine {
         alreadyObjected: () => state.applied.has(CLOSING_LATCH.applied(turn)),
         latchObjected: () => state.applied.add(CLOSING_LATCH.applied(turn)),
         agentId: () => agentId,
-        classify: async (request) => {
-          const answer = await this.#gate.classifyClaims({
-            statements: [...request.statements],
-            intent: this.config.intent,
-            context: request.context
-          });
-          return answer;
-        },
-        verify: async (claims, evidence, options) => {
-          const answer = await this.#gate.verify([...claims], evidence, options);
-          return answer;
-        },
+        classify: async (request) =>
+          this.#decide(
+            () =>
+              this.#gate.classifyClaims({
+                statements: [...request.statements],
+                intent: this.config.intent,
+                context: request.context
+              }),
+            (value) => value !== undefined
+          ),
+        verify: async (claims, evidence, options) =>
+          this.#decide(() => this.#gate.verify([...claims], evidence, options), (value) => value !== undefined),
         claimMinConfidence: () => this.config.claimMinConfidence,
         describe: (facts) => this.#closingFeedback(facts.contradicted),
         // The action itself stays here. Steering is the only way a listener may
@@ -1410,11 +1450,18 @@ export class InterventionEngine {
           // Both modes ask for the *real* candidate, measure-only. The service
           // writes its own ledger entry first; whether the payload is installed is
           // decided afterwards, by the floor.
-          const response = await this.#prune.prune(raw, {
-            intent: this.config.intent,
-            measureOnly: true,
-            pruneJudgeMinChars: this.config.pruneJudgeMinChars
-          });
+          const response = await this.#decide(
+            () =>
+              this.#prune.prune(raw, {
+                intent: this.config.intent,
+                measureOnly: true,
+                pruneJudgeMinChars: this.config.pruneJudgeMinChars
+              }),
+            (value) => value !== undefined,
+            // Prune is its own account of which path produced the text, so a
+            // request that was tried and failed is reported as such.
+            (value) => value.judgePath === 'fallback' || value.judgePath === 'local'
+          );
           return {
             processedOutput: response.processedOutput,
             reductionPercentage: response.reductionPercentage,
@@ -1511,7 +1558,7 @@ export class InterventionEngine {
     const port: HostCorrectionPort<PostToolDecision> = {
       policy: () => this.#config,
       budget: () => state,
-      buy: async (step) => this.#stagnation.check(step.goal, [...step.history]),
+      buy: async (step) => this.#decide(() => this.#stagnation.check(step.goal, [...step.history]), (value) => value !== undefined),
       clock: () => ({ now: () => this.#now() }),
       serves: () => this.#config.enabled,
       toolName: () => exec.name,

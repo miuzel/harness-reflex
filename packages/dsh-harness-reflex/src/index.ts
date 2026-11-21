@@ -517,6 +517,10 @@ export function applyReflex(ctx: Context, config?: ReflexConfig): ReflexRuntime 
       stagnation: runtime.stagnationService,
       prune: runtime.pruneService,
       gate: runtime.gateService,
+      // Every judgment this engine spends is attributed like a tool call: the
+      // ledger records the connection, the requested model and the source, so a
+      // decision made at a Host hook point is no longer anonymous (g-068).
+      attribute: (run, options) => runtime.attribute(run, options),
       audit: (record, session) => {
         // The session log is the one place a decision is durable; an agent without
         // a session simply records nothing, which is why this is guarded.

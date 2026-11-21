@@ -3278,6 +3278,16 @@ window.__ModuleLoader__.load({
 			            parts.push(entry.skipReason);
 			        if (entry.reason !== undefined)
 			            parts.push(entry.reason);
+			        // Provenance last, and in the same words `/reflex-ledger` uses, so two
+			        // readers of one entry cannot come away with different stories. The model is
+			        // labelled a *request*: this plugin never observes what an upstream served.
+			        if (entry.systemOneConnection !== undefined) {
+			            const model = entry.systemOneModel === null || entry.systemOneModel === undefined ? 'no model / 无模型' : entry.systemOneModel;
+			            parts.push(`${entry.systemOneConnection} · requested ${model}`);
+			        }
+			        if (entry.systemOneSource !== undefined && entry.systemOneSource !== 'remote') {
+			            parts.push(entry.systemOneSource === 'unknown' ? 'source unknown' : `source ${entry.systemOneSource}`);
+			        }
 			        return {
 			            id: String(entry.id ?? ''),
 			            clock: formatClock(String(entry.at ?? '')),

@@ -231,6 +231,26 @@ export interface PanelLedgerRow {
   switched?: boolean;
   /** `details.contextTokens`, the context size the routing decision reasoned about. */
   contextTokens?: number;
+  /**
+   * `details.systemOneConnection` — the System One connection in force when the
+   * call was dispatched (g-068). Absent on an entry that predates the change,
+   * and never invented for it.
+   */
+  systemOneConnection?: string;
+  /**
+   * `details.systemOneModel` — the model id the call **requested**. A request,
+   * never an observation: whether an upstream served or rewrote it is unknown
+   * to this plugin, which is why every renderer marks it as requested.
+   */
+  systemOneModel?: string | null;
+  /**
+   * `details.systemOneSource` — `remote`, `local`, `local-fallback`, `rejected`
+   * or `unknown`. Anything but `remote` means the answer was not a System One
+   * answer, and the panel must never show it as one.
+   */
+  systemOneSource?: string;
+  /** `details.systemOneDetail` — why the source is not `remote`. */
+  systemOneDetail?: string;
 }
 
 /** Ledger block of the snapshot. */
@@ -525,6 +545,15 @@ function projectRow(entry: LedgerEntry): PanelLedgerRow {
   const rawContextTokens = details?.contextTokens;
   const contextTokens =
     typeof rawContextTokens === 'number' && Number.isFinite(rawContextTokens) ? rawContextTokens : undefined;
+  // Provenance is projected exactly as recorded: an entry without it (written
+  // before g-068) gets nothing, and `null` is kept distinct from absent because
+  // "the connection names no model" is a fact, not a missing value.
+  const systemOneConnection = text('systemOneConnection');
+  const rawSystemOneModel = details?.systemOneModel;
+  const systemOneModel =
+    typeof rawSystemOneModel === 'string' || rawSystemOneModel === null ? (rawSystemOneModel as string | null) : undefined;
+  const systemOneSource = text('systemOneSource');
+  const systemOneDetail = text('systemOneDetail');
   return {
     id: entry.id,
     at: entry.timestamp,
@@ -543,7 +572,11 @@ function projectRow(entry: LedgerEntry): PanelLedgerRow {
     ...(reason === undefined ? {} : { reason }),
     ...(currentModel === undefined ? {} : { currentModel }),
     ...(switched === undefined ? {} : { switched }),
-    ...(contextTokens === undefined ? {} : { contextTokens })
+    ...(contextTokens === undefined ? {} : { contextTokens }),
+    ...(systemOneConnection === undefined ? {} : { systemOneConnection }),
+    ...(systemOneModel === undefined ? {} : { systemOneModel }),
+    ...(systemOneSource === undefined ? {} : { systemOneSource }),
+    ...(systemOneDetail === undefined ? {} : { systemOneDetail })
   };
 }
 

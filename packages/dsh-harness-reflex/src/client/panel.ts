@@ -1822,6 +1822,14 @@ export interface PanelSnapshotLike {
       level?: string;
       applied?: string | null;
       reason?: string;
+      /** The System One connection in force at dispatch (g-068). */
+      systemOneConnection?: string;
+      /** The model id the call requested — a request, never an observation. */
+      systemOneModel?: string | null;
+      /** Where the answer came from; anything but `remote` is not a System One answer. */
+      systemOneSource?: string;
+      /** Why the source is not `remote`. */
+      systemOneDetail?: string;
     }[];
     logPath?: string | null;
     clearable?: boolean;
@@ -1972,6 +1980,16 @@ export function ledgerRows(snapshot: PanelSnapshotLike | null): LedgerRowView[] 
     if (entry.shadow === true) parts.push('shadow');
     if (entry.skipReason !== undefined) parts.push(entry.skipReason);
     if (entry.reason !== undefined) parts.push(entry.reason);
+    // Provenance last, and in the same words `/reflex-ledger` uses, so two
+    // readers of one entry cannot come away with different stories. The model is
+    // labelled a *request*: this plugin never observes what an upstream served.
+    if (entry.systemOneConnection !== undefined) {
+      const model = entry.systemOneModel === null || entry.systemOneModel === undefined ? 'no model / 无模型' : entry.systemOneModel;
+      parts.push(`${entry.systemOneConnection} · requested ${model}`);
+    }
+    if (entry.systemOneSource !== undefined && entry.systemOneSource !== 'remote') {
+      parts.push(entry.systemOneSource === 'unknown' ? 'source unknown' : `source ${entry.systemOneSource}`);
+    }
     return {
       id: String(entry.id ?? ''),
       clock: formatClock(String(entry.at ?? '')),

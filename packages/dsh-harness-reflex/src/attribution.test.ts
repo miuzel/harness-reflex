@@ -103,7 +103,15 @@ function stubGateway(holdAfter?: number): { gateway: Gateway; release: () => voi
       gateway.failNext = undefined;
       throw new TypeError(reason);
     }
-    return new Response(JSON.stringify(ANSWER), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    // A prune judgment asks one `prune-seg-<n>` question per segment, and a
+    // segment keeps only when it scores `'1'`. Answering none of them would make
+    // every prune take its own safety fallback and read as `local-fallback`
+    // regardless of the gateway, which would hide the very distinction this file
+    // tests.
+    const asked = Object.keys((body.questions ?? {}) as Record<string, unknown>).filter((id) => id.startsWith('prune-seg-'));
+    const answers = { ...ANSWER.answers } as Record<string, unknown>;
+    for (const id of asked) answers[id] = { type: 'score', confidence: 0.9, probabilities: { '1': 0.9, '0': 0.1 } };
+    return new Response(JSON.stringify({ answers }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as unknown as typeof fetch;
   globalThis.fetch = stub;
 
@@ -452,6 +460,149 @@ test('the backend a call reports is never the main model, and no payload ever ca
     assert.notEqual(result.connectionName, result.requestedModel);
     const ledger = JSON.stringify(runtime.ledger.getEntries());
     assert.doesNotMatch(ledger, /test-key/, 'the ledger must never carry the API key');
+  } finally {
+    gateway.restore();
+    runtime.dispose();
+  }
+});
+
+/**
+ * The att-001 review's BLOCK-1 and BLOCK-2: overlapping calls, and an
+ * append-only ledger.
+ *
+ * The first attempt kept one shared "current stamp" and rewrote the last JSONL
+ * line when the answer settled. Two overlapping prunes then destroyed each
+ * other's attribution — the fast call's `clearStamp()` wiped the slow call's
+ * stamp, so the slow call's ledger entry had *no* connection and *no* source
+ * while its payload said `local-fallback` — and a rewrite could relabel a line
+ * that belonged to another call. These tests pin the fix: per-call rings, one
+ * append per call, and a payload that always agrees with its own entry.
+ */
+test('two overlapping calls — one slow and failing, one fast and succeeding — each keep their own provenance', async () => {
+  // The slow call parks on the wire and then fails; the fast one runs to
+  // completion *while* the slow one is still in flight. With a shared stamp the
+  // fast call would erase the slow call's attribution mid-flight.
+  const { gateway, release } = stubGateway(1);
+  const runtime = runtimeFor({ modelIds: ['sys-one-a'], selectedModel: 'sys-one-a' });
+  try {
+    const bulky = Array.from({ length: 400 }, (_, index) => `line ${index} of a bulky payload`).join('\n');
+    const slow = runtime.prune({ rawOutput: bulky, intent: 'line 7' });
+    await gateway.waitFor(1);
+    const fast = await runtime.prune({ rawOutput: bulky, intent: 'line 7' });
+    assert.equal(fast.source, 'remote', 'the fast call answered from the gateway');
+    // Only now is the parked call released *into a failure*, so the slow call is
+    // the one that lands as an absorbed rejection while the fast one already
+    // succeeded — the exact ordering the review reproduced the bug with.
+    gateway.failNext = 'fetch failed';
+    release();
+    const slowResult = await slow;
+    assert.equal(slowResult.source, 'local-fallback', 'the slow call had its failure absorbed locally');
+
+    // Three entries: two prunes and nothing else. Each must carry its own
+    // connection and its own source — the slow one included.
+    const entries = runtime.ledger.getEntries();
+    assert.equal(entries.length, 2, `expected one entry per call, got ${entries.length}`);
+    for (const entry of entries) {
+      assert.equal(entry.details?.systemOneConnection, 'gw', `entry ${entry.id} lost its connection`);
+      assert.equal(entry.details?.systemOneModel, 'sys-one-a');
+      assert.ok(
+        entry.details?.systemOneSource === 'remote' || entry.details?.systemOneSource === 'local-fallback',
+        `entry ${entry.id} lost its source`
+      );
+    }
+    const sources = entries.map((entry) => entry.details?.systemOneSource).sort();
+    assert.deepEqual(sources, ['local-fallback', 'remote'], 'each call keeps the source its own answer earned');
+    // The payloads and the entries tell one story, not two.
+    assert.equal(sources.filter((source) => source === slowResult.source).length >= 1, true);
+  } finally {
+    gateway.restore();
+    runtime.dispose();
+  }
+});
+
+test('the JSONL ledger is only appended to: an earlier line is byte-identical after a later call settles', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'reflex-g068-append-'));
+  const ledgerPath = join(dir, 'ledger.jsonl');
+  const { gateway } = stubGateway();
+  const runtime = createReflexRuntime(
+    resolveConfig({
+      backend: 'jev',
+      ledgerPath,
+      systemOne: { active: 'gw', profiles: { gw: { baseUrl: 'http://gw.test/v1', apiKey: 'test-key', modelIds: ['sys-one-a'], selectedModel: 'sys-one-a' } } },
+      routing: { enabled: false }
+    })
+  );
+  try {
+    await runtime.choice({ question: 'first?', options: ['yes', 'no'] });
+    const afterFirst = readFileSync(ledgerPath, 'utf8');
+    assert.equal(afterFirst.trim().split('\n').length, 1, 'one call appends one line');
+    const firstLine = afterFirst.trim();
+
+    gateway.failNext = 'fetch failed';
+    await assert.rejects(runtime.choice({ question: 'second?', options: ['yes', 'no'] }), /fetch failed/);
+    const afterSecond = readFileSync(ledgerPath, 'utf8');
+    // The first line is untouched — not re-serialised, not re-ordered, not
+    // relabelled. A rejection settling later must not restate an earlier call.
+    assert.equal(afterSecond.split('\n')[0], firstLine, 'an earlier line must never be rewritten');
+    const lines = afterSecond.trim().split('\n').map((line) => JSON.parse(line) as { details?: Record<string, unknown> });
+    assert.equal(lines.length, 2, 'the second call appended exactly one line');
+    assert.equal(lines[1]?.details?.systemOneSource, 'rejected', 'the appended line already carries its final source');
+  } finally {
+    gateway.restore();
+    runtime.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a vLLM connection that exposes no failure record reports unknown rather than claiming a remote answer', async () => {
+  // BLOCK-4. `LogitsSystemOneBackend` has no `health()`, so when the gate absorbs
+  // a gateway rejection into a fail-closed verdict nothing proves the request was
+  // ever answered. Claiming `remote` there is the falsehood g-068 forbids; the
+  // verdict itself is unchanged, only the provenance claim is withdrawn.
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response('boom', { status: 500, statusText: 'Internal Server Error' })) as unknown as typeof fetch;
+  const runtime = createReflexRuntime(
+    resolveConfig({
+      backend: 'vllm',
+      systemOne: {
+        active: 'vl',
+        profiles: { vl: { baseUrl: 'http://vllm.test/v1', backend: 'vllm', apiKey: 'test-key', modelIds: ['qwen'], selectedModel: 'qwen' } }
+      },
+      routing: { enabled: false }
+    })
+  );
+  try {
+    const verdict = await runtime.gate({ assertions: [{ statement: 'it works' }], evidence: 'the tests pass' });
+    // The fail-closed contract is untouched.
+    assert.equal(verdict.passed, false);
+    assert.equal(verdict.needsEscalation, true);
+    assert.equal(verdict.connectionName, 'vl');
+    assert.equal(verdict.requestedModel, 'qwen');
+    assert.equal(verdict.source, 'unknown', 'no evidence proves the request was answered');
+    assert.match(verdict.detail ?? '', /exposes no failure record/);
+    const entry = runtime.ledger.getEntries().at(-1);
+    assert.equal(entry?.details?.systemOneSource, 'unknown', 'the ledger must agree with the payload');
+    assert.equal(entry?.details?.systemOneConnection, 'vl');
+    const serialized = JSON.stringify(runtime.ledger.getEntries());
+    assert.doesNotMatch(serialized, /test-key/, 'no credential reaches the ledger');
+  } finally {
+    globalThis.fetch = original;
+    runtime.dispose();
+  }
+});
+
+test('a JEV rejection is still provable, so the same gate reports rejected rather than unknown', async () => {
+  // The positive control for the test above: with a failure record available,
+  // the absorbed rejection *is* provable and must not be downgraded to unknown.
+  const { gateway } = stubGateway();
+  gateway.failNext = 'fetch failed';
+  const runtime = runtimeFor({ modelIds: ['sys-one-a'], selectedModel: 'sys-one-a' });
+  try {
+    const verdict = await runtime.gate({ assertions: [{ statement: 'it works' }], evidence: 'the tests pass' });
+    assert.equal(verdict.source, 'rejected');
+    assert.match(verdict.detail ?? '', /fetch failed/);
+    assert.equal(runtime.ledger.getEntries().at(-1)?.details?.systemOneSource, 'rejected');
   } finally {
     gateway.restore();
     runtime.dispose();

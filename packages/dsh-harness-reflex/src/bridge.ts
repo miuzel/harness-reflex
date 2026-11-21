@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { Agent } from '@deepseek-ai/dsh-agent';
 
@@ -46,13 +46,14 @@ import { VirtualModelRouter } from './router.js';
 import {
   attributionOf,
   callIdentity,
-  classifySource,
+  classifyEvidence,
   ledgerAttribution,
   MOCK_CONNECTION_NAME,
   UNCONFIGURED_CONNECTION_NAME,
   type Attribution,
   type CallIdentity,
-  type CallSource
+  type CallSource,
+  type SourceEvidence
 } from './attribution.js';
 
 /**
@@ -177,26 +178,87 @@ class LiveBackend {
 type LedgerSink = Pick<DecisionLedger, 'record'>;
 
 /**
- * A ledger sink that stamps the in-flight call's provenance onto every entry a
- * service writes for it.
+ * One call's held ledger entry: what the service built, plus its identity.
+ *
+ * Held rather than written, because the *source* of an answer is not knowable
+ * until the answer settles (see {@link AttributedLedger}).
+ */
+interface HeldEntry {
+  readonly entry: Parameters<DecisionLedger['record']>[0];
+  readonly identity: CallIdentity;
+}
+
+/**
+ * One already-attributed call, for callers that drive a decision service
+ * themselves instead of going through {@link ReflexRuntime.choice} and friends.
+ *
+ * `ledger` is the call's private buffer; `settle` appends it once the source is
+ * known and returns the attribution to put on the caller's own payload.
+ */
+export interface CallRing {
+  /** The ledger ring this call's service entries are buffered in. */
+  readonly ledger: LedgerSink;
+  /**
+   * Close the ring: append its entries with the final source.
+   * @param outcome - the settled source.
+   * @returns the attribution for the caller's payload.
+   */
+  settle(outcome: { source: CallSource; detail?: string }): Attribution;
+}
+
+/**
+ * The attributed, append-only ledger sink every decision service writes through.
  *
  * ## Why a decorator rather than fields on the entry (g-068)
  *
- * `ReflexGateService` and `ReflexRouter` write their *own* ledger entry while
- * they run, and that entry is the one a reader sees. The runtime cannot add
- * fields to it afterwards without rewriting the JSONL line, and recording a
- * second, attributed entry beside it would double-count the call and leave the
- * un-attributed one first. Decorating the sink keeps exactly one entry per call
- * and makes that entry truthful, with no change to the shared `DecisionLedger`
- * (which the root stdio MCP package also owns — g-068 must not touch it).
+ * `ReflexGateService`, `ReflexRouter`, `ToolResultPruner` and the rest write
+ * their *own* ledger entry while they run, and that entry is the one a reader
+ * sees. `DecisionLedger` is shared with the root stdio MCP package, whose
+ * contract g-068 must not touch, so this layer keeps the provenance inside the
+ * entry's existing open `details` bag instead of adding fields to it.
  *
- * The stamp is set immediately before the service is awaited and cleared in a
- * `finally`, so an entry written later by a concurrent call can never pick up
- * an older call's identity. That is the "in-flight" property, and it is why the
- * stamp is per-dispatch rather than a field on the runtime.
+ * ## Per-call isolation (the att-001 review's BLOCK-1)
+ *
+ * The first attempt kept **one** "current stamp" field and cleared it in a
+ * `finally`. Two overlapping calls then destroyed each other's attribution: the
+ * fast call's clear wiped the slow call's stamp, the slow call's service entry
+ * was written unattributed, and its payload still said `local-fallback`. The
+ * ledger and the payload disagreed about the same call, which is the exact
+ * falsehood this goal exists to remove. There is no single shared field any
+ * more: {@link open} returns a *token*, a service's entry is held in a buffer
+ * **owned by that token**, and nothing a concurrent call does can reach it.
+ *
+ * ## Written once, finished, never rewritten (BLOCK-2)
+ *
+ * A service writes its entry *before* the answer settles, when `source` is still
+ * unknown. Stamp-then-rewrite-the-last-JSONL-line was the first attempt's answer
+ * to that, and it was wrong twice over: it rewrote a line that might belong to
+ * another call, and rewriting a whole file is an append-only violation that can
+ * truncate a sink another writer is appending to. Here the service's entry is
+ * **buffered** on its token; when the call settles, {@link finish} appends that
+ * one entry exactly once — identity *and* source together, already final. An
+ * unregistered token (a call that threw before settling) falls back to the
+ * buffered group in {@link flush}, so no entry is ever lost. The JSONL file is
+ * therefore only ever appended to: no line is rewritten and no line is moved.
+ *
+ * ## Why attribution can honestly be `unknown`
+ *
+ * A call whose outcome cannot be proven must say so rather than claim `remote`.
+ * Two paths reach that state and both end up here: a backend that exposes no
+ * failure record at all (the vLLM logits backend) and a call whose service entry
+ * was written after the call had already settled ({@link AttributedLedger.report}
+ * explains how). See {@link classifyEvidence}.
  */
-class StampingLedger {
-  #stamp: Record<string, unknown> | undefined;
+export class AttributedLedger {
+  /** Open calls: the identity each token was opened with, and the entries it holds. */
+  readonly #openCalls = new Map<number, { identity: CallIdentity; held: HeldEntry[] }>();
+  /** Call tokens in dispatch order; settled calls are removed as they finish. */
+  readonly #settleOrder: number[] = [];
+  /** Entries a service wrote while no call was open, if any. */
+  #unattributed: Array<Parameters<DecisionLedger['record']>[0]> = [];
+  #nextToken = 0;
+  /** Set when a call settled while its own entry was still unaccounted for. */
+  #aCallLandedLate = false;
 
   /**
    * @param target - the activation's real ledger sink.
@@ -204,26 +266,174 @@ class StampingLedger {
   constructor(private readonly target: LedgerSink) {}
 
   /**
-   * Stamp the provenance for the call about to be made.
-   * @param provenance - the flat fields to merge into that call's `details`.
-   * @returns a function that clears the stamp, for a `finally`.
+   * Open one call's ledger context.
+   * @param identity - the identity taken at dispatch, before the call is awaited.
+   * @returns the token to settle the call with, and the sink its services write through.
    */
-  begin(provenance: Record<string, unknown>): () => void {
-    this.#stamp = provenance;
-    return () => {
-      this.#stamp = undefined;
+  open(identity: CallIdentity): { token: number; ledger: LedgerSink } {
+    const token = this.#nextToken;
+    this.#nextToken += 1;
+    this.#openCalls.set(token, { identity, held: [] });
+    this.#settleOrder.push(token);
+    return { token, ledger: this.#sinkFor(token) };
+  }
+
+  /**
+   * The sink one call's services write through.
+   *
+   * A token that is no longer open (only a service writing *after* its own call
+   * settled can hit this) buffers into the shared group that {@link flush}
+   * settles as `unknown`, rather than being dropped.
+   * @param token - the call's token.
+   * @returns the sink to hand a decision service.
+   */
+  #sinkFor(token: number): LedgerSink {
+    return {
+      record: (entry) => {
+        const call = this.#openCalls.get(token);
+        if (call !== undefined) {
+          // Buffered, not written: the same object is appended once the call
+          // settles, so the entry a reader sees is final the first time.
+          call.held.push({ entry, identity: call.identity });
+        } else {
+          this.#unattributed.push(entry);
+        }
+        // The service owns this return value only to log it; the entry it will
+        // actually be read from is the one appended at settlement.
+        return { ...entry, id: '', timestamp: '' } as ReturnType<DecisionLedger['record']>;
+      }
     };
   }
 
   /**
-   * Record one entry, merging the in-flight provenance into its `details`.
-   * @param entry - the entry the service built.
-   * @returns the stored entry.
+   * The sink a service writes through when no call is in force.
+   *
+   * A service driven directly — the automatic-intervention engine, a
+   * programmatic caller, a test — has no dispatch context to attribute it to.
+   * Its entry is appended **immediately** (dropping it would lose an audited
+   * judgment) with the source the service itself reported when it reported one
+   * (a `systemOneSource`-style field on the entry), and `unknown` otherwise. It is
+   * never left to read as a remote success.
+   * @param token - the identity-less call id, for logging only.
+   * @returns the unattributed sink.
    */
-  record(entry: Parameters<DecisionLedger['record']>[0]): ReturnType<DecisionLedger['record']> {
-    const stamp = this.#stamp;
-    if (stamp === undefined) return this.target.record(entry);
-    return this.target.record({ ...entry, details: { ...entry.details, ...stamp } } as typeof entry);
+  unattributedSink(): LedgerSink {
+    return {
+      record: (entry) => {
+        // A service may have been given its provenance by a caller that knew it
+        // (the intervention engine attributes the call itself). Honour that;
+        // otherwise say plainly that nothing proves where the answer came from.
+        const claimed = typeof entry.details?.systemOneSource === 'string';
+        this.target.record({
+          ...entry,
+          details: {
+            ...entry.details,
+            ...(claimed
+              ? {}
+              : ledgerAttribution({
+                  connectionName: 'unknown',
+                  requestedModel: null,
+                  source: 'unknown',
+                  detail: 'the entry was written outside the call it belongs to'
+                }))
+          }
+        } as typeof entry);
+        return { ...entry, id: '', timestamp: '' } as ReturnType<DecisionLedger['record']>;
+      }
+    };
+  }
+
+  /** Close one token's context, returning what it held. */
+  #close(token: number): HeldEntry[] {
+    const call = this.#openCalls.get(token);
+    this.#openCalls.delete(token);
+    const at = this.#settleOrder.indexOf(token);
+    if (at !== -1) this.#settleOrder.splice(at, 1);
+    return call?.held ?? [];
+  }
+
+  /**
+   * Append what one call held, once, with the final source.
+   *
+   * The source is written into `details` here — the last moment it is knowable
+   * and the only moment anything is persisted — so no line is ever rewritten.
+   * @param token - the call's token.
+   * @param outcome - the settled outcome, source included.
+   * @returns how many entries this call appended.
+   */
+  finish(token: number, outcome: DispatchOutcome): number {
+    const held = this.#close(token);
+    const fields = ledgerAttribution(attributionOf(outcome.identity, outcome));
+    for (const item of held) {
+      this.target.record({ ...item.entry, details: { ...item.entry.details, ...fields } } as typeof item.entry);
+    }
+    // A service that wrote only after its call settled left its entry in the
+    // shared group, where it cannot be told apart from another call's. Flag the
+    // settlement so the runtime can withdraw the claim it would otherwise make.
+    if (held.length === 0 && this.#unattributed.length > 0) this.#aCallLandedLate = true;
+    return held.length;
+  }
+
+  /**
+   * Append what one call held, with a source that could not be verified.
+   * @param token - the call's token.
+   * @returns how many entries this call appended.
+   */
+  finishUnknown(token: number): number {
+    const held = this.#close(token);
+    const fields = ledgerAttribution({
+      connectionName: 'unknown',
+      requestedModel: null,
+      source: 'unknown',
+      detail: 'the call did not settle, so where its answer came from is unproven'
+    });
+    for (const item of held) {
+      this.target.record({
+        ...item.entry,
+        details: { ...item.entry.details, ...fields, systemOneConnection: item.identity.connectionName, systemOneModel: item.identity.requestedModel }
+      } as typeof item.entry);
+    }
+    return held.length;
+  }
+
+  /**
+   * Append entries that were written while no call was open.
+   *
+   * They cannot be attributed to a call, so they are marked `unknown` rather
+   * than left to read as a remote success.
+   * @returns whether any entry was appended.
+   */
+  flush(): boolean {
+    const pending = this.#unattributed;
+    this.#unattributed = [];
+    for (const entry of pending) {
+      const already = typeof entry.details?.systemOneSource === 'string';
+      this.target.record({
+        ...entry,
+        details: {
+          ...entry.details,
+          ...(already
+            ? {}
+            : ledgerAttribution({
+                connectionName: 'unknown',
+                requestedModel: null,
+                source: 'unknown',
+                detail: 'the entry was written outside the call it belongs to'
+              }))
+        }
+      } as typeof entry);
+    }
+    return pending.length > 0;
+  }
+
+  /**
+   * Take, once, whether a settled call could not be tied to its own entry.
+   * @returns `true` when the last settlement landed late.
+   */
+  takeLateCall(): boolean {
+    const late = this.#aCallLandedLate;
+    this.#aCallLandedLate = false;
+    return late;
   }
 }
 
@@ -340,10 +550,76 @@ export class ReflexRuntime {
   /** The stable delegate all decision services dispatch through. */
   readonly #liveBackend: LiveBackend;
   /**
-   * Ledger sink the decision services write through, so an entry a service owns
-   * carries the provenance of the call that produced it (see {@link StampingLedger}).
+   * Ledger the whole activation writes through, so an entry a service owns
+   * carries the provenance of the call that produced it and is appended once
+   * (see {@link AttributedLedger}).
    */
-  readonly #stamping: StampingLedger;
+  readonly #attributed: AttributedLedger;
+  /**
+   * Per-call sinks handed to the shared decision services.
+   *
+   * The decision services are long-lived and write their own ledger entry, but
+   * the call they are serving is per-dispatch. Each dispatch runs its services
+   * inside its own {@link #callScope}, so the sink below resolves to *that*
+   * call's buffer. This is why no shared "current stamp" field exists: a
+   * concurrent call cannot see, let alone clear, another call's context.
+   */
+  readonly tracking: { gate: LedgerSink; prune: LedgerSink; stagnation: LedgerSink; route: LedgerSink; screen: LedgerSink } = {
+    gate: { record: (entry) => this.#recordForCurrentCall(entry) },
+    prune: { record: (entry) => this.#recordForCurrentCall(entry) },
+    stagnation: { record: (entry) => this.#recordForCurrentCall(entry) },
+    route: { record: (entry) => this.#recordForCurrentCall(entry) },
+    screen: { record: (entry) => this.#recordForCurrentCall(entry) }
+  };
+
+  /** The dispatch context in force, so a service's `record` finds its own call. */
+  readonly #callScope = new AsyncLocalStorage<{ sink: LedgerSink }>();
+
+  /**
+   * Route one service entry to the call whose context is in force.
+   *
+   * Falls back to the unattributed group (settled as `unknown`, never dropped)
+   * when a service writes outside any dispatch — that only happens for a
+   * programmatic caller driving a service directly.
+   * @param entry - the entry the service built.
+   * @returns the record result the service expects.
+   */
+  #recordForCurrentCall(entry: Parameters<DecisionLedger['record']>[0]): ReturnType<DecisionLedger['record']> {
+    return (this.#callScope.getStore()?.sink ?? this.#attributed.unattributedSink()).record(entry);
+  }
+
+  /**
+   * Hand a decision service an already-attributed payload.
+   *
+   * The automatic intervention layer ({@link InterventionEngine}) drives the
+   * same services directly at Host hook points, so those calls never reach
+   * {@link #dispatch}. They still spend a System One judgment, and the goal
+   * requires every such call to be attributed — an entry the ledger cannot name
+   * is exactly the opacity g-068 removes.
+   *
+   * The returned ring is the call's own ledger token: the caller wraps the
+   * service call in {@link runInCall}, then reports the outcome through
+   * `settle` when the answer arrives, which is when the source first exists.
+   * @returns the ring for the call about to be made.
+   */
+  openCall(): CallRing {
+    const identity = this.currentCallIdentity();
+    const { token, ledger } = this.#attributed.open(identity);
+    return {
+      ledger,
+      settle: (outcome) => this.#settleCall(token, identity, outcome)
+    };
+  }
+
+  /**
+   * Run one call inside its own ledger ring.
+   * @param ring - the ring from {@link openCall}.
+   * @param run - the work to run with that ring in force.
+   * @returns whatever `run` returns.
+   */
+  runInCall<T>(ring: CallRing, run: () => Promise<T>): Promise<T> {
+    return this.#callScope.run({ sink: ring.ledger }, run);
+  }
   /** Whether this runtime owns the backend and may rebuild it on a config save. */
   readonly #backendSwappable: boolean;
   /** Identity of the backend configuration currently in force. */
@@ -394,14 +670,19 @@ export class ReflexRuntime {
     this.#ledgerPath = config.ledgerPath;
     this.#routingConfig = config.routing;
     this.calibrator = config.calibrationPath ? new Calibrator(config.calibrationPath) : new Calibrator();
-    // Services that write their own ledger entry go through the stamper, so the
-    // entry they own carries the same provenance the tool payload reports.
-    this.#stamping = new StampingLedger(this.ledger);
-    this.gateService = new ReflexGateService(this.backend, this.#stamping as unknown as DecisionLedger, this.calibrator);
-    this.pruneService = new ToolResultPruner(this.backend, this.#stamping as unknown as DecisionLedger, config.pruneThreshold);
-    this.stagnationService = new StagnationDetector(this.backend, this.#stamping as unknown as DecisionLedger);
-    this.routeService = new ReflexRouter(this.backend, this.#stamping as unknown as DecisionLedger);
-    this.screenService = new ReflexScreenService(this.backend, this.#stamping as unknown as DecisionLedger);
+    // Services that write their own ledger entry go through the attributed
+    // ledger, so the entry they own carries the same provenance the payload
+    // reports — with a source that is only written once it is knowable.
+    this.#attributed = new AttributedLedger(this.ledger);
+    // The services are typed against the whole ledger but only ever call
+    // `record`; the cast keeps that one-method contract honest while the
+    // attributed sink does the bookkeeping behind it.
+    const sinkOf = (sink: LedgerSink): DecisionLedger => sink as unknown as DecisionLedger;
+    this.gateService = new ReflexGateService(this.backend, sinkOf(this.tracking.gate), this.calibrator);
+    this.pruneService = new ToolResultPruner(this.backend, sinkOf(this.tracking.prune), config.pruneThreshold);
+    this.stagnationService = new StagnationDetector(this.backend, sinkOf(this.tracking.stagnation));
+    this.routeService = new ReflexRouter(this.backend, sinkOf(this.tracking.route));
+    this.screenService = new ReflexScreenService(this.backend, sinkOf(this.tracking.screen));
     this.#source = dependencies.configSource;
     this.#warn = dependencies.warn ?? (() => {});
     this.#interventionsConfig = config.interventions;
@@ -496,15 +777,22 @@ export class ReflexRuntime {
    * services answer locally after a remote failure (prune, stagnation), others
    * refuse (choice, score, route, screen), and the caller decides.
    *
-   * ## Absorbed failures
+   * ## Per-call rings, not one shared stamp
+   *
+   * Every call runs inside its own {@link CallRing}, so a service that writes
+   * its own entry buffers it on *this* call and never on a neighbour's. Two
+   * overlapping calls therefore cannot borrow, erase or overwrite each other's
+   * attribution, which one shared "current stamp" field made trivially possible.
+   *
+   * ## Absorbed failures, and the honest `unknown`
    *
    * Not every remote failure arrives as a rejection. `ReflexGateService` turns a
    * gateway failure into a fail-closed `escalate` verdict and *returns* it, so
-   * `run()` resolves normally and the reader would otherwise be told a local
-   * verdict came `remote` — the exact falsehood g-068 removed. The backend's own
-   * health record is the evidence: a completed call that incremented
-   * `consecutiveFailures` rejected its request and had the failure absorbed, and
-   * that is reported as `rejected` with the gateway's reason.
+   * `run()` resolves normally. Where the backend publishes a failure record
+   * (JEV), a failure count that rose across the call proves the request was
+   * rejected and absorbed. Where it publishes none (the vLLM logits backend) no
+   * evidence proves anything, and the call reports `unknown` rather than
+   * claiming `remote` — see {@link classifyEvidence}.
    * @param run - the call to make.
    * @param options - how to read the outcome (`answered`, `localFallback`).
    * @returns the value, or the failure with the classified outcome.
@@ -520,91 +808,77 @@ export class ReflexRuntime {
     // identity rather than inferred from an empty health record.
     const localOnly =
       identity.connectionName === UNCONFIGURED_CONNECTION_NAME || identity.connectionName === MOCK_CONNECTION_NAME;
-    const failuresBefore = this.#liveBackend.currentHealth()?.consecutiveFailures ?? 0;
-    // The identity is fixed; the *source* is not known until the call settles, so
-    // a service that writes its own entry is stamped with what is knowable before
-    // it runs — and corrected after, for the entries this runtime writes itself.
+    const before = this.#liveBackend.currentHealth();
+    const ring = this.#attributed.open(identity);
     let result: T | undefined;
     let failure: string | undefined;
-    const clearStamp = this.#stamping.begin({
-      systemOneConnection: identity.connectionName,
-      systemOneModel: identity.requestedModel
-    });
     try {
-      result = await run();
+      result = await this.#callScope.run({ sink: ring.ledger }, run);
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
-    } finally {
-      clearStamp();
     }
-    if (failure !== undefined) {
-      return { outcome: { identity, ...classifySource(false, failure, false, localOnly) }, failure };
-    }
-    // A rejection the service absorbed shows up here and nowhere else: the call
-    // resolved, and the health record says its request failed.
-    const absorbed = this.#liveBackend.currentHealth();
-    const absorbedReason =
-      localOnly || absorbed === undefined || absorbed.consecutiveFailures <= failuresBefore
-        ? undefined
-        : absorbed.lastFailureReason ?? 'the System One request failed';
-    const classified = classifySource(
-      options.answered(result as T),
-      absorbedReason,
-      options.localFallback?.(result as T) === true,
-      localOnly
-    );
-    const outcome: DispatchOutcome = { identity, ...classified };
-    // Correct the entry the service already wrote, which could only carry the
-    // identity at that time: the source is known now, and the ledger must not
-    // disagree with the payload about where the answer came from.
-    this.#stampLastEntry(outcome);
-    return { result: result as T, outcome };
+    const after = this.#liveBackend.currentHealth();
+    const evidence: SourceEvidence = {
+      answered: failure === undefined && result !== undefined && options.answered(result as T),
+      ...(failure === undefined ? {} : { failure }),
+      localFallback: failure === undefined && options.localFallback?.(result as T) === true,
+      localOnly,
+      healthReadable: after !== undefined,
+      ...(before === undefined ? {} : { failuresBefore: before.consecutiveFailures }),
+      ...(after === undefined ? {} : { failuresAfter: after.consecutiveFailures }),
+      ...(after?.lastFailureReason === undefined ? {} : { lastFailureReason: after.lastFailureReason })
+    };
+    const classified = classifyEvidence(evidence);
+    // Appended exactly once, already final: identity *and* source together. No
+    // line is ever rewritten, so the JSONL sink stays append-only.
+    this.#attributed.finish(ring.token, { identity, ...classified });
+    this.#attributed.flush();
+    // A service that wrote only after this call settled left its entry in the
+    // shared group, so nothing proves that entry is this call's. The ledger line
+    // says `unknown`; the payload must agree with it rather than disagree.
+    const outcome: DispatchOutcome = this.#attributed.takeLateCall()
+      ? { identity, ...classifyEvidence({ ...evidence, entryArrivedLate: true }) }
+      : { identity, ...classified };
+    return { ...(result === undefined ? {} : { result }), outcome, ...(failure === undefined ? {} : { failure }) };
   }
 
   /**
-   * Rewrite the source fields of the entry the finished call just appended.
+   * Run one outbound decision inside a full attributed call.
    *
-   * The stamper gives a service's entry the identity before the call runs; the
-   * classified source only exists afterwards. Only the newest entry is touched,
-   * and only when it already carries this call's connection name, so a concurrent
-   * call's entry is never overwritten.
-   * @param outcome - the settled outcome.
+   * The seam the automatic-intervention engine uses: it opens a ring, runs the
+   * service inside it, classifies the outcome from the same evidence the tools
+   * use, settles the ring (append-only, once) and hands back both the value and
+   * the attribution so the caller can put it on its own payload.
+   * @param run - the decision to make.
+   * @param options - how to read the outcome.
+   * @returns the value and its attribution.
    */
-  #stampLastEntry(outcome: DispatchOutcome): void {
-    const entries = this.ledger.getEntries();
-    const last = entries[entries.length - 1];
-    if (last === undefined || last.details?.systemOneConnection !== outcome.identity.connectionName) return;
-    const attribution = attributionOf(outcome.identity, outcome);
-    const fields = ledgerAttribution(attribution);
-    last.details = { ...last.details, ...fields };
-    // The service wrote its line before the answer settled, so the *file* has the
-    // identity but not the source. Rewriting the last line keeps the JSONL sink
-    // and the in-memory ledger saying the same thing — a reader of the file must
-    // not see a rejection as a remote success. A sink that cannot be rewritten
-    // (read-only filesystem, no sink at all) is left alone: the in-memory entry
-    // is still correct, and a stale *source* word in a file is the one thing that
-    // would be worse than its absence.
-    const logPath = this.ledger.getLogPath();
-    if (logPath === null) return;
-    try {
-      const lines = readFileSync(logPath, 'utf8').split('\n');
-      let index = -1;
-      for (let cursor = lines.length - 1; cursor >= 0; cursor -= 1) {
-        if (lines[cursor]?.trim()) {
-          index = cursor;
-          break;
-        }
-      }
-      if (index === -1) return;
-      const persisted = JSON.parse(lines[index] as string) as { id?: string };
-      // Only the entry this call produced: an id mismatch means another writer
-      // appended in between, and that writer's line is not ours to rewrite.
-      if (persisted.id !== last.id) return;
-      lines[index] = JSON.stringify(last);
-      writeFileSync(logPath, lines.join('\n'), 'utf8');
-    } catch {
-      // A sink that cannot be rewritten keeps the identity it already has.
+  async attribute<T>(
+    run: () => Promise<T>,
+    options: { answered(value: T): boolean; localFallback?: (value: T) => boolean }
+  ): Promise<{ result: T; attribution: Attribution }> {
+    const { result, outcome, failure } = await this.#dispatch(run, options);
+    if (failure !== undefined || result === undefined) {
+      throw new Error(failure ?? 'the System One connection produced no answer');
     }
+    return { result, attribution: attributionOf(outcome.identity, outcome) };
+  }
+
+  /**
+   * Close one `openCall` ring: append its entries with the final source.
+   *
+   * The automatic-intervention layer calls this once its service answered, so
+   * a decision made at a Host hook point is attributed exactly like one made
+   * through a tool.
+   * @param token - the ring's token.
+   * @param identity - the identity the ring was opened with.
+   * @param outcome - the settled source.
+   * @returns the attribution for the caller's payload.
+   */
+  #settleCall(token: number, identity: CallIdentity, outcome: { source: CallSource; detail?: string }): Attribution {
+    this.#attributed.finish(token, { identity, ...outcome });
+    this.#attributed.flush();
+    return attributionOf(identity, outcome);
   }
 
   /**
@@ -807,7 +1081,14 @@ export class ReflexRuntime {
   }): Promise<StagnationCheckResponse> {
     this.#assertLive();
     if (request.recentAction) this.stagnationService.recordAction(request.recentAction);
-    return this.stagnationService.check(request.goal, request.history);
+    // Dispatched like every other decision: the service writes its own entry,
+    // and the ring's append-only settlement is what attributes it.
+    const { result, outcome, failure } = await this.#dispatch(
+      () => this.stagnationService.check(request.goal, request.history),
+      { answered: (value) => value !== undefined }
+    );
+    if (result === undefined) throw new Error(failure ?? 'the System One connection produced no answer');
+    return result;
   }
 
   /**
