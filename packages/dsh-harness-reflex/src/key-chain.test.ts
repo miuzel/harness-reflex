@@ -545,3 +545,37 @@ test('a literal profile key wins and apiKeyEnv is ignored entirely', async () =>
     stub.restore();
   }
 });
+
+test('an unconfigured activation makes no external request, even with a gateway in the environment', async () => {
+  // Criterion 1 of g-066, observed at the wire rather than at the type: the whole
+  // point is that the plugin does not *talk* to anything the user did not select.
+  // The environment below is the one that used to make `auto` build a live Jev
+  // backend and start calling it.
+  const saved = { SYSTEM_ONE_API_KEY: process.env.SYSTEM_ONE_API_KEY, JEV_API_KEY: process.env.JEV_API_KEY, SYSTEM_ONE_BASE_URL: process.env.SYSTEM_ONE_BASE_URL };
+  process.env.JEV_API_KEY = 'sk-only-in-the-environment';
+  process.env.SYSTEM_ONE_BASE_URL = 'http://env-gateway';
+  delete process.env.SYSTEM_ONE_API_KEY;
+  const stub = captureFetch(() => ({ answers: {} }));
+  try {
+    for (const [label, authored] of [
+      ['no profiles', { backend: 'auto', systemOne: {} }],
+      ['none active', { backend: 'auto', systemOne: { profiles: { p: { baseUrl: 'http://written' } } } }],
+      ['active name missing', { backend: 'auto', systemOne: { active: 'typo', profiles: { p: { baseUrl: 'http://written' } } } }],
+      ['legacy flat fields only', { backend: 'auto', systemOne: { baseUrl: 'http://old', model: 'm' } }]
+    ] as const) {
+      const config = resolveConfig(authored as never);
+      const backend = createBackend(config, { JEV_API_KEY: 'sk-only-in-the-environment' });
+      assert.equal(backend.name, 'unconfigured', `${label}: the activation must be local-only`);
+      // Every decision still gets an answer — from the heuristics, in process.
+      const answer = await backend.choice({ question: 'ship it?', options: ['yes', 'no'] });
+      assert.ok(answer.bestOption.length > 0, `${label}: the local fallback answered nothing`);
+      assert.equal(stub.calls.length, 0, `${label}: the plugin reached a network nobody configured`);
+    }
+  } finally {
+    stub.restore();
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});

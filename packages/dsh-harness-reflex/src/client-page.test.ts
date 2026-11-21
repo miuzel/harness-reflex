@@ -3064,3 +3064,105 @@ test('the banner is absent while the backend is healthy or when it publishes no 
 });
 
 //#endregion
+
+//#region editing a connection name, one keystroke at a time (g-066 criterion 3)
+
+/**
+ * Type `text` into the row's name field one character at a time.
+ *
+ * The reported bug was exactly this loop: the first character renamed the row,
+ * the field was replaced by static text, and the second character had nowhere to
+ * land. Typing character by character — re-rendering between each — is the only
+ * way to catch that; a single `onChange` with the whole string would pass on the
+ * broken version.
+ * @param mounted - the mounted page.
+ * @param rowId - the row identity to type into.
+ * @param text - the full name to type.
+ * @returns the tree after the last keystroke.
+ */
+async function typeEveryCharacter(mounted: Mounted, rowId: string, text: string): Promise<unknown> {
+  let tree: unknown = undefined;
+  for (let length = 1; length <= text.length; length += 1) {
+    tree = await mounted.runtime.flush();
+    const input = nameInputOf(tree, rowId);
+    assert.ok(input !== undefined, `the name field disappeared after "${text.slice(0, length - 1)}"`);
+    fire(input, 'onChange', { target: { value: text.slice(0, length) } });
+  }
+  return mounted.runtime.flush();
+}
+
+/** The name input of one row, by page identity. */
+function nameInputOf(tree: unknown, rowId: string): Element | undefined {
+  return elements(tree).find((element) => element.props['data-profile-name'] === rowId);
+}
+
+test('typing an unsaved row name one character at a time keeps the field editable', async () => {
+  const { form, mutations } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  fire(find(tree, 'button', '新增配置'), 'onClick');
+  tree = await mounted.runtime.flush();
+
+  const newRow = profileRows(tree).find((row) => String(row.props['data-profile-unnamed']) === 'true');
+  assert.ok(newRow !== undefined, 'the new row is missing');
+  const id = String(newRow.props['data-profile']);
+  tree = await typeEveryCharacter(mounted, id, 'newapi');
+
+  // The field is still an input, and it holds the whole name.
+  const input = nameInputOf(tree, id);
+  assert.ok(input !== undefined, 'the name field stopped being editable after the first character');
+  assert.equal(input.props.value, 'newapi', 'a character was dropped');
+  // The row is no longer marked unnamed: it now has the name it was typed.
+  const row = profileRows(tree).find((candidate) => String(candidate.props['data-profile']) === id);
+  assert.ok(row !== undefined);
+  assert.equal(row.props['data-profile-unnamed'], undefined, 'the row still reads as unnamed after being named');
+  assert.ok(!textOf(row).includes('未命名'), 'the unnamed marker is still rendered');
+  // Typing is a draft edit: nothing reached the Host, and nothing is saved.
+  assert.deepEqual(mutations, [], 'typing a name wrote to the document');
+  mounted.unmount();
+});
+
+test('renaming a saved row one character at a time works, and only a save commits it', async () => {
+  const { form, mutations } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  const savedRow = namedRow(tree, 'primary');
+  assert.ok(savedRow !== undefined, 'the saved row is missing');
+  const id = String(savedRow.props['data-profile']);
+  // A saved row used to render its name as text — so it could not be renamed at
+  // all. It is an input now, and it takes the whole name.
+  tree = await typeEveryCharacter(mounted, id, 'primary2');
+
+  const input = nameInputOf(tree, id);
+  assert.ok(input !== undefined, 'a saved row has no editable name field');
+  assert.equal(input.props.value, 'primary2', 'the saved row name was not fully typed');
+  assert.deepEqual(mutations, [], 'typing rebuilt or wrote the document');
+  // The activation followed the row while it was being typed (g-065), and is
+  // still a draft: the marker is on the row, nothing is written until save.
+  assert.ok(textOf(namedRow(tree, 'primary2') ?? null).includes('已激活'), 'the activation did not follow the rename');
+  mounted.unmount();
+});
+
+test('a failed save keeps the typed name, so the draft is never lost', async () => {
+  // The name is the one field whose loss is unrecoverable — it is the settings
+  // path. A refused save (here: a read-only document) must leave it as typed.
+  const { form, mutations } = settingsForm(PROFILED, { writable: false });
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+  const savedRow = namedRow(tree, 'secondary');
+  assert.ok(savedRow !== undefined);
+  const id = String(savedRow.props['data-profile']);
+  tree = await typeEveryCharacter(mounted, id, 'renamed');
+
+  fire(find(tree, 'button', '保存'), 'onClick');
+  tree = await mounted.runtime.flush();
+  assert.deepEqual(mutations, [], 'a read-only document was written');
+  assert.equal(nameInputOf(tree, id)?.props.value, 'renamed', 'the refused save discarded the typed name');
+  mounted.unmount();
+});
+
+//#endregion

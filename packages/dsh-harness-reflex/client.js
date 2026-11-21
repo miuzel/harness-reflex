@@ -3417,6 +3417,15 @@ window.__ModuleLoader__.load({
 			        const newName = now.name.trim();
 			        if (newName.length === 0 || newName === oldName)
 			            continue;
+			        // A collision is checked *first*, and independently of the key: two rows
+			        // landing on one path is a lost key even when the renamed row restated its
+			        // own, because the row that already owned the name loses its key to the
+			        // overwrite — and the user touched no field of it.
+			        const claimants = (nextByName.get(newName) ?? []).filter((row) => savedIds.has(row.id) && row.id !== now.id);
+			        if (claimants.length > 0) {
+			            blocked.push({ from: oldName, to: newName, reason: 'joined-occupied-path' });
+			            continue;
+			        }
 			        // The draft says what the new path holds, so nothing is silent here. Note
 			        // that a clear is *not* a loss: the user asked for exactly that.
 			        if (now.apiKey.trim().length > 0) {
@@ -3433,11 +3442,6 @@ window.__ModuleLoader__.load({
 			        // authoritative fact the row renders its placeholder from.
 			        if (!was.apiKeyFromProfile)
 			            continue;
-			        const claimants = (nextByName.get(newName) ?? []).filter((row) => savedIds.has(row.id) && row.id !== now.id);
-			        if (claimants.length > 0) {
-			            blocked.push({ from: oldName, to: newName, reason: 'joined-occupied-path' });
-			            continue;
-			        }
 			        // A swap: some other saved row moved onto `oldName`. Both directions of the
 			        // exchange would otherwise be described as a plain rename of a row whose key
 			        // is not the one that ends up at the new path.

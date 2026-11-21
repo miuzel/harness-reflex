@@ -292,3 +292,91 @@ test('connectionTarget projects one profile and nothing else', () => {
   assert.equal(bare.baseUrl, undefined);
   assert.equal(bare.backend, 'jev', 'the implementation fallback is the only inherited fact');
 });
+
+//#region switching the selected model (g-066 criterion 2)
+
+/**
+ * The model the *runtime* would send for a document.
+ *
+ * These tests exist because the runtime and the probe must read one field: a
+ * selection that changes what `systemOne.model` resolves to is a selection that
+ * changes the very next request.
+ * @param systemOne - the authored block.
+ * @returns the resolved model id, or `undefined`.
+ */
+function runtimeModel(systemOne: Parameters<typeof resolveSystemOneConfig>[1]): string | undefined {
+  return resolveSystemOneConfig('jev', systemOne).model;
+}
+
+test('switching the selected model changes what the runtime sends, without touching anything else', () => {
+  const profile = { baseUrl: 'http://gw', modelIds: ['a', 'b', 'c'], timeoutMs: 900 };
+  assert.equal(runtimeModel({ active: 'p', profiles: { p: { ...profile, selectedModel: 'a' } } }), 'a');
+  assert.equal(runtimeModel({ active: 'p', profiles: { p: { ...profile, selectedModel: 'b' } } }), 'b');
+  assert.equal(runtimeModel({ active: 'p', profiles: { p: { ...profile, selectedModel: 'c' } } }), 'c');
+  // Everything that is not the model is unchanged by the switch: the switch is
+  // one field, not a re-declaration of the connection.
+  const base = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: { ...profile, selectedModel: 'a' } } });
+  const switched = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: { ...profile, selectedModel: 'b' } } });
+  assert.equal(switched.baseUrl, base.baseUrl);
+  assert.equal(switched.timeoutMs, base.timeoutMs);
+  assert.deepEqual(switched.profiles?.p.modelIds, ['a', 'b', 'c'], 'the list is the same list');
+});
+
+test('switching the selection also switches what the connection test probes', () => {
+  // The single rule of criterion 2: one selected model, read by the runtime and
+  // by the probe. A test button that probed a different id would report on a
+  // request the plugin never sends.
+  for (const selectedModel of ['a', 'b']) {
+    const resolved = resolveSystemOneConfig('jev', {
+      active: 'p',
+      profiles: { p: { baseUrl: 'http://gw', modelIds: ['a', 'b'], selectedModel } }
+    });
+    const target = connectionTarget(resolved, 'p', resolved.profiles!.p);
+    assert.equal(target.model, selectedModel, 'the probe tests the selected model');
+    assert.equal(resolved.model, target.model, 'the runtime and the probe read the same field');
+  }
+});
+
+test('an inactive profile does not affect what the runtime sends', () => {
+  // Only the active profile connects: a second profile — however many models it
+  // offers, whatever it selects — cannot leak into the running connection.
+  const resolved = resolveSystemOneConfig('jev', {
+    active: 'active',
+    profiles: {
+      active: { baseUrl: 'http://a', modelIds: ['m1', 'm2'], selectedModel: 'm1' },
+      idle: { baseUrl: 'http://b', modelIds: ['x', 'y'], selectedModel: 'y' }
+    }
+  });
+  assert.equal(resolved.model, 'm1', 'the active profile decides');
+  assert.equal(resolved.baseUrl, 'http://a', 'and so does its address');
+  // ... while the inactive row still *describes* itself honestly when asked.
+  const idle = connectionTarget(resolved, 'idle', resolved.profiles!.idle);
+  assert.equal(idle.model, 'y');
+  assert.equal(idle.baseUrl, 'http://b');
+});
+
+test('an invalid selection degrades to "no model", never to a different one', () => {
+  // The three ways a selection can be unusable, each answered the same way.
+  const cases: { label: string; profile: Record<string, unknown> }[] = [
+    { label: 'not in the list', profile: { modelIds: ['a', 'b'], selectedModel: 'zzz' } },
+    { label: 'list emptied under the selection', profile: { modelIds: [], selectedModel: 'a' } },
+    { label: 'legacy id replaced', profile: { model: 'a', selectedModel: 'b' } }
+  ];
+  for (const { label, profile } of cases) {
+    const resolved = resolveSystemOneConfig('jev', { active: 'p', profiles: { p: profile as never } });
+    assert.equal(resolved.model, undefined, `${label}: nothing may be sent`);
+    assert.equal(resolved.activeProfileModelMissing, true, `${label}: the panel must be able to say why`);
+    // The rest of the connection still resolves: the model is the broken part,
+    // and refusing the whole activation would take every tool down for it.
+    assert.equal(resolved.unconfigured, undefined, `${label}: the connection itself is configured`);
+  }
+});
+
+test('a legacy connection keeps working and can still be given a selection', () => {
+  // The compatibility half of criterion 2: `model` alone is a one-entry list.
+  assert.equal(runtimeModel({ active: 'p', profiles: { p: { model: 'only' } } }), 'only');
+  // And naming that same id as the selection is a no-op, not a conflict.
+  assert.equal(runtimeModel({ active: 'p', profiles: { p: { model: 'only', selectedModel: 'only' } } }), 'only');
+});
+
+//#endregion

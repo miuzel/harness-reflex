@@ -279,7 +279,10 @@ ${body}
  */
 export function readSources(directory: string): BundleSource[] {
   const names = readdirSync(directory)
-    .filter((name) => name.endsWith('.js'))
+    // Tests are not browser modules. A `*.test.js` here would have to `require`
+    // `node:assert` / `node:test`, which no client bundle may do — and nothing
+    // imports them, so including one could only ever fail the build.
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.test.js'))
     .sort();
   if (names.length === 0) {
     throw new Error(`client-bundle: no compiled modules in ${directory} — run the client TypeScript build first`);

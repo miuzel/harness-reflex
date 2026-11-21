@@ -57,6 +57,38 @@ function loadModule(name: string): Record<string, any> {
   return module.exports;
 }
 
+/**
+ * A store whose panel snapshot reports a stored key for the active profile.
+ *
+ * `fromProfile` decides whether that key is a literal in the document (the only
+ * kind a rename can destroy) or one resolved from the environment variable the
+ * profile names.
+ * @param value - the settings document the form holds.
+ * @param fromProfile - whether the key is the document's own secret slot.
+ * @returns the store, its form, and the fetch log `makeStore` returns.
+ */
+function storeWithStoredKey(
+  value: Record<string, unknown>,
+  fromProfile = true
+): ReturnType<typeof makeStore> {
+  const routing = { enabled: false };
+  const form = fakeForm({ backend: 'jev', ...value, routing });
+  const fetched: string[] = [];
+  const profileName = String((value as any).systemOne?.active ?? '');
+  const snapshot = {
+    systemOne: { profiles: [{ name: profileName, apiKeyPresent: true, apiKeyFromProfile: fromProfile }] }
+  };
+  const store = new storeModule.PanelStore({
+    form: form.form,
+    fetch: async (url: string) => {
+      fetched.push(url);
+      return { ok: true, status: 200, json: async () => snapshot };
+    },
+    pollIntervalMs: 0
+  });
+  return { store, form, fetched };
+}
+
 const panel = loadModule('panel') as unknown as PanelModule;
 
 /** One profile row with the supplied overrides. */
@@ -246,6 +278,8 @@ interface StoreModule {
     testProfile(id: string, saved: ReadonlySet<string>): Promise<boolean>;
     save(): Promise<boolean>;
     reset(): void;
+    /** Re-read the panel snapshot; how key *presence* reaches the rows. */
+    refresh(): Promise<void>;
     dispose(): void;
   };
   draftFromForm(form: unknown): any;
@@ -788,3 +822,80 @@ test('renaming an inactive row leaves the activation where it is', async () => {
 });
 
 //#endregion
+
+test('a rename that would lose a stored key is refused before anything is written', async () => {
+  // Criterion 4 at the store: the guard is in `save`, not in the page's copy, so
+  // it holds for any caller — and it refuses *before* building ops, leaving the
+  // document untouched and the typed name in the draft.
+  //
+  // The key *presence* is driven the way production drives it: through the panel
+  // snapshot, which reports `apiKeyPresent` per profile (the page never sees a
+  // value). A hand-set `apiKeyPresent` on the draft would be erased by the next
+  // re-seed — which is exactly what a save does — so the fact has to come from
+  // the snapshot to survive.
+  const { store, form } = storeWithStoredKey({ systemOne: { active: 'old', profiles: { old: { model: 'm1' } } } });
+  await store.refresh();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'old')!;
+  assert.equal(saved.apiKeyPresent, true, 'the snapshot facts did not reach the row');
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) => (row.id === saved.id ? { ...row, name: 'renamed' } : row))
+    }
+  }));
+
+  assert.equal(await store.save(), false, 'the rename must be refused');
+  assert.deepEqual(plain(form.mutations), [], 'a refused rename wrote to the document');
+  const state = store.getState();
+  assert.ok(state.errors.includes('errProfileRenameKey'), `wrong reason: ${state.errors.join(',')}`);
+  assert.equal(state.errorValues.errProfileRenameKey, 'old → renamed', 'the message must name the row');
+  assert.notEqual(state.notice, 'saved');
+  // The draft is intact: the user's typed name is still there to be paired with
+  // a retyped key.
+  assert.ok(rows().some((row) => row.name === 'renamed'), 'the refused save discarded the rename');
+
+  // Retyping the key in that row makes the same save legal.
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) => (row.name === 'renamed' ? { ...row, apiKey: 'sk-retyped' } : row))
+    }
+  }));
+  assert.equal(await store.save(), true, `the retyped save went through: ${store.getState().errors}`);
+  const ops = (plain(form.mutations) as { ops: { op: string; path: string[]; value?: unknown }[] }[]).flatMap((mutation) => mutation.ops);
+  assert.ok(hasSubtreeUnset(ops, 'old'), 'the old subtree must still be retired');
+  const key = ops.find((op) => op.op === 'set' && op.path.join('.') === 'systemOne.profiles.renamed.apiKey');
+  assert.equal(key?.value, 'sk-retyped', 'the new path must receive the retyped key');
+});
+
+test('renaming an env-backed connection saves without asking for the key again', async () => {
+  // The other half of criterion 4: the guard must not block a rename that cannot
+  // lose anything, or every deployment using an environment variable would be
+  // unable to rename its connection.
+  const { store, form } = storeWithStoredKey(
+    { backend: 'jev', systemOne: { active: 'old', profiles: { old: { model: 'm1', apiKeyEnv: 'MY_KEY' } } } },
+    false
+  );
+  await store.refresh();
+  const rows = () => store.getState().draft.backend.profiles as any[];
+  const saved = rows().find((row) => row.name === 'old')!;
+  assert.equal(saved.apiKeyPresent, true, 'the environment resolved, so a key is present');
+  assert.equal(saved.apiKeyFromProfile, false, 'but it is not a stored literal');
+  store.edit((current) => ({
+    ...current,
+    backend: {
+      ...current.backend,
+      profiles: current.backend.profiles.map((row: any) => (row.id === saved.id ? { ...row, name: 'renamed' } : row))
+    }
+  }));
+  assert.equal(await store.save(), true, `an env-backed rename was refused: ${store.getState().errors}`);
+  const ops = (plain(form.mutations) as { ops: { op: string; path: string[] }[] }[]).flatMap((mutation) => mutation.ops);
+  assert.ok(hasSubtreeUnset(ops, 'old'), 'the old subtree is retired');
+  assert.ok(
+    ops.some((op) => op.op === 'set' && op.path.join('.') === 'systemOne.profiles.renamed.apiKeyEnv'),
+    'the variable name travels to the new path'
+  );
+});
