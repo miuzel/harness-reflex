@@ -43,6 +43,21 @@
  * plain in-memory object, and {@link Autosave.dispose} forgets it, so a reload
  * (a new client lifetime) starts from the Host.
  *
+ * ## Verification status
+ *
+ * The properties above are covered by deterministic tests only —
+ * `client-autosave.test.ts` drives the store and this queue against a
+ * hand-cranked clock, and `client-page.test.ts` renders the page through the
+ * same fake runtime. **None of this has been observed in a real DSH Web GUI**
+ * (`http://127.0.0.1:3080`): no bundle from this branch has been installed into
+ * a running profile, so the actual network timing of "the dialog closes and the
+ * write still goes out", the shell's Escape/overlay path, and the status line's
+ * layout with a long Host error are all unverified by observation. They are
+ * argued from the shell's contract (a section receives `{close}` and is
+ * unmounted on close, with no interception point) and pinned by tests; they are
+ * not confirmed by eye. Treat the GUI behaviour as unmeasured until someone
+ * checks it in a scratch profile.
+ *
  * @module dsh-reflex/client/autosave
  */
 
@@ -81,6 +96,23 @@ export interface AutosaveEntry<T> {
   writable: boolean;
   /** The revision the draft was read at; the write's fence. */
   revision: number | undefined;
+  /**
+   * The draft this edit was made on top of — the page's draft immediately
+   * *before* the edit.
+   *
+   * This is what makes one edit's write name only that edit's change (g-069).
+   * The writer diffs `before` against `draft`, so a second field that merely
+   * happens to sit unsaved in the same draft (a draft kept from a failed write,
+   * a value the Host moved under the page) contributes nothing. Measured against
+   * the page's *seeded* copy instead, that field rides along in the same
+   * operation list — the review's finding against the first cut of this page.
+   */
+  before: T;
+  /**
+   * Whether this edit is a decision: it may carry a typing burst that has not
+   * paused yet in the same serialized write (see {@link Autosave.submit}).
+   */
+  decision?: boolean;
 }
 
 /** What the queue needs from the page. */
@@ -233,6 +265,19 @@ export class Autosave<T> {
   }
 
   /**
+   * The newest draft this queue knows the Host to hold.
+   *
+   * What a *retry* is measured against: the unsaved edit is exactly the distance
+   * between this and the draft the page carries, so the retry's write re-states
+   * that edit and nothing else — never a field the Host has moved past in the
+   * meantime (g-069).
+   * @returns the baseline, or `null` before the first seed.
+   */
+  get baselineDraft(): T | null {
+    return this.#lastWritten;
+  }
+
+  /**
    * Tell the queue what the Host holds right now.
    *
    * Called once per page mount: a fresh page has no write of its own to
@@ -246,17 +291,51 @@ export class Autosave<T> {
 
   /**
    * Note one edit.
+   *
+   * ## Text and decisions in the same draft (g-069)
+   *
+   * A keystroke and a decision share one draft, so "the decision writes at once"
+   * cannot mean "write the page and drop the text still waiting behind it" — that
+   * loses a typed edit — nor "send the text first and the decision after", which
+   * would put the decision behind a round trip it does not need. The rule is
+   * therefore explicit: **a decision flushes any valid local text waiting in the
+   * same draft as part of its own write**, and the queue's serialization keeps
+   * that one request ordered ahead of anything the user does next. Because the
+   * write diffs the pre-edit draft against the post-edit one, it carries exactly
+   * the fields the user touched, and nothing else.
+   *
+   * An **invalid** draft is still not written, by either path: the flush never
+   * bypasses validation, and a decision on an invalid draft waits like typing
+   * does (the page already lists what is wrong with it).
    * @param entry - the draft, its validation and its revision.
    * @param mode - `immediate` for a decision, `text` for typing.
    * @returns settles when this change has been written or given up on; never rejects.
    */
   submit(entry: AutosaveEntry<T>, mode: AutosaveMode): Promise<boolean> {
-    this.#pending = entry;
-    this.#failure = null;
-    if (mode === 'text' && !this.#disposed) {
+    const decision = mode === 'immediate' || entry.decision === true;
+    if (!decision) {
+      // Typing coalesces: the newer draft replaces the waiting one, but the entry
+      // keeps the *oldest* pending `before`, so the eventual write still names
+      // every field this burst touched — not only the last keystroke's (g-069).
+      const waiting = this.#pending;
+      if (waiting !== null) entry = { ...entry, before: waiting.before };
+      this.#pending = entry;
+      this.#failure = null;
+      if (this.#disposed) {
+        // The page is gone and no timer will fire: write what was typed.
+        this.#cancelTimer();
+        return this.#drain();
+      }
       this.#arm();
       return Promise.resolve(false);
     }
+    // A decision supersedes a typing burst that has not been written yet, and
+    // carries it: the queued entry is replaced by one that states both edits,
+    // measured from the oldest pending baseline so the burst's fields are kept.
+    const waiting = this.#pending;
+    if (waiting !== null) entry = { ...entry, before: waiting.before };
+    this.#pending = entry;
+    this.#failure = null;
     this.#cancelTimer();
     return this.#drain();
   }

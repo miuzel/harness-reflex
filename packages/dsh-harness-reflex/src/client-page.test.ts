@@ -322,6 +322,12 @@ async function settle(): Promise<void> {
  * @param tree - the tree to re-render if the write changed the page.
  * @returns the rendered tree after the pause was reached.
  */
+/** The paths one recorded write named, in order. */
+function writtenPaths(mutation: { ops: unknown } | undefined): string[] {
+  const ops = plain(mutation?.ops) as { op: string; path: string[]; value?: unknown }[];
+  return ops.map((op) => op.path.join('.'));
+}
+
 async function flushAutosave(mounted: Mounted, tree: unknown): Promise<unknown> {
   let rendered = tree;
   // The page arms two kinds of timer: the metrics poll (4000 ms, the store's
@@ -3336,7 +3342,7 @@ test('a connection listing several models offers one radio group with exactly on
   mounted.unmount();
 });
 
-test('choosing another model writes nothing, and a save writes it as the selected model', async () => {
+test('choosing another model saves at once as the selected model, and nothing else', async () => {
   const { form, mutations } = settingsForm(MULTI_MODEL);
   const mounted = await mountPanel({ facts: multiModelFacts(), form });
   openTab(mounted.tree, 'System 1 后端');
@@ -3572,17 +3578,6 @@ test('a failed save keeps the typed name, so the draft is never lost', async () 
 
 //#region autosave: the page saves after the edit, and survives being closed (g-069)
 
-/**
- * Open the same settings page again, as reopening the dialog does.
- *
- * The bundle keeps one autosave queue per settings namespace for the whole
- * client lifetime, so a second mount of the *same* namespace resumes it — which
- * is exactly the behaviour these tests are about.
- */
-async function reopen(options: { facts: PanelRuntimeFacts; form: Record<string, unknown> }): Promise<Mounted> {
-  return mountPanel(options);
-}
-
 test('the page offers no Save button, and a switch saves without one', async () => {
   const { form, mutations } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(true), form });
@@ -3697,6 +3692,91 @@ test('a failed save says why, keeps the edit, and offers retry and discard', asy
   for (let pass = 0; pass < 3; pass += 1) tree = await mounted.runtime.flush();
   assert.equal(mutations.length, 2, 'the retry did not write');
   assert.ok(textOf(tree).includes('已保存'), 'a successful retry is not acknowledged');
+  mounted.unmount();
+});
+
+test('typing then a switch: the switch flushes the waiting text in one write, naming both', async () => {
+  // The page-level contract for the ordering that lost a decision in review: a
+  // switch (a decision) pressed while typing has not paused yet carries that
+  // typing in the same write — and that write names the two fields the user
+  // touched, nothing else.
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  type(inputElement(tree, '工具名前缀'), 'rv_then_switch');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 0, 'a keystroke wrote before its pause');
+
+  // The switch lives on another tab; switching tabs is not an edit, and the
+  // pending text must survive it.
+  openTab(mounted.tree, '虚拟 Provider');
+  tree = await mounted.runtime.flush();
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+
+  assert.equal(mutations.length, 1, 'the switch did not write, or wrote twice');
+  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.deepEqual(
+    writtenPaths(mutations[0]).sort(),
+    ['routing', 'toolPrefix'],
+    'the write did not name exactly the fields the user touched'
+  );
+  assert.ok(
+    ops.some((op) => op.path.join('.') === 'toolPrefix' && op.value === 'rv_then_switch'),
+    'the switch dropped the typed text it flushed'
+  );
+  mounted.unmount();
+});
+
+test('a switch pressed before any typing writes alone, and the typing follows its own pause', async () => {
+  // The other ordering: the decision is not delayed by a pause it does not have,
+  // and the typing after it reaches the Host at its own pause.
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '虚拟 Provider');
+  let tree = await mounted.runtime.flush();
+
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'the switch did not write at once');
+  assert.deepEqual(writtenPaths(mutations[0]), ['routing'], 'the switch wrote a field the user had not touched');
+
+  openTab(mounted.tree, 'System 1 后端');
+  tree = await mounted.runtime.flush();
+  type(inputElement(tree, '工具名前缀'), 'rv_after_switch');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'the typing wrote before its pause');
+
+  tree = await flushAutosave(mounted, tree);
+  assert.equal(mutations.length, 2, 'the typing after the switch was never written');
+  assert.deepEqual(writtenPaths(mutations[1]), ['toolPrefix'], 'the typing wrote a field other than the one typed');
+  mounted.unmount();
+});
+
+test('a long failure reason is shortened in the status line, and kept whole in its tooltip', async () => {
+  // The Host's own message reaches the page unbounded; the status line must stay a
+  // line. The full text is available on hover rather than thrown away silently.
+  const settings = settingsForm(AUTHORED);
+  const { form } = settings;
+  const gate = settings.hold();
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '虚拟 Provider');
+  let tree = await mounted.runtime.flush();
+
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  const long = `host exploded: ${'y'.repeat(500)}`;
+  gate.reject(new Error(long));
+  for (let pass = 0; pass < 3; pass += 1) tree = await mounted.runtime.flush();
+
+  const text = textOf(tree);
+  assert.ok(text.includes('自动保存失败'), 'the failure is not reported');
+  assert.equal(text.includes(long), false, 'the status line drew the whole Host message');
+  // The whole reason survives as the hover text on the shortened line.
+  const titled = elements(tree).find((element) => element.props['title'] === long);
+  assert.ok(titled !== undefined, 'the full reason is not kept for the tooltip');
   mounted.unmount();
 });
 

@@ -52,6 +52,21 @@ window.__ModuleLoader__.load({
 			 * plain in-memory object, and {@link Autosave.dispose} forgets it, so a reload
 			 * (a new client lifetime) starts from the Host.
 			 *
+			 * ## Verification status
+			 *
+			 * The properties above are covered by deterministic tests only —
+			 * `client-autosave.test.ts` drives the store and this queue against a
+			 * hand-cranked clock, and `client-page.test.ts` renders the page through the
+			 * same fake runtime. **None of this has been observed in a real DSH Web GUI**
+			 * (`http://127.0.0.1:3080`): no bundle from this branch has been installed into
+			 * a running profile, so the actual network timing of "the dialog closes and the
+			 * write still goes out", the shell's Escape/overlay path, and the status line's
+			 * layout with a long Host error are all unverified by observation. They are
+			 * argued from the shell's contract (a section receives `{close}` and is
+			 * unmounted on close, with no interception point) and pinned by tests; they are
+			 * not confirmed by eye. Treat the GUI behaviour as unmeasured until someone
+			 * checks it in a scratch profile.
+			 *
 			 * @module dsh-reflex/client/autosave
 			 */
 			Object.defineProperty(exports, "__esModule", { value: true });
@@ -171,6 +186,18 @@ window.__ModuleLoader__.load({
 			        return this.#failure;
 			    }
 			    /**
+			     * The newest draft this queue knows the Host to hold.
+			     *
+			     * What a *retry* is measured against: the unsaved edit is exactly the distance
+			     * between this and the draft the page carries, so the retry's write re-states
+			     * that edit and nothing else — never a field the Host has moved past in the
+			     * meantime (g-069).
+			     * @returns the baseline, or `null` before the first seed.
+			     */
+			    get baselineDraft() {
+			        return this.#lastWritten;
+			    }
+			    /**
 			     * Tell the queue what the Host holds right now.
 			     *
 			     * Called once per page mount: a fresh page has no write of its own to
@@ -183,17 +210,53 @@ window.__ModuleLoader__.load({
 			    }
 			    /**
 			     * Note one edit.
+			     *
+			     * ## Text and decisions in the same draft (g-069)
+			     *
+			     * A keystroke and a decision share one draft, so "the decision writes at once"
+			     * cannot mean "write the page and drop the text still waiting behind it" — that
+			     * loses a typed edit — nor "send the text first and the decision after", which
+			     * would put the decision behind a round trip it does not need. The rule is
+			     * therefore explicit: **a decision flushes any valid local text waiting in the
+			     * same draft as part of its own write**, and the queue's serialization keeps
+			     * that one request ordered ahead of anything the user does next. Because the
+			     * write diffs the pre-edit draft against the post-edit one, it carries exactly
+			     * the fields the user touched, and nothing else.
+			     *
+			     * An **invalid** draft is still not written, by either path: the flush never
+			     * bypasses validation, and a decision on an invalid draft waits like typing
+			     * does (the page already lists what is wrong with it).
 			     * @param entry - the draft, its validation and its revision.
 			     * @param mode - `immediate` for a decision, `text` for typing.
 			     * @returns settles when this change has been written or given up on; never rejects.
 			     */
 			    submit(entry, mode) {
-			        this.#pending = entry;
-			        this.#failure = null;
-			        if (mode === 'text' && !this.#disposed) {
+			        const decision = mode === 'immediate' || entry.decision === true;
+			        if (!decision) {
+			            // Typing coalesces: the newer draft replaces the waiting one, but the entry
+			            // keeps the *oldest* pending `before`, so the eventual write still names
+			            // every field this burst touched — not only the last keystroke's (g-069).
+			            const waiting = this.#pending;
+			            if (waiting !== null)
+			                entry = { ...entry, before: waiting.before };
+			            this.#pending = entry;
+			            this.#failure = null;
+			            if (this.#disposed) {
+			                // The page is gone and no timer will fire: write what was typed.
+			                this.#cancelTimer();
+			                return this.#drain();
+			            }
 			            this.#arm();
 			            return Promise.resolve(false);
 			        }
+			        // A decision supersedes a typing burst that has not been written yet, and
+			        // carries it: the queued entry is replaced by one that states both edits,
+			        // measured from the oldest pending baseline so the burst's fields are kept.
+			        const waiting = this.#pending;
+			        if (waiting !== null)
+			            entry = { ...entry, before: waiting.before };
+			        this.#pending = entry;
+			        this.#failure = null;
 			        this.#cancelTimer();
 			        return this.#drain();
 			    }
@@ -4130,6 +4193,14 @@ window.__ModuleLoader__.load({
 			    /** Revision a queued write is fenced by, set only while it runs. */
 			    #revisionForWrite;
 			    /**
+			     * The draft a queued write is diffed against, set only while it runs.
+			     *
+			     * `null` means "diff against the Host's document" — the explicit page and
+			     * every direct `save()` caller. A queued autosave sets it to the draft its edit
+			     * was made on, so the operation list names exactly that edit's paths (g-069).
+			     */
+			    #diffBase = null;
+			    /**
 			     * The page's draft when a queued write started, if it was newer than the draft
 			     * that write carried. Re-applied after every re-seed the write triggers, so a
 			     * slow answer can never land over typing that came after it (g-069).
@@ -4437,14 +4508,19 @@ window.__ModuleLoader__.load({
 			            const body = (await response.json());
 			            if (this.#disposed)
 			                return;
-			            const dirty = (0, panel_1.dirtyGroups)(this.#state.original, this.#state.draft).length > 0;
-			            if (!dirty) {
-			                const enhanced = (0, panel_1.draftFromSnapshot)(body, this.#state.draft);
-			                this.#foldReseed(enhanced, { phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
-			            }
-			            else {
-			                this.#set({ phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
-			            }
+			            // The Host's document is folded into the state on every read (g-069), not
+			            // only while the page is clean. `original` is what the dirty badge, the
+			            // "the Host already holds this" test and every write's operation list are
+			            // measured against, and the old `if (!dirty)` gate kept it frozen at the
+			            // value the page was seeded with for the whole mount whenever a draft
+			            // stayed dirty — so a field the Host moved in the meantime went unnoticed,
+			            // and the page could later write its stale value back over it.
+			            //
+			            // The user's draft still wins: `#foldReseed` keeps a newer draft (typing
+			            // behind a running write, a draft kept from a failed write) on top of the
+			            // seed, and re-seeds the draft from the Host only when nothing is pending.
+			            const seed = (0, panel_1.draftFromSnapshot)(body, this.#state.draft);
+			            this.#foldReseed(seed, { phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
 			        }
 			        catch (error) {
 			            if (this.#disposed)
@@ -4483,10 +4559,11 @@ window.__ModuleLoader__.load({
 			     *   a keystroke.
 			     */
 			    edit(mutate, mode = 'immediate') {
-			        const draft = this.#followRenamedActivation(this.#state.draft, mutate(this.#state.draft));
+			        const before = this.#state.draft;
+			        const draft = this.#followRenamedActivation(before, mutate(before));
 			        const { errors, values } = (0, panel_1.validateDraft)(draft);
 			        this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
-			        this.#autosave(draft, errors, mode);
+			        this.#autosave(draft, errors, mode, before);
 			    }
 			    /**
 			     * Hand one edited draft to the client's queue.
@@ -4497,15 +4574,19 @@ window.__ModuleLoader__.load({
 			     * @param draft - the draft to save.
 			     * @param errors - its validation problems (an invalid draft waits).
 			     * @param mode - how the edit is spaced.
+			     * @param before - the draft this edit was made on; the write carries only what
+			     *   changed between the two (g-069).
 			     */
-			    #autosave(draft, errors, mode) {
+			    #autosave(draft, errors, mode, before) {
 			        if (!this.#autosaveMode)
 			            return;
 			        const entry = {
 			            draft,
+			            before,
 			            errors,
 			            writable: this.#state.writable,
-			            revision: this.#state.revision
+			            revision: this.#state.revision,
+			            decision: mode === 'immediate'
 			        };
 			        const queue = this.#queueForClient();
 			        // What the page holds at the moment of the edit is the newest draft there is;
@@ -4544,8 +4625,19 @@ window.__ModuleLoader__.load({
 			     */
 			    async retryAutosave() {
 			        const { draft, errors } = this.#state;
-			        const entry = { draft, errors, writable: this.#state.writable, revision: this.#state.revision };
+			        // A retry re-states the unsaved edit only: it is measured from the newest
+			        // draft the queue knows the Host to hold, so a field the Host moved while the
+			        // draft waited is left alone instead of being written back to the value the
+			        // page was seeded with (g-069). The page's own `original` is the fallback
+			        // before the queue has a baseline of its own.
 			        const queue = this.#queueForClient();
+			        const entry = {
+			            draft,
+			            before: queue.baselineDraft ?? this.#state.original,
+			            errors,
+			            writable: this.#state.writable,
+			            revision: this.#state.revision
+			        };
 			        this.#set({ autosave: { phase: 'saving', reason: null, retained: true } });
 			        const accepted = await queue.retry(entry);
 			        this.#settleAutosave(accepted);
@@ -4592,6 +4684,9 @@ window.__ModuleLoader__.load({
 			        // page. Recomputing it here would mistake the baseline of a chained write for
 			        // a newer edit (it is by definition older than the pending one).
 			        this.#revisionForWrite = entry.revision;
+			        // The paths this write names are the ones between the draft its edit was made
+			        // on and the draft it carries (g-069) — see `save`'s `base`.
+			        this.#diffBase = entry.before;
 			        this.#set({ draft: entry.draft, errors: [...entry.errors] });
 			        // The page held a *newer* draft than the one just written when the user kept
 			        // typing while the write ran. `save` re-seeds `draft` from the Host's answer
@@ -4610,6 +4705,7 @@ window.__ModuleLoader__.load({
 			        }
 			        finally {
 			            this.#revisionForWrite = undefined;
+			            this.#diffBase = null;
 			            restore();
 			            // `save` starts a live-metric read on success; that read re-seeds the draft
 			            // when nothing is dirty, so the restore is repeated after it settles — and
@@ -4638,8 +4734,19 @@ window.__ModuleLoader__.load({
 			     */
 			    #foldReseed(seeded, extra = {}) {
 			        // A draft adopted from a failed write is an unsaved edit that outranks every
-			        // answer until it is written or discarded (g-069).
-			        const newer = this.#newerDraft ?? this.#owner.retained?.draft ?? null;
+			        // answer until it is written or discarded (g-069) — unconditionally, not only
+			        // when it differs from the seed. A failed write whose *own* baseline was
+			        // already up to date leaves `seeded` equal to the kept draft, and comparing
+			        // the two then drops the draft the user still has to retry.
+			        const kept = this.#owner.retained?.draft ?? null;
+			        if (kept !== null) {
+			            const validation = (0, panel_1.validateDraft)(kept);
+			            this.#set({ ...extra, original: seeded, draft: kept, errors: validation.errors, errorValues: validation.values });
+			            return;
+			        }
+			        // A draft newer than the running write (typing that arrived while it ran) is
+			        // kept on top of the seed while it still says something the seed does not.
+			        const newer = this.#newerDraft;
 			        if (newer !== null && this.#differsFrom(seeded, newer)) {
 			            const validation = (0, panel_1.validateDraft)(newer);
 			            this.#set({ ...extra, original: seeded, draft: newer, errors: validation.errors, errorValues: validation.values });
@@ -4857,6 +4964,13 @@ window.__ModuleLoader__.load({
 			     */
 			    async save() {
 			        const { draft, original } = this.#state;
+			        // What this write is diffed against. The button and every other caller diff
+			        // against the Host's document (`original`, "make the Host match this page");
+			        // a queued autosave diffs against the draft its edit was made on, so the
+			        // request names exactly the paths that edit touched (g-069). A field the page
+			        // never touched therefore cannot appear in the operation list — not even a
+			        // gate's segments or a value the Host moved under the page.
+			        const base = this.#diffBase ?? original;
 			        // The button is disabled for a read-only document; refusing here as well keeps
 			        // every other caller of `save()` (a keyboard shortcut, auto-save) from
 			        // writing a document the Host said it will not accept.
@@ -4873,6 +4987,10 @@ window.__ModuleLoader__.load({
 			        // built — while a renamed row would lose a stored key that the draft does
 			        // not restate, so the user retypes it instead of finding out at the next
 			        // auth failure. `planRenameSecrets` documents each case.
+			        // The rename rule always reads the Host's document, never a narrower diff
+			        // base: it is about what a *rename* would destroy on the Host, and a row the
+			        // page has not touched since its last write is still retired by the same
+			        // operation list (`retiredProfileNames` compares rows by identity).
 			        const secrets = (0, rename_secrets_1.planRenameSecrets)(original, draft);
 			        if (secrets.blocked.length > 0) {
 			            const rows = secrets.blocked.map((entry) => `${entry.from} → ${entry.to}`).join(', ');
@@ -4886,7 +5004,7 @@ window.__ModuleLoader__.load({
 			        }
 			        // The raw user layer is passed so a group write keeps the keys this page
 			        // never rendered instead of replacing the whole section with them dropped.
-			        const ops = (0, panel_1.diffDraft)(original, draft, this.#options.form.getSnapshot().user);
+			        const ops = (0, panel_1.diffDraft)(base, draft, this.#options.form.getSnapshot().user);
 			        if (ops.length === 0) {
 			            // "Nothing to write" is only "clean" when the draft really is what the Host
 			            // holds. An unnamed row contributes no op on either side of the diff, so a
@@ -5016,28 +5134,25 @@ window.__ModuleLoader__.load({
 			        if (this.#state.confirmingClear)
 			            this.#set({ confirmingClear: false });
 			    }
-			    /** Fold a Host settings-section change into the state. */
+			    /**
+			     * Fold a Host settings-section change into the state.
+			     *
+			     * The Host's document is always recorded as the baseline (`original`) and its
+			     * status/revision followed, but the *draft* is decided by {@link #foldReseed}'s
+			     * one rule: a draft kept from a failed write outranks the Host until it is
+			     * written or discarded, typing newer than a running write stays on top, and
+			     * only a page with neither takes the Host's document as its own (g-069).
+			     *
+			     * Both branches used to be spelled out here, and the clean one re-seeded the
+			     * draft unconditionally — which dropped a kept draft whenever the Host's
+			     * document happened to equal it.
+			     */
 			    #adoptForm() {
 			        if (this.#disposed)
 			            return;
 			        const form = this.#options.form.getSnapshot();
-			        const dirty = (0, panel_1.dirtyGroups)(this.#state.original, this.#state.draft).length > 0;
-			        if (dirty) {
-			            // Keep the user's work, but follow the revision so the next write fences
-			            // against what the Host actually holds.
-			            this.#set({ configStatus: form.status, writable: form.writable, revision: form.revision });
-			            return;
-			        }
 			        const seeded = draftFromFormKeepingRows(form, this.#state.draft.backend.profiles);
-			        this.#set({
-			            configStatus: form.status,
-			            writable: form.writable,
-			            revision: form.revision,
-			            original: seeded,
-			            draft: seeded,
-			            errors: [],
-			            errorValues: {}
-			        });
+			        this.#foldReseed(seeded, { configStatus: form.status, writable: form.writable, revision: form.revision });
 			    }
 			    /** Schedule the next poll, unless polling is disabled. */
 			    #schedule() {
@@ -5596,8 +5711,13 @@ window.__ModuleLoader__.load({
 			    // is doing — waiting for a pause, saving, saved — and, when a write failed,
 			    // why, with the retry and the discard that go with a kept draft.
 			    const autosave = state.autosave;
+			    // A failure line has to stay a line: the reason is whatever the Host or the
+			    // network said, and a stack-trace-shaped message would push the status bar off
+			    // the page. The full text stays in the state — this only bounds what is drawn.
+			    const reasonText = autosave.reason ?? '—';
+			    const shownReason = reasonText.length > 160 ? `${reasonText.slice(0, 159)}…` : reasonText;
 			    const autosaveLine = autosave.phase === 'failed'
-			        ? (0, react_1.createElement)('span', { style: { ...S.errors, 'data-autosave': 'failed' } }, (0, react_1.createElement)('span', null, `${t('autosaveFailed')}: ${autosave.reason ?? '—'}`), Button({ label: t('autosaveRetry'), small: true, disabled: !canWrite, onClick: () => void store.retryAutosave() }), Button({ label: t('autosaveDiscard'), small: true, kind: 'danger', disabled: !canWrite, onClick: () => store.discardRetained() }))
+			        ? (0, react_1.createElement)('span', { style: { ...S.errors, 'data-autosave': 'failed' } }, (0, react_1.createElement)('span', { title: reasonText }, `${t('autosaveFailed')}: ${shownReason}`), Button({ label: t('autosaveRetry'), small: true, disabled: !canWrite, onClick: () => void store.retryAutosave() }), Button({ label: t('autosaveDiscard'), small: true, kind: 'danger', disabled: !canWrite, onClick: () => store.discardRetained() }))
 			        : autosave.phase === 'idle'
 			            ? null
 			            : (0, react_1.createElement)('span', { style: S.hint, 'data-autosave': autosave.phase }, t(autosave.phase === 'pending'

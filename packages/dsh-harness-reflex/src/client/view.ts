@@ -689,12 +689,17 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
   // is doing — waiting for a pause, saving, saved — and, when a write failed,
   // why, with the retry and the discard that go with a kept draft.
   const autosave = state.autosave;
+  // A failure line has to stay a line: the reason is whatever the Host or the
+  // network said, and a stack-trace-shaped message would push the status bar off
+  // the page. The full text stays in the state — this only bounds what is drawn.
+  const reasonText = autosave.reason ?? '—';
+  const shownReason = reasonText.length > 160 ? `${reasonText.slice(0, 159)}…` : reasonText;
   const autosaveLine =
     autosave.phase === 'failed'
       ? h(
           'span',
           { style: { ...S.errors, 'data-autosave': 'failed' } },
-          h('span', null, `${t('autosaveFailed')}: ${autosave.reason ?? '—'}`),
+          h('span', { title: reasonText }, `${t('autosaveFailed')}: ${shownReason}`),
           Button({ label: t('autosaveRetry'), small: true, disabled: !canWrite, onClick: () => void store.retryAutosave() }),
           Button({ label: t('autosaveDiscard'), small: true, kind: 'danger', disabled: !canWrite, onClick: () => store.discardRetained() })
         )

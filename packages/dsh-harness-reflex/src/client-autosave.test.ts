@@ -618,6 +618,378 @@ test('autosave reuses the page write path: validation, secrets and the revision 
   store.dispose();
 });
 
+//#region text and decisions in one draft: the write names only what was edited
+
+/**
+ * The paths a write named, in the order they were sent.
+ *
+ * Copied through JSON before it is compared: the ops were built inside the VM the
+ * module runs in, so their arrays carry that realm's prototypes and
+ * `deepEqual` would refuse an array with identical contents.
+ */
+function pathsOf(write: Write | undefined): string[] {
+  const paths = (write?.ops ?? []).map((op) => op.path.join('.'));
+  return JSON.parse(JSON.stringify(paths)) as string[];
+}
+
+/**
+ * A selection in the routing block — a *decision*, not typing.
+ *
+ * Deliberately in a different group from {@link typePrefix}: the tests below are
+ * about whether one edit's write carries another edit's field.
+ */
+function toggleRouting(store: AnyStore, enabled: boolean): void {
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing, enabled } }));
+}
+
+test('typing that has not paused is flushed by the decision, in one write, once', async () => {
+  // The contract the review asked to be explicit (g-069): a decision may carry a
+  // typing burst waiting behind the same draft — but it must carry it *exactly
+  // once*, and the write must name both fields the user actually touched.
+  const { store, form, clock } = makeStore({ namespace: namespace('flush-decision') });
+
+  typePrefix(store, 'rv_typed');
+  assert.equal(clock.armed().length, 1, 'typing did not arm its pause');
+  assert.equal(form.writes.length, 0, 'typing wrote before its pause');
+
+  toggleRouting(store, false);
+  await settle();
+  assert.equal(form.writes.length, 1, 'the decision did not write');
+  assert.deepEqual(
+    pathsOf(form.writes[0]).sort(),
+    ['routing', 'toolPrefix'],
+    'the write did not name exactly the two fields the user edited'
+  );
+  const flush = form.writes[0]?.ops.find((op) => op.path.join('.') === 'toolPrefix');
+  assert.equal(flush?.value, 'rv_typed', 'the decision dropped the typing it flushed');
+  assert.equal(clock.armed().length, 0, 'the flushed burst left its pause armed, so it would be written again');
+
+  // The burst is not written a second time when its pause would have fired.
+  await settle();
+  assert.equal(form.writes.length, 1, 'the flushed typing was written again after the decision');
+  const host = storedDocument(form);
+  assert.equal(host.value.toolPrefix, 'rv_typed', 'the typed value did not reach the Host');
+  assert.equal(host.value.routing.enabled, false, 'the decision did not reach the Host');
+});
+
+test('a decision first, then typing: the decision lands alone and the typing follows at its pause', async () => {
+  // The other ordering. The decision is not held back by a pause it does not have,
+  // and the typing it raced is written afterwards rather than lost.
+  const { store, form, clock } = makeStore({ namespace: namespace('decision-then-text') });
+
+  toggleRouting(store, false);
+  await settle();
+  assert.equal(form.writes.length, 1, 'the decision did not write at once');
+  assert.deepEqual(pathsOf(form.writes[0]), ['routing'], 'the decision wrote a field the user had not touched');
+
+  typePrefix(store, 'rv_after');
+  await settle();
+  assert.equal(form.writes.length, 1, 'the typing wrote before its pause');
+  clock.fireLast();
+  await settle();
+  assert.equal(form.writes.length, 2, 'the typing behind the decision was never written');
+  assert.deepEqual(pathsOf(form.writes[1]), ['toolPrefix'], 'the typing wrote a field other than the one typed');
+  const host = storedDocument(form);
+  assert.equal(host.value.toolPrefix, 'rv_after');
+  assert.equal(host.value.routing.enabled, false);
+});
+
+test('each field edited in a burst of typing is written, not only the last one', async () => {
+  // Two typed fields coalesce into one write. The write is measured from the draft
+  // the burst started on, so it names both — measuring each keystroke from the
+  // previous one would drop every field but the last (g-069).
+  const { store, form, clock } = makeStore({ namespace: namespace('burst-two-fields') });
+
+  store.edit(
+    (draft: any) => ({ ...draft, backend: { ...draft.backend, profiles: draft.backend.profiles.map((row: any) => ({ ...row, timeoutMs: '9000' })) } }),
+    'text'
+  );
+  typePrefix(store, 'rv_two');
+  await settle();
+  assert.equal(form.writes.length, 0, 'a keystroke wrote before the pause');
+
+  clock.fireLast();
+  await settle();
+  assert.equal(form.writes.length, 1, 'the burst was not written once');
+  assert.deepEqual(pathsOf(form.writes[0]).sort(), ['systemOne.profiles.primary.timeoutMs', 'toolPrefix'], 'a field edited in the burst was dropped');
+  const host = storedDocument(form);
+  assert.equal(host.value.systemOne.profiles.primary.timeoutMs, 9000, 'the first typed field never reached the Host');
+  assert.equal(host.value.toolPrefix, 'rv_two', 'the last typed field never reached the Host');
+});
+
+test('a draft kept from a failed write does not ride along with a later decision', async () => {
+  // The hazard behind the review's M1 finding, in the form that outlives a reboot
+  // of the dialog: a draft the Host refused stays on the page for a retry. A later,
+  // unrelated decision must send only its own path — otherwise one click publishes
+  // a failed edit the user has not decided to retry.
+  //
+  // (A *typing burst* that has not paused yet is deliberately different: the
+  // decision flushes it, as documented on `Autosave.submit` and pinned by the
+  // flush test above.)
+  const { store, form, clock } = makeStore({ namespace: namespace('retained-not-carried') });
+
+  const gate = form.hold();
+  store.edit((draft: any) => ({ ...draft, runtime: { ...draft.runtime, pruneThreshold: '700' } }), 'text');
+  await settle();
+  clock.fireLast();
+  await settle();
+  gate.reject(new Error('host down'));
+  await settle();
+  assert.equal(store.getState().autosave.retained, true, 'the failed draft was not kept');
+  form.writes.length = 0;
+
+  toggleRouting(store, false);
+  await settle();
+  assert.equal(form.writes.length, 1, 'the decision did not write');
+  assert.deepEqual(
+    pathsOf(form.writes[0]),
+    ['routing'],
+    'the decision carried the draft the Host had refused, and the retry the user never asked for'
+  );
+  store.dispose();
+});
+
+test('no write ever names a field the user did not edit, in either ordering', async () => {
+  // The invariant behind all of the above, stated plainly: across both orderings of
+  // a decision and a burst, the union of what reached the Host is exactly the
+  // fields the user touched.
+  for (const decisionFirst of [true, false]) {
+    const ns = namespace(`only-touched-${String(decisionFirst)}`);
+    const { store, form, clock } = makeStore({ namespace: ns });
+    if (decisionFirst) {
+      toggleRouting(store, false);
+      await settle();
+      typePrefix(store, 'rv_touch');
+      await settle();
+      clock.fireLast();
+    } else {
+      typePrefix(store, 'rv_touch');
+      toggleRouting(store, false);
+    }
+    await settle();
+    const written = form.writes.flatMap((write) => pathsOf(write));
+    assert.deepEqual(
+      [...new Set(written)].sort(),
+      ['routing', 'toolPrefix'],
+      `a write named a field the user did not edit (decision first: ${String(decisionFirst)})`
+    );
+    store.dispose();
+  }
+});
+
+test('choosing a model with no other local edit writes exactly that one path', async () => {
+  // The row's selection is the one "immediate" edit whose write must stay a
+  // single narrow path: picking a model must not restate the list, another row, or
+  // any runtime field (g-069).
+  const { store, form } = makeStore({ namespace: namespace('precision-model') });
+  await settle();
+
+  store.edit((draft: any) => ({
+    ...draft,
+    backend: {
+      ...draft.backend,
+      profiles: draft.backend.profiles.map((row: any) => ({ ...row, selectedModel: 'jev-latest' }))
+    }
+  }));
+  await settle();
+  assert.equal(form.writes.length, 0, 'selecting the model the row already selects wrote');
+
+  store.edit((draft: any) => ({
+    ...draft,
+    backend: {
+      ...draft.backend,
+      profiles: draft.backend.profiles.map((row: any) => ({ ...row, modelIds: 'jev-latest\ngpt-x', selectedModel: 'gpt-x' }))
+    }
+  }));
+  await settle();
+  assert.equal(form.writes.length, 1, 'the selection did not write at once');
+  // The list and the selection are two paths of one row — and nothing else.
+  for (const path of pathsOf(form.writes[0])) {
+    assert.ok(
+      path.startsWith('systemOne.profiles.primary.'),
+      `the selection wrote a path outside the row: ${path}`
+    );
+  }
+});
+
+//#endregion
+
+//#region the Host moves while a draft is unsaved
+
+/**
+ * A form that refuses writes with a *fence*: a revision older than the document's
+ * is refused, which is what the Host does.
+ *
+ * The store's ordinary `makeForm` accepts anything, so a stale-revision write
+ * would silently succeed there and hide exactly the failure these tests are about.
+ */
+function makeFencedForm(value: unknown): ReturnType<typeof makeForm> {
+  const form = makeForm(value);
+  const raw = form.form['mutate'] as (ops: unknown, revision?: number) => Promise<boolean>;
+  let enforced = false;
+  form.form['mutate'] = async (ops: unknown, revision?: number) => {
+    if (!enforced) return raw(ops, revision);
+    const live = (form.form['getSnapshot'] as () => { revision: number })();
+    if (revision !== undefined && revision !== live.revision) return false;
+    return raw(ops, revision);
+  };
+  // Exposed for the tests: begin fencing once the fixture is set up.
+  (form as unknown as { enforce: () => void }).enforce = () => {
+    enforced = true;
+  };
+  return form;
+}
+
+/**
+ * Change one field on the Host, the way another window's save would.
+ *
+ * A full `form.push(replacedDocument)` is *not* the same event: replacing the whole
+ * document rewrites the very field the kept draft holds, which legitimately makes
+ * that draft obsolete. A Host that moved an unrelated field must leave the draft
+ * alive.
+ */
+function hostSetsField(form: ReturnType<typeof makeForm>, path: string, value: unknown): void {
+  const current = JSON.parse(JSON.stringify(storedDocument(form).value)) as Record<string, any>;
+  current[path] = value;
+  form.push(current);
+}
+
+/** The document the fixture's form is serving, typed for the tests below. */
+function storedDocument(form: ReturnType<typeof makeForm>): { value: Record<string, any> } {
+  return (form.form['getSnapshot'] as () => { value: Record<string, any> })();
+}
+
+test('a field the Host moved while a draft was unsaved is not written back to the old value', async () => {
+  // The constraint the review carried over: never let an old draft overwrite a
+  // newer Host setting. A failed write keeps a draft; the Host then moves on; the
+  // next edit must still name only its own field, and a retry must re-state only
+  // the unsaved edit.
+  const ns = namespace('host-moved');
+  const { store, form, clock } = makeStore({ namespace: ns });
+
+  // A typed edit whose pause has fired: the write is in flight when the Host
+  // refuses it, which is what leaves a draft behind.
+  const gate = form.hold();
+  typePrefix(store, 'rv_mine');
+  await settle();
+  clock.fireLast();
+  await settle();
+  gate.reject(new Error('host down'));
+  await settle();
+  assert.equal(store.getState().autosave.retained, true, 'the failed draft was not kept');
+
+  // The Host's document moves on (another window wrote `pruneThreshold`).
+  hostSetsField(form, 'pruneThreshold', 999);
+  await settle();
+  assert.equal(store.getState().original.runtime.pruneThreshold, '999', 'the page did not notice what the Host now holds');
+
+  // A retry re-states the unsaved edit and leaves the Host's newer value alone.
+  const accepted = await store.retryAutosave();
+  await settle();
+  assert.equal(accepted, true, 'the retry was refused');
+  const retry = form.writes[form.writes.length - 1];
+  assert.deepEqual(pathsOf(retry), ['toolPrefix'], 'the retry wrote a field the user had not edited');
+  const afterRetry = storedDocument(form);
+  assert.equal(afterRetry.value.pruneThreshold, 999, 'the retry reverted the Host to the stale value');
+  assert.equal(afterRetry.value.toolPrefix, 'rv_mine', 'the retry did not land the unsaved edit');
+  store.dispose();
+});
+
+test('an edit after the Host moved writes its own field and not the stale one', async () => {
+  // Same setup, but no retry: the user simply keeps working. The next write must
+  // not name `pruneThreshold` at all — the old draft's value would silently undo
+  // the Host's newer setting.
+  const ns = namespace('host-moved-edit');
+  const { store, form, clock } = makeStore({ namespace: ns });
+
+  const gate = form.hold();
+  typePrefix(store, 'rv_mine');
+  await settle();
+  clock.fireLast();
+  await settle();
+  gate.reject(new Error('nope'));
+  await settle();
+
+  hostSetsField(form, 'pruneThreshold', 999);
+  await settle();
+
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing, enabled: false } }));
+  await settle();
+  const write = form.writes[form.writes.length - 1];
+  assert.deepEqual(pathsOf(write), ['routing'], 'the edit wrote a stale field back over the Host');
+  const host = storedDocument(form);
+  assert.equal(host.value.pruneThreshold, 999, 'the Host value the page never touched was reverted');
+  store.dispose();
+});
+
+test('a write fenced by a revision the Host has moved past fails visibly and keeps the draft', async () => {
+  // A conflict, not a silent overwrite. The revision a write is fenced by is the
+  // one its draft was read at, so a Host that has moved on refuses it — the page
+  // must report that and keep the draft, never retry behind the user and never
+  // write anyway.
+  const ns = namespace('conflict');
+  const form = makeFencedForm(AUTHORED);
+  const { store, clock } = makeStore({ namespace: ns, form });
+  (form as unknown as { enforce: () => void }).enforce();
+
+  // The first write is held open, so the second edit queues behind it.
+  const gate = form.hold();
+  toggleRouting(store, false);
+  await settle();
+  assert.equal(form.writes.length, 1, 'the first write did not start');
+
+  typePrefix(store, 'rv_behind');
+  await settle();
+  assert.equal(form.writes.length, 1, 'the queued draft raced the write in flight');
+
+  // The Host's document advances (another window) while the first write is still
+  // open, so the queued draft was read at a revision that is now behind.
+  const moved = JSON.parse(JSON.stringify(AUTHORED)) as Record<string, any>;
+  moved.pruneThreshold = 999;
+  form.push(moved);
+  await settle();
+  gate.release();
+  await settle();
+  // The queued write ran (or was drained by the release) and the Host refused it.
+  if (clock.armed().length > 0) clock.fireLast();
+  await settle();
+
+  // The fence really was stale — otherwise this test would pass for the wrong
+  // reason (a write that simply succeeded).
+  const fenced = form.writes[form.writes.length - 1];
+  assert.ok(fenced !== undefined, 'the queued write was never sent');
+  const liveRevision = (form.form['getSnapshot'] as () => { revision: number })();
+  assert.notEqual(fenced.revision, liveRevision, 'the fixture never produced a stale revision, so nothing was fenced');
+
+  const state = store.getState();
+  assert.equal(state.autosave.phase, 'failed', 'a write fenced by a stale revision is not reported as a failure');
+  assert.equal(state.autosave.retained, true, 'a refused write did not keep its draft');
+  assert.ok(state.autosave.reason !== null, 'a refused write does not say why');
+  const host = storedDocument(form);
+  assert.equal(host.value.pruneThreshold, 999, 'a refused write still overwrote the Host');
+  // Nothing was lost: the typed draft is still on the page for a retry.
+  assert.equal(toolPrefix(store), 'rv_behind', 'the refused draft left the page');
+  store.dispose();
+});
+
+//#endregion
+
+test('a long failure reason is kept whole in state and bounded where it is drawn', async () => {
+  // The reason is the Host's or the network's own text, so its length is not this
+  // page's to assume. The state keeps it whole (a retry or a later tooltip may want
+  // it); the status line must not be redrawn around a novel.
+  const ns = namespace('long-reason');
+  const { store, form } = makeStore({ namespace: ns });
+  const gate = form.hold();
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing, enabled: false } }));
+  await settle();
+  const long = `host said: ${'x'.repeat(400)}`;
+  gate.reject(new Error(long));
+  await settle();
+  assert.equal(store.getState().autosave.reason, long, 'the failure reason was truncated in state, where it is the truth');
+  store.dispose();
+});
+
 test('no draft is ever kept in browser storage', async () => {
   // The claim g-069 must never break: an API key typed into a row reaches the
   // Host's settings API and nothing else. The client half is read as source so a
