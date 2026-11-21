@@ -289,6 +289,18 @@ export interface PanelSystemOneProfileView {
   apiKeyLocked?: boolean;
   timeoutMs?: number;
   backend?: string;
+  /** Every model id this connection offers, in authored order (g-066). */
+  modelIds?: string[];
+  /** The one model id in force for this connection: what the runtime and the probe use. */
+  selectedModel?: string;
+  /**
+   * `selectedModel` is not in {@link modelIds}.
+   *
+   * The row must say so: the runtime then sends no model at all rather than
+   * quietly running a different one, and a probe would test a request nobody
+   * selected. Absent when the selection is valid (or when none is named).
+   */
+  modelMissing?: boolean;
   /** Whether this is the profile in force. */
   active: boolean;
 }
@@ -338,11 +350,21 @@ export interface PanelSystemOneView {
   /** The authored `active` name, when one was authored. */
   activeProfile?: string;
   /**
-   * The authored `active` name matches no profile, so these settings are the flat
-   * block's. Surfaced as a warning rather than hidden: a typo must not look like
-   * a working configuration.
+   * The authored `active` name matches no profile. Surfaced as a warning rather
+   * than hidden: a typo must not look like a working configuration — and since
+   * g-066 it also means nothing connects.
    */
   activeProfileMissing: boolean;
+  /**
+   * Why nothing connects, when nothing does (g-066): no profiles, none
+   * activated, the active name missing, or only the pre-g-066 flat fields.
+   *
+   * Absent exactly when an active profile resolved, so the page renders its
+   * "unconfigured" state from this and never from a guess about the fields.
+   */
+  unconfigured?: 'no-active-profile' | 'no-profiles' | 'active-profile-missing' | 'legacy-config-required';
+  /** The active profile's selected model is not in its list; nothing runs. */
+  activeProfileModelMissing?: boolean;
   /**
    * Live gateway health, when the backend keeps any. Backends that answer every
    * call in-process (mock) omit it; the absence is not an outage.
@@ -637,14 +659,15 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
     const own = typeof profile.apiKey === 'string' && profile.apiKey.length > 0;
     return { present: own, fromProfile: own };
   };
-  // A row shows the connection it would *actually use*, so every field is the
-  // profile's own value merged over the flat block — the same precedence the
-  // runtime applies. Showing only authored fields would render a profile that
-  // inherits its address as a blank row, which reads as "not configured".
-  const flat = connectionTarget(systemOne, '', undefined);
+  // A row shows the connection it would *actually use*. Since g-066 that is the
+  // profile's own fields and nothing else — there is no block beneath it to
+  // inherit from — and the model shown is the *selected* one, the same value the
+  // runtime sends and the probe tests. A selection pointing outside `modelIds`
+  // projects no model plus `modelMissing`, so the row can say why.
   const profiles: PanelSystemOneProfileView[] = Object.entries(systemOne.profiles ?? {}).map(([name, profile]) => {
     const keys = keyFacts(name, profile);
-    const merged = connectionTarget(flat, name, profile);
+    const projected = connectionTarget(systemOne, name, profile);
+    const selectedOutsideList = profile.selectedModel !== undefined && !(profile.modelIds ?? []).includes(profile.selectedModel);
     return {
       name,
       active: systemOne.active === name,
@@ -652,11 +675,14 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
       apiKeyFromProfile: keys.fromProfile,
       ...(keys.variable === undefined ? {} : { apiKeyVariable: keys.variable }),
       ...(keys.locked === true ? { apiKeyLocked: true } : {}),
-      ...(merged.baseUrl === undefined ? {} : { baseUrl: merged.baseUrl }),
-      ...(merged.model === undefined ? {} : { model: merged.model }),
-      ...(merged.apiKeyEnv === undefined ? {} : { apiKeyEnv: merged.apiKeyEnv }),
-      ...(merged.timeoutMs === undefined ? {} : { timeoutMs: merged.timeoutMs }),
-      ...(merged.backend === undefined ? {} : { backend: merged.backend })
+      ...(projected.baseUrl === undefined ? {} : { baseUrl: projected.baseUrl }),
+      ...(projected.model === undefined ? {} : { model: projected.model }),
+      ...(projected.apiKeyEnv === undefined ? {} : { apiKeyEnv: projected.apiKeyEnv }),
+      ...(projected.timeoutMs === undefined ? {} : { timeoutMs: projected.timeoutMs }),
+      ...(projected.backend === undefined ? {} : { backend: projected.backend }),
+      ...(profile.modelIds === undefined ? {} : { modelIds: [...profile.modelIds] }),
+      ...(profile.selectedModel === undefined ? {} : { selectedModel: profile.selectedModel }),
+      ...(selectedOutsideList ? { modelMissing: true } : {})
     };
   });
   const resolvedCarriesKey = typeof systemOne.apiKey === 'string' && systemOne.apiKey.length > 0;
@@ -672,6 +698,8 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
     ...(facts.apiKeyLocked === true ? { apiKeyLocked: true } : {}),
     profiles,
     activeProfileMissing: systemOne.activeProfileMissing === true,
+    ...(systemOne.unconfigured === undefined ? {} : { unconfigured: systemOne.unconfigured }),
+    ...(systemOne.activeProfileModelMissing === true ? { activeProfileModelMissing: true } : {}),
     ...(facts.systemOneHealth === undefined ? {} : { health: { ...facts.systemOneHealth } }),
     ...(systemOne.active === undefined ? {} : { activeProfile: systemOne.active }),
     ...(systemOne.baseUrl === undefined ? {} : { baseUrl: systemOne.baseUrl }),

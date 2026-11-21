@@ -38,6 +38,7 @@ import {
   type ProfileDraft,
   type SettingsOp
 } from './panel';
+import { planRenameSecrets } from './rename-secrets';
 
 /** Pages of the panel. */
 export type PanelTab = 'overview' | 'routing' | 'effort' | 'backend' | 'interventions' | 'tools' | 'ledger' | 'guide';
@@ -143,15 +144,6 @@ export interface PanelState {
   noticeValues: Record<string, string> | null;
   /** Whether the next clear request is the confirming one. */
   confirmingClear: boolean;
-  /**
-   * Whether the flat connection block is expanded.
-   *
-   * Presentation only, and held here rather than in `useState` on purpose: the
-   * page's tabs are called as plain functions from `Body`, so giving one of them
-   * a hook would make the hook count depend on which tab is showing and React
-   * would reject the shifted sequence (#310).
-   */
-  flatOpen: boolean;
   /** Outcome of the last host-patch write, as the host reported it. */
   delegationWrite: DelegationWriteState | null;
   /**
@@ -241,7 +233,9 @@ function blankProfileRow(id: string): ProfileDraft {
     id,
     name: '',
     baseUrl: '',
-    model: '',
+    modelIds: '',
+    selectedModel: '',
+    legacyModelShape: false,
     apiKeyEnv: '',
     timeoutMs: '',
     backend: '',
@@ -346,7 +340,6 @@ export class PanelStore {
       notice: null,
       noticeValues: null,
       confirmingClear: false,
-      flatOpen: false,
       delegationWrite: null,
       probes: {}
     };
@@ -386,18 +379,22 @@ export class PanelStore {
    * resolved profile and only returns a classification. Each row owns its own
    * state slot, so a slow row cannot overwrite the answer a fast row just got.
    *
-   * @param profile - profile name, or `''` to probe the flat block / active profile.
+   * Only a **saved** profile can be tested: a probe reads the document the Host
+   * has, so a row that is not saved has nothing to test (g-062). An empty name
+   * is refused here as well as at the button, because the old empty name meant
+   * "probe the flat block" — a connection that no longer exists (g-066).
+   * @param profile - profile name.
    * @returns whether a result was recorded.
    */
   async testSystemOne(profile: string): Promise<boolean> {
-    const key = profile;
+    const key = profile.trim();
+    if (key.length === 0) return false;
     this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'testing' } } });
     try {
       const response = await this.#options.fetch(`${this.#basePath}${SYSTEMONE_TEST_PATH}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        // An empty name is simply omitted, which the Host reads as "the active one".
-        body: JSON.stringify(key.length === 0 ? {} : { profile: key })
+        body: JSON.stringify({ profile: key })
       });
       const body = (await response.json().catch(() => ({}))) as ProbeResultLike & { error?: string; detail?: string };
       if (this.#disposed) return false;
@@ -469,15 +466,6 @@ export class PanelStore {
   setTab(tab: PanelTab): void {
     if (this.#state.tab === tab) return;
     this.#set({ tab });
-  }
-
-  /**
-   * Expand or collapse the flat compatibility block.
-   * @param open - the new state of the disclosure.
-   */
-  setFlatOpen(open: boolean): void {
-    if (this.#state.flatOpen === open) return;
-    this.#set({ flatOpen: open });
   }
 
   /**
@@ -683,6 +671,23 @@ export class PanelStore {
     const validation = validateDraft(draft);
     if (!validation.ok) {
       this.#set({ errors: validation.errors, errorValues: validation.values, notice: null, noticeValues: null });
+      return false;
+    }
+    // Write-only keys are the one thing a rename can destroy without a trace
+    // (g-066): the secret cannot be restated by this page, and the Host retires
+    // the old subtree in the same save. The save is refused — before any op is
+    // built — while a renamed row would lose a stored key that the draft does
+    // not restate, so the user retypes it instead of finding out at the next
+    // auth failure. `planRenameSecrets` documents each case.
+    const secrets = planRenameSecrets(original, draft);
+    if (secrets.blocked.length > 0) {
+      const rows = secrets.blocked.map((entry) => `${entry.from} → ${entry.to}`).join(', ');
+      this.#set({
+        errors: ["errProfileRenameKey"],
+        errorValues: { errProfileRenameKey: rows },
+        notice: null,
+        noticeValues: null
+      });
       return false;
     }
     // The raw user layer is passed so a group write keeps the keys this page

@@ -52,11 +52,13 @@ export interface ReflexRoutingConfig {
 /**
  * One named System One connection profile.
  *
- * A profile is the same connection block as the flat fields below, plus a
- * write-only `apiKey`. The panel lists profiles, picks one as active, and tests
- * each connection without ever receiving the key: `apiKey` is a schema-declared
- * `role('secret')` slot, so DSH's structural redaction removes it from every
- * wire-boundary value and reports its *presence* through a sidecar instead.
+ * A profile **is** the connection (g-066): there is no block of last resort
+ * beside it, so every field the runtime needs is either stated here or read out
+ * of the environment by the backend. The panel lists profiles, picks one as
+ * active, and tests each connection without ever receiving the key: `apiKey` is
+ * a schema-declared `role('secret')` slot, so DSH's structural redaction removes
+ * it from every wire-boundary value and reports its *presence* through a
+ * sidecar instead.
  *
  * Legality: a profile name is a key of `systemOne.profiles`, so it may not be
  * empty, may not contain `.` (the settings-route path separator), and may not
@@ -65,8 +67,35 @@ export interface ReflexRoutingConfig {
 export interface ReflexSystemOneProfile {
   /** Base URL of the Jev gateway or the OpenAI-compatible logits endpoint. */
   baseUrl?: string;
-  /** Model id the backend asks for. */
+  /**
+   * The one legacy model id (pre-g-066 shape).
+   *
+   * A connection that authors this and nothing else keeps working untouched:
+   * {@link resolveSystemOneProfiles} treats it as a one-entry
+   * {@link modelIds} list. Authors spelling both is refused rather than guessed
+   * at, because the two say different things about which models exist.
+   */
   model?: string;
+  /**
+   * Every model id this connection may ask for (g-066).
+   *
+   * A list, not a single id, because one gateway serves several models behind
+   * one URL and key. {@link selectedModel} is the one the *runtime* and the
+   * *probe* use — the two read the same field, so testing a connection tests
+   * what the next decision actually sends.
+   */
+  modelIds?: string[];
+  /**
+   * Which of {@link modelIds} is in force.
+   *
+   * Absent means "the first one", which is what a one-model connection always
+   * resolves to. A name outside the list is *reported*
+   * ({@link ResolvedSystemOneConfig.activeProfileModelMissing}) and resolves to
+   * nothing instead of silently running a model nobody selected: quietly
+   * picking the first entry is exactly the "switched behind my back" behaviour
+   * this goal removes.
+   */
+  selectedModel?: string;
   /**
    * The API key itself.
    *
@@ -79,7 +108,7 @@ export interface ReflexSystemOneProfile {
    * Name of the environment variable holding the API key. Never the key itself.
    *
    * Kept beside {@link apiKey} on purpose: a profile may name an environment
-   * variable instead of carrying a secret, and the flat block still supports it.
+   * variable instead of carrying a secret.
    */
   apiKeyEnv?: string;
   /** Per-request timeout in milliseconds. */
@@ -91,46 +120,59 @@ export interface ReflexSystemOneProfile {
 /**
  * Authored connection settings of the System One decision backend.
  *
- * Historically this block was deliberately secret-free: `apiKeyEnv` named the
- * environment variable holding the key, keeping the credential out of the
- * settings document. That remains a fully supported way to configure a
- * deployment, and every flat field below keeps its meaning.
+ * **Only named profiles connect** (g-066). The flat `baseUrl` / `model` /
+ * `apiKeyEnv` / `timeoutMs` fields this block used to carry beside
+ * `profiles` are gone, together with the "profile over flat over environment"
+ * merge they made possible: with no valid active profile the plugin is
+ * *unconfigured* and sends no external request at all. Silently running some
+ * other block — or picking whatever environment variable happened to be
+ * exported — is the behaviour the goal removes.
  *
- * `profiles` adds *multiple* named connections beside the flat block, each able
- * to carry a write-only `apiKey` (g-057). The flat fields stay the fallback of
- * last resort, so a deployment that never authors `profiles` resolves exactly as
- * it did before.
+ * The fields are deliberately **not declared on the schema** any more, for two
+ * reasons:
  *
- * Every field is optional and *overrides* the environment for this plugin
- * instance only. An omitted field keeps the environment/environment-default
- * behaviour of the backend implementation, so an existing env-configured
- * deployment is unaffected by adding the block.
+ * 1. Schemastery drops what an object does not declare, so a settings document
+ *    that still carries them (written by an earlier release) keeps them on disk
+ *    untouched instead of having them rewritten under the page's feet. g-066
+ *    converts nothing: migration is the owner's decision, not a side effect of
+ *    opening a panel.
+ * 2. A deployment authored in `cordis.patch.yml` with the old flat shape still
+ *    hands those keys to {@link resolveSystemOneConfig} — read below under
+ *    `legacy*` — and they can *only* describe a connection that this plugin
+ *    would previously have used implicitly. Reading them is what turns "your
+ *    working deployment now fails closed with no explanation" into a precise
+ *    message telling the owner to name a profile.
+ *
+ * An omitted profile field keeps the environment/default behaviour of the
+ * backend implementation.
  */
 export interface ReflexSystemOneConfig {
-  /** Base URL of the Jev gateway or the OpenAI-compatible logits endpoint. */
-  baseUrl?: string;
-  /** Model id the backend asks for. */
-  model?: string;
-  /**
-   * Name of the environment variable holding the API key (`SYSTEM_ONE_API_KEY`
-   * by default). Never the key itself.
-   */
-  apiKeyEnv?: string;
-  /** Per-request timeout in milliseconds. */
-  timeoutMs?: number;
   /** Named connection profiles, keyed by the name the panel shows. */
   profiles?: Record<string, ReflexSystemOneProfile>;
   /**
    * Name of the profile in force.
    *
    * A name that matches no authored profile is *not* silently ignored: the
-   * resolution falls back through the flat block and reports
-   * `activeProfileMissing`, which the panel shows as a warning. Failing the whole
-   * activation was the alternative and was rejected: a single mistyped name
-   * would take every reflex tool down, and the fallback is exactly the behaviour
-   * a deployment had before it authored `profiles`.
+   * resolution reports `activeProfileMissing` and resolves **nothing**, which
+   * the panel shows as a warning and the runtime treats as unconfigured.
+   * Failing the whole activation was the alternative and was rejected: a single
+   * mistyped name would take every reflex tool down, and the tools still have
+   * their deterministic local fallbacks.
    */
   active?: string;
+  /**
+   * Pre-g-066 flat connection fields, read for the *diagnosis* only.
+   *
+   * Never used to connect: see {@link ReflexSystemOneConfig}. Kept out of the
+   * authoring schema; listed here so the resolution can name them.
+   */
+  baseUrl?: string;
+  /** Pre-g-066 flat model id; diagnosis only. */
+  model?: string;
+  /** Pre-g-066 flat key-variable name; diagnosis only. */
+  apiKeyEnv?: string;
+  /** Pre-g-066 flat timeout; diagnosis only. */
+  timeoutMs?: number;
 }
 
 /**
@@ -381,9 +423,16 @@ export interface ResolvedRoutingConfig {
 export interface ResolvedSystemOneConfig {
   /** Selected implementation; `auto` keeps the environment heuristics. */
   backend: 'auto' | 'mock' | 'jev' | 'vllm';
-  /** Base URL override, absent when the environment decides. */
+  /**
+   * Base URL of the connection in force, absent when nothing selected one.
+   *
+   * Since g-066 this is *the active profile's* address (or, for a profile that
+   * states none, nothing at all — the backend then reads the environment). It
+   * is never inherited from a block beside the profile, because no such block
+   * exists any more.
+   */
   baseUrl?: string;
-  /** Model id override, absent when the environment decides. */
+  /** Model id the runtime asks for: the active profile's selected model. */
   model?: string;
   /** Environment variable that holds the API key; never the key itself. */
   apiKeyEnv?: string;
@@ -393,9 +442,7 @@ export interface ResolvedSystemOneConfig {
    * The API key of the *resolved* profile, when the chain found one.
    *
    * Never serialized to a panel or route: {@link ResolvedSystemOneConfig} is only
-   * handed to {@link createBackend} and to the connection probe. The flat block
-   * has no such field, so a deployment that does not use profiles carries no key
-   * through this type at all.
+   * handed to {@link createBackend} and to the connection probe.
    */
   apiKey?: string;
   /** Active profile name as authored, when one was. */
@@ -403,21 +450,56 @@ export interface ResolvedSystemOneConfig {
   /**
    * Every profile, normalized, in authored order. Keys are the panel's row ids.
    *
-   * Absent when the block authors no `profiles` at all, so a deployment that
-   * never authorized one keeps the exact resolved shape it had before g-057.
+   * Absent when the document authors no `profiles` at all.
    */
   profiles?: Record<string, ResolvedSystemOneProfile>;
   /**
-   * The authored `active` name matched no profile. The panel shows this as a
-   * warning: falling back silently would hide a typo behind a working page.
+   * The authored `active` name matched no profile.
+   *
+   * The panel shows this as a warning and the runtime is **unconfigured**: it
+   * makes no connection of its own accord. Nothing is resolved from anywhere
+   * else, so a typo cannot silently run a connection the user did not select.
    */
   activeProfileMissing?: boolean;
+  /**
+   * Why nothing can be connected, when nothing can (g-066).
+   *
+   * - `no-active-profile`: profiles exist but none is activated;
+   * - `no-profiles`: the document authors no profile at all;
+   * - `active-profile-missing`: `active` names no authored profile;
+   * - `legacy-config-required`: the document carries only the pre-g-066 flat
+   *   fields, which no longer connect anything.
+   *
+   * Absent exactly when an active profile resolved. The panel renders it as the
+   * "unconfigured" state and the backend refuses to build.
+   */
+  unconfigured?:
+    | 'no-active-profile'
+    | 'no-profiles'
+    | 'active-profile-missing'
+    | 'legacy-config-required';
+  /**
+   * The active profile names a `selectedModel` that is not in its `modelIds`.
+   *
+   * Reported, and the resolved {@link model} is left absent rather than falling
+   * back to the first id: a connection whose *selected* model does not exist is
+   * a broken selection, not an invitation to run a different model.
+   */
+  activeProfileModelMissing?: boolean;
 }
 
 /** One profile after defaults and validation. */
 export interface ResolvedSystemOneProfile {
   baseUrl?: string;
-  model?: string;
+  /**
+   * Every model id the connection offers, in authored order.
+   *
+   * Derived from `modelIds`, or from a legacy single `model` as a one-entry
+   * list — so every connection has the same shape downstream.
+   */
+  modelIds?: string[];
+  /** The model in force for this connection (see {@link ReflexSystemOneProfile.selectedModel}). */
+  selectedModel?: string;
   /** The key this profile carries. Write-only; see {@link ReflexSystemOneProfile}. */
   apiKey?: string;
   apiKeyEnv?: string;
@@ -569,8 +651,16 @@ const EffortSchema = z.object({
  * slots anyway.
  */
 const SystemOneProfileSchema = z.object({
-  baseUrl: z.string().description('Jev gateway or OpenAI-compatible logits endpoint; omit to inherit the flat block.'),
-  model: z.string().description('Model id this profile asks for; omit to inherit the flat block.'),
+  baseUrl: z.string().description('Jev gateway or OpenAI-compatible logits endpoint.'),
+  model: z
+    .string()
+    .description('Legacy single model id. Same as modelIds: [id]; it is kept as written and is never rewritten into the list form.'),
+  modelIds: z
+    .array(z.string())
+    .description('Every model id this connection may ask for. Omit to keep the legacy single model.'),
+  selectedModel: z
+    .string()
+    .description('The one model in force for this connection: the runtime and the connection test both use it. Omit = the first modelIds entry.'),
   apiKey: z
     .string()
     .role('secret')
@@ -578,25 +668,26 @@ const SystemOneProfileSchema = z.object({
       'API key of this profile, write-only: stored on save, never returned by any read. Empty = leave unchanged; clear it with the explicit Clear action.'
     ),
   apiKeyEnv: z.string().description('Name of the environment variable holding this profile’s API key — never the key itself.'),
-  timeoutMs: z.natural().description('Per-request timeout in milliseconds; omit to inherit the flat block.'),
+  timeoutMs: z.natural().description('Per-request timeout in milliseconds.'),
   backend: z
     .union(['auto', 'mock', 'jev', 'vllm'])
-    .description('Backend override for this profile; omit to inherit the top-level backend.')
+    .description('Backend implementation serving this connection; omit to use the top-level backend.')
 });
 
 /** Schemastery schema for the System One backend connection block. */
 const SystemOneSchema = z.object({
-  baseUrl: z.string().description('Jev gateway or OpenAI-compatible logits endpoint; omit to use the environment.'),
-  model: z.string().description('Model id the backend asks for; omit to use the environment default.'),
-  apiKeyEnv: z
-    .string()
-    .description('Name of the environment variable holding the API key — never the key itself.'),
-  timeoutMs: z.natural().description('Per-request timeout in milliseconds; omit for the backend default.'),
+  /**
+   * Only profiles connect (g-066). The pre-g-066 flat `baseUrl` / `model` /
+   * `apiKeyEnv` / `timeoutMs` keys are deliberately **not** declared: schemastery
+   * drops undeclared keys, and an object write re-states only what it declares,
+   * so a document still carrying them keeps them byte for byte instead of having
+   * them converted (or deleted) as a side effect of a panel save.
+   */
   profiles: z
     .dict(SystemOneProfileSchema)
     .default({})
-    .description('Named connection profiles; each may carry its own write-only apiKey.'),
-  active: z.string().description('Name of the profile in force; a name no profile declares is reported, not hidden.')
+    .description('Named connection profiles; each may carry its own write-only apiKey and its own model list.'),
+  active: z.string().description('Name of the profile in force; a name no profile declares is reported, and nothing connects.')
 }).volatile();
 
 /**
@@ -794,6 +885,73 @@ export function resolveInterventionsConfig(
 }
 
 /**
+ * Normalize one profile's model list and its single selected entry.
+ *
+ * Two authored shapes are accepted, and they mean the same thing:
+ *
+ * - `modelIds: [a, b, c]` + `selectedModel: b` — the g-066 shape, any number of
+ *   ids with one in force;
+ * - `model: a` — the pre-g-066 shape, which is exactly `modelIds: [a]` selected.
+ *   Accepted so an existing connection keeps working untouched; **no migration
+ *   is written back**, so opening the panel changes nothing on disk.
+ *
+ * Both at once is refused rather than merged: they are two different statements
+ * about which models exist, and picking one would silently drop the other.
+ * A `selectedModel` outside the list is *not* an error here — resolution reports
+ * it (`activeProfileModelMissing`) so the panel can point at the field.
+ *
+ * @param name - profile name, for the message.
+ * @param entry - the authored profile.
+ * @returns the normalized list and the selected id (when the profile names one).
+ * @throws Error when `modelIds` is not a list of non-empty strings, or when both
+ *   shapes are authored.
+ */
+function resolveProfileModels(
+  name: string,
+  entry: ReflexSystemOneProfile
+): { modelIds: string[]; selectedModel?: string } {
+  const legacy = optionalText(entry.model);
+  const authored = entry.modelIds;
+  const selectedModel = optionalText(entry.selectedModel);
+  // An **empty** list is not an authoring: schemastery materializes `modelIds: []`
+  // for every profile that declares the field's schema but no value, so a legacy
+  // `model: x` arrives beside an empty list rather than alone. Treating that as
+  // "both shapes authored" would reject every pre-g-066 connection the moment it
+  // passes through the schema — the exact compatibility this rule protects.
+  if (Array.isArray(authored) && authored.length === 0 && legacy !== undefined) {
+    return { modelIds: [legacy], ...(selectedModel === undefined ? {} : { selectedModel }) };
+  }
+  if (authored !== undefined && authored !== null) {
+    if (!Array.isArray(authored)) {
+      throw new Error(`systemOne.profiles["${name}"].modelIds must be a list of model ids`);
+    }
+    if (legacy !== undefined) {
+      throw new Error(
+        `systemOne.profiles["${name}"] authors both model and modelIds; keep modelIds and selectedModel, or keep the single model`
+      );
+    }
+    const modelIds: string[] = [];
+    for (const [index, raw] of authored.entries()) {
+      const id = optionalText(typeof raw === 'string' ? raw : undefined);
+      if (id === undefined) {
+        throw new Error(`systemOne.profiles["${name}"].modelIds[${String(index)}] must be a non-empty model id`);
+      }
+      // Duplicates are collapsed: the list is a set of choices, and two rows for
+      // one id would let the page show a selection that is not a selection.
+      if (!modelIds.includes(id)) modelIds.push(id);
+    }
+    return {
+      modelIds,
+      ...(selectedModel === undefined ? {} : { selectedModel })
+    };
+  }
+  return {
+    modelIds: legacy === undefined ? [] : [legacy],
+    ...(selectedModel === undefined ? {} : { selectedModel })
+  };
+}
+
+/**
  * Trim one optional authored string, treating blank text as absent.
  * @param value - authored value.
  * @returns the trimmed text, or `undefined` when nothing usable was authored.
@@ -807,31 +965,38 @@ function optionalText(value: string | undefined): string | undefined {
 /**
  * Validate the System One connection block and fill in every default.
  *
- * ## The resolution chain (highest precedence first)
+ * ## The resolution rule (g-066: one connection, the active profile)
  *
- * For every connection field — `baseUrl`, `model`, `apiKey`, `apiKeyEnv`,
- * `timeoutMs`, `backend`:
+ * **Only the active profile connects.** Every connection field — `baseUrl`,
+ * `model`, `apiKey`, `apiKeyEnv`, `timeoutMs`, `backend` — comes from the
+ * profile `active` names, or stays `undefined` and is then decided by the
+ * backend's own environment read and documented default.
  *
- * 1. the **active profile**, when `active` names one;
- * 2. the **flat block** (`systemOne.baseUrl`, …) — the pre-g-057 shape;
- * 3. the **environment** (`SYSTEM_ONE_BASE_URL`, `SYSTEM_ONE_API_KEY`, …),
- *    which the backend implementations read for any field left `undefined`;
- * 4. the **documented default** of that backend.
+ * There is no block of last resort. A document with no valid active profile
+ * resolves to {@link ResolvedSystemOneConfig.unconfigured} with **no** connection
+ * fields at all, so nothing downstream can invent one:
  *
- * Steps 3 and 4 stay where they were — inside the backends — because moving them
- * here would change what an env-configured deployment resolves to. This function
- * therefore *merges* 1 over 2 and leaves the rest `undefined`, which is exactly
- * "the environment decides".
+ * | document                                  | `unconfigured`            |
+ * | ----------------------------------------- | ------------------------- |
+ * | no profiles at all                        | `no-profiles`             |
+ * | profiles, none activated                  | `no-active-profile`       |
+ * | `active` naming a profile that is not there | `active-profile-missing`  |
+ * | only the pre-g-066 flat fields             | `legacy-config-required`  |
  *
- * `apiKey` and `apiKeyEnv` are resolved independently, so a profile may carry a
- * literal key while inheriting the flat `apiKeyEnv` *name*, or vice versa;
- * {@link resolveApiKey} decides which of the two a profile ultimately uses.
+ * The pre-g-066 merge ("active profile over flat block over environment") was
+ * removed because the *fallback* was the bug: a mistyped or missing activation
+ * ran a connection the user never selected. The legacy fields are still *read*,
+ * but only to name the problem in `legacy-config-required` — converting them into
+ * a profile would be a silent configuration change (and, for `apiKeyEnv`, a
+ * silent choice between a literal key and a variable), so this function never
+ * does it.
  *
- * `active` naming no profile is reported as `activeProfileMissing` and the chain
- * continues at step 2 — see {@link ReflexSystemOneConfig.active} for why this is
- * a warning rather than a failure.
+ * `apiKey` and `apiKeyEnv` stay independent, so a profile may carry a literal key
+ * while naming no variable, or name a variable and carry no key;
+ * {@link resolveApiKeyWithSource} decides which the transport presents.
  *
- * @param backend - the top-level backend selector.
+ * @param backend - the top-level backend selector (the fallback implementation
+ *   choice for a profile that states none).
  * @param authored - the authored `systemOne` block.
  * @returns the resolved connection settings.
  * @throws Error when a field is present but unusable.
@@ -850,27 +1015,84 @@ export function resolveSystemOneConfig(
   const activeProfile = active === undefined ? undefined : profiles[active];
   const activeProfileMissing = active !== undefined && activeProfile === undefined;
 
-  // Flat block first (step 2), then the active profile over it (step 1).
-  const baseUrl = optionalText(activeProfile?.baseUrl) ?? optionalText(authored?.baseUrl);
-  const model = optionalText(activeProfile?.model) ?? optionalText(authored?.model);
-  const apiKeyEnv = optionalText(activeProfile?.apiKeyEnv) ?? optionalText(authored?.apiKeyEnv);
-  const apiKey = optionalText(activeProfile?.apiKey);
-  const timeoutMs = activeProfile?.timeoutMs ?? authored?.timeoutMs;
-  const profileBackend = activeProfile?.backend;
+  // The shared half of the resolved shape: what the document authors, and
+  // nothing that could be mistaken for a connection.
+  const authoredShape: ResolvedSystemOneConfig = {
+    backend: selected,
+    ...(hasProfiles ? { profiles } : {}),
+    ...(active === undefined ? {} : { active }),
+    ...(activeProfileMissing ? { activeProfileMissing: true } : {})
+  };
+
+  if (activeProfile === undefined) {
+    // Nothing was activated. Which of the four absence reasons applies decides
+    // the copy the panel shows and the message the runtime logs, so the facts are
+    // kept apart rather than collapsed into "not configured".
+    const legacy = legacyConnectionAuthored(authored);
+    const unconfigured = activeProfileMissing
+      ? ('active-profile-missing' as const)
+      : hasProfiles
+        ? ('no-active-profile' as const)
+        : legacy
+          ? ('legacy-config-required' as const)
+          : ('no-profiles' as const);
+    return { ...authoredShape, unconfigured };
+  }
+
+  // The profile's *selected* model: the one the runtime sends and the probe
+  // tests. A selection outside the list is reported and resolves to nothing —
+  // never to "the first one", which would run a model nobody picked.
+  const modelIds = activeProfile.modelIds ?? [];
+  const selectedModel = modelForProfile(activeProfile, modelIds);
+  const modelSelectionBroken = selectedModel?.missing === true;
+  const timeoutMs = activeProfile.timeoutMs;
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
     throw new Error(`systemOne.timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
   }
   return {
-    backend: profileBackend ?? selected,
-    ...(hasProfiles ? { profiles } : {}),
-    ...(active === undefined ? {} : { active }),
-    ...(activeProfileMissing ? { activeProfileMissing: true } : {}),
-    ...(baseUrl === undefined ? {} : { baseUrl }),
-    ...(model === undefined ? {} : { model }),
-    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
-    ...(apiKey === undefined ? {} : { apiKey }),
-    ...(timeoutMs === undefined ? {} : { timeoutMs })
+    ...authoredShape,
+    backend: activeProfile.backend ?? selected,
+    ...(activeProfile.baseUrl === undefined ? {} : { baseUrl: activeProfile.baseUrl }),
+    ...(modelSelectionBroken || selectedModel?.model === undefined ? {} : { model: selectedModel.model }),
+    ...(activeProfile.apiKeyEnv === undefined ? {} : { apiKeyEnv: activeProfile.apiKeyEnv }),
+    ...(activeProfile.apiKey === undefined ? {} : { apiKey: activeProfile.apiKey }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(modelSelectionBroken ? { activeProfileModelMissing: true } : {})
   };
+}
+
+/**
+ * The model one profile puts in force, and whether the selection is broken.
+ *
+ * A legacy single `model` is a one-entry list, so the two authored shapes answer
+ * the same way: `selectedModel` if it names an entry, else the first entry, else
+ * absent (a connection may name no model at all and let the backend default it).
+ * @param profile - the normalized profile.
+ * @param modelIds - its model list.
+ * @returns the resolved choice; `missing` marks a selected id outside the list.
+ */
+function modelForProfile(
+  profile: ResolvedSystemOneProfile,
+  modelIds: readonly string[]
+): { model?: string; missing?: boolean } {
+  const chosen = profile.selectedModel;
+  if (chosen === undefined) return modelIds.length === 0 ? {} : { model: modelIds[0] };
+  // The list is what decides: an id outside it cannot be run, even when it is the
+  // only text the document carries.
+  return modelIds.includes(chosen) ? { model: chosen } : { missing: true };
+}
+
+/**
+ * Whether the document carries the pre-g-066 flat connection fields.
+ *
+ * Read purely to *name* the problem: a deployment authored that way used to
+ * connect implicitly, and "no profile configured" would be a confusing answer
+ * for a document that plainly holds an address. Never a connection itself.
+ * @param authored - the authored `systemOne` block.
+ * @returns true when any legacy connection field is non-blank.
+ */
+function legacyConnectionAuthored(authored: ReflexSystemOneConfig | undefined): boolean {
+  return [authored?.baseUrl, authored?.model, authored?.apiKeyEnv].some((value) => optionalText(value) !== undefined);
 }
 
 /**
@@ -914,20 +1136,21 @@ function resolveSystemOneProfiles(
       throw new Error(`systemOne.profiles["${name}"].backend must be one of auto, mock, jev, vllm (got "${profileBackend}")`);
     }
     const timeoutMs = entry.timeoutMs;
-    // Per-profile timeout, validated on the same rule as the flat block. Kept as
-    // one predicate so the flat-block check above stays the single "timeout
-    // validated" site a reader (and a mutation test) can point at.
+    // Per-profile timeout, validated on the same rule the active profile's own
+    // timeout is re-checked with in `resolveSystemOneConfig`. Kept as one
+    // predicate so there is a single "timeout validated" site per shape.
     const badProfileTimeout = timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0);
     if (badProfileTimeout) {
       throw new Error(`systemOne.profiles["${name}"].timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
     }
     const baseUrl = optionalText(entry.baseUrl);
-    const model = optionalText(entry.model);
+    const { modelIds, selectedModel } = resolveProfileModels(name, entry);
     const apiKey = optionalText(entry.apiKey);
     const apiKeyEnv = optionalText(entry.apiKeyEnv);
     profiles[name] = {
       ...(baseUrl === undefined ? {} : { baseUrl }),
-      ...(model === undefined ? {} : { model }),
+      ...(modelIds.length === 0 ? {} : { modelIds }),
+      ...(selectedModel === undefined ? {} : { selectedModel }),
       ...(apiKey === undefined ? {} : { apiKey }),
       ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -1096,40 +1319,38 @@ export interface ConnectionTarget {
 }
 
 /**
- * Project one profile's connection facts, merged over the flat block.
+ * Project one profile's connection facts for the connection test.
  *
- * Used by the connection test: probing a profile that inherits `baseUrl` from the
- * flat block must send the request the runtime itself would send, so the same
- * "profile over flat over environment" merge is applied here instead of being
- * re-derived (and eventually mis-derived) by the caller.
+ * The probe must send exactly the request the runtime would send, so both read
+ * the *same* profile fields: base URL, the **selected** model
+ * ({@link modelForProfile}), the key and its variable, the timeout, and the
+ * backend. Since g-066 there is nothing to merge — a profile that states no
+ * `baseUrl` inherits from **nobody**, and the backend's own environment read is
+ * the only thing left below it, exactly as for the runtime.
  *
- * `flat` must be the block as *authored*, not an active-profile-resolved config:
- * resolving "bare profile over the block" against a block that already folded in
- * another profile's values would silently borrow that profile's address. The
- * caller gets it from {@link resolveSystemOneConfig} with `active` removed.
+ * The model is derived rather than read from {@link ConnectionTarget.model}, so a
+ * probe can never test a model the runtime does not run: one `selectedModel`
+ * outside `modelIds` makes both of them absent (and the panel says why).
  *
- * @param flat - the resolved block with no profile folded in.
- * @param name - profile name, or the placeholder the caller reports for "block".
- * @param profile - the profile to project; `undefined` projects the flat block.
+ * @param flat - the resolved block, supplying the backend fallback only.
+ * @param name - profile name (the probe's label).
+ * @param profile - the profile to project.
  * @returns the target's connection facts.
  */
 export function connectionTarget(
-  flat: Pick<ResolvedSystemOneConfig, 'backend' | 'baseUrl' | 'model' | 'apiKeyEnv' | 'apiKey' | 'timeoutMs'>,
+  flat: Pick<ResolvedSystemOneConfig, 'backend'>,
   name: string,
-  profile: ResolvedSystemOneProfile | undefined
+  profile: ResolvedSystemOneProfile
 ): ConnectionTarget {
-  // Profile first, then the flat block. Whatever neither names stays absent, so
-  // the backend falls through to the environment exactly as it did before g-057.
-  const first = <T>(profileValue: T | undefined, flatValue: T | undefined): T | undefined =>
-    profileValue === undefined ? flatValue : profileValue;
-  const baseUrl = optionalText(first(profile?.baseUrl, flat.baseUrl));
-  const model = optionalText(first(profile?.model, flat.model));
-  const apiKeyEnv = optionalText(first(profile?.apiKeyEnv, flat.apiKeyEnv));
-  const apiKey = optionalText(first(profile?.apiKey, flat.apiKey));
-  const timeoutMs = first(profile?.timeoutMs, flat.timeoutMs);
+  const baseUrl = optionalText(profile.baseUrl);
+  const selected = modelForProfile(profile, profile.modelIds ?? []);
+  const model = optionalText(selected.missing === true ? undefined : selected.model);
+  const apiKeyEnv = optionalText(profile.apiKeyEnv);
+  const apiKey = optionalText(profile.apiKey);
+  const timeoutMs = profile.timeoutMs;
   return {
     name,
-    backend: first(profile?.backend, flat.backend) ?? 'auto',
+    backend: profile.backend ?? flat.backend ?? 'auto',
     ...(baseUrl === undefined ? {} : { baseUrl }),
     ...(model === undefined ? {} : { model }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),

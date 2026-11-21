@@ -23,7 +23,6 @@ import type { IncomingMessage } from 'node:http';
 import {
   connectionTarget,
   resolveApiKeyWithSource,
-  resolveSystemOneConfig,
   routingActive,
   type ResolvedSystemOneConfig
 } from './config.js';
@@ -282,24 +281,31 @@ export function createSystemOneProbe(
 ): (profile: string | undefined, signal: AbortSignal) => Promise<PanelProbeAnswer> {
   return async (profile, signal) => {
     const effective = runtime.effectiveConfig.systemOne;
-    // The block as authored, with no profile folded in: a bare profile must
-    // inherit the *flat* fields, not the active profile's.
-    const flat = resolveSystemOneConfig(effective.backend, {
-      ...(effective.baseUrl === undefined ? {} : { baseUrl: effective.baseUrl }),
-      ...(effective.apiKeyEnv === undefined ? {} : { apiKeyEnv: effective.apiKeyEnv }),
-      ...(effective.timeoutMs === undefined ? {} : { timeoutMs: effective.timeoutMs })
-    });
+    // Only a profile names a connection (g-066). There is no block to fold in
+    // and, crucially, no "probe the active one" for an invocation that names
+    // nothing: `active` is what the runtime uses, so it is what the test has to
+    // use too, and when there is no active profile there is nothing to test.
     const name = profile ?? effective.active;
-    const targetProfile = name === undefined ? undefined : effective.profiles?.[name];
-    if (name !== undefined && targetProfile === undefined) {
+    if (name === undefined || name.length === 0) {
+      // An unnamed probe used to test whatever the flat block said, which is the
+      // implicit connection this goal removes. Say why nothing was tested.
+      return {
+        ok: false,
+        status: 'misconfigured',
+        latencyMs: 0,
+        profile: null,
+        detail: `no active profile is selected (${effective.unconfigured ?? 'unconfigured'}); activate a connection first`
+      };
+    }
+    const targetProfile = effective.profiles?.[name];
+    if (targetProfile === undefined) {
       // Naming a profile that does not exist is a caller error, not a connection
-      // failure: say so instead of probing the flat block under a wrong label.
+      // failure: say so instead of probing something else under a wrong label.
       return { ok: false, status: 'misconfigured', latencyMs: 0, profile: name, detail: `no profile named "${name}" is configured` };
     }
-    const target =
-      targetProfile === undefined
-        ? connectionTarget(flat, '', undefined)
-        : connectionTarget(flat, name as string, targetProfile);
+    // The same projection the runtime uses, including the profile's *selected*
+    // model: testing a connection tests the request the next decision sends.
+    const target = connectionTarget(effective, name, targetProfile);
     const result = await probeSystemOne(target, { env, signal, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
     return {
       ok: result.ok,

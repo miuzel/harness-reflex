@@ -224,13 +224,18 @@ export interface DelegationDraft {
   enabled: boolean;
 }
 
-/** Editable draft of the System One connection block. */
+/**
+ * Editable draft of the System One connection block.
+ *
+ * Since g-066 the block holds **no connection fields of its own**: the flat
+ * `baseUrl` / `model` / `apiKeyEnv` / `timeoutMs` editors are gone, so the only
+ * things authored here are the rows and which one is in force. `backend` stays
+ * because it is the implementation fallback a row may leave unset, not a
+ * connection.
+ */
 export interface BackendDraft {
+  /** Implementation fallback (`auto`/`mock`/`jev`/`vllm`) for rows that state none. */
   backend: string;
-  baseUrl: string;
-  model: string;
-  apiKeyEnv: string;
-  timeoutMs: string;
   /** Name of the profile in force; empty means "no active profile". */
   active: string;
   /** One editable row per authored profile, in authored order. */
@@ -261,7 +266,30 @@ export interface ProfileDraft {
   /** The profile's settings key as seeded; empty until the user names the row. */
   name: string;
   baseUrl: string;
-  model: string;
+  /**
+   * Every model id this connection offers, one per line (g-066).
+   *
+   * A list, because one gateway serves several models behind one URL and key.
+   * Stored as text — like the pool and tag fields — so a half-typed id is a
+   * draft, not a broken row, and the validator names the line that is unusable.
+   */
+  modelIds: string;
+  /**
+   * The one id in force: the runtime sends it and the connection test probes it.
+   *
+   * Empty means "the first listed id", which is what a legacy single-model
+   * connection always resolves to.
+   */
+  selectedModel: string;
+  /**
+   * This row was read from the pre-g-066 single `model` field.
+   *
+   * Kept so the save writes the shape it found: a one-model connection the user
+   * merely renamed is written back as `model: x`, not silently converted to
+   * `modelIds: [x]`. As soon as the row carries more than one id the flag stops
+   * mattering — `modelIds` is then the only shape that can say what was asked.
+   */
+  legacyModelShape: boolean;
   apiKeyEnv: string;
   timeoutMs: string;
   backend: string;
@@ -337,7 +365,7 @@ function allCapabilitiesInherit(): Record<string, string> {
 export const EMPTY_DRAFT: PanelDraft = {
   routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
   effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
-  backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '', active: '', profiles: [] },
+  backend: { backend: 'auto', active: '', profiles: [] },
   runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
   interventions: {
     mode: 'observe',
@@ -404,6 +432,52 @@ export function textToTags(text: string): string[] {
     .split(',')
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0);
+}
+
+/**
+ * How an error message names a row: its number, and its name when it has one.
+ *
+ * The number is the position the user sees, counted from one; a named row also
+ * says which name, because the fix is then in a row the user can find by name.
+ * @param profile - the row.
+ * @param index - its zero-based position in the draft.
+ * @returns the label.
+ */
+function profileLabel(profile: ProfileDraft, index: number): string {
+  const name = profile.name.trim();
+  return name.length === 0 ? String(index + 1) : `${String(index + 1)} (${name})`;
+}
+
+/**
+ * Split a model-list field into ids.
+ *
+ * One id per line, and commas are accepted as well because users paste lists
+ * both ways. Blank entries are dropped (they are separators, not ids) and
+ * duplicates collapse: the list is a set of choices, and a repeated id would
+ * render two radio rows that mean the same thing.
+ * @param text - the draft field.
+ * @returns the ids, in authored order.
+ */
+export function splitModelIds(text: string | undefined | null): string[] {
+  const ids: string[] = [];
+  // Tolerant on purpose: drafts also arrive from tests, older callers, and a
+  // re-seeded page, and a missing field must read as "no ids", not throw.
+  if (typeof text !== 'string') return ids;
+  for (const raw of text.split(/[\n,]/)) {
+    const id = raw.trim();
+    if (id.length === 0 || ids.includes(id)) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * The model ids one row offers.
+ * @param profile - the row.
+ * @returns its ids, in authored order.
+ */
+function modelIdsOf(profile: ProfileDraft): string[] {
+  return splitModelIds(profile.modelIds);
 }
 
 /** Read the authored pools of a routing section. */
@@ -549,12 +623,22 @@ export function profileRowsFrom(value: unknown): ProfileDraft[] {
   return Object.entries(profiles).flatMap(([name, entry]) => {
     if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return [];
     const profile = asRecord(entry);
+    // Two authored model shapes, one draft (g-066): `modelIds` + `selectedModel`
+    // is the current one, and a legacy single `model` seeds the same two fields
+    // as a one-line list — so an existing connection opens editable and is
+    // written back in the shape it was read in (see `groupWrites`).
+    const modelIds = Array.isArray(profile.modelIds)
+      ? profile.modelIds.map((id: unknown) => asText(id)).filter((id: string) => id.length > 0)
+      : [];
+    const legacyModel = asText(profile.model);
     return [
       {
         id: createProfileRowId(),
         name,
         baseUrl: asText(profile.baseUrl),
-        model: asText(profile.model),
+        modelIds: (modelIds.length > 0 ? modelIds : legacyModel.length > 0 ? [legacyModel] : []).join('\n'),
+        selectedModel: asText(profile.selectedModel) || (modelIds.length > 0 ? modelIds[0]! : legacyModel),
+        legacyModelShape: modelIds.length === 0 && legacyModel.length > 0,
         apiKeyEnv: asText(profile.apiKeyEnv),
         timeoutMs: asText(profile.timeoutMs),
         backend: asText(profile.backend),
@@ -615,7 +699,9 @@ let PROFILE_ROW_SEQUENCE = 0;
 export function reseedProfileRows(previous: readonly ProfileDraft[], seeded: readonly ProfileDraft[]): ProfileDraft[] {
   if (previous.length === 0) return seeded.map((row) => ({ ...row }));
   const content = (row: ProfileDraft): string =>
-    [row.baseUrl, row.model, row.apiKeyEnv, row.timeoutMs, row.backend].map((field) => field.trim()).join('\u0000');
+    [row.baseUrl, row.modelIds, row.selectedModel, row.apiKeyEnv, row.timeoutMs, row.backend]
+      .map((field) => field.trim())
+      .join('\u0000');
   const claimed = new Set<ProfileDraft>();
   const fresh = seeded.map(() => false);
   const kept: (ProfileDraft | undefined)[] = seeded.map(() => undefined);
@@ -710,10 +796,9 @@ export function draftFromConfig(value: unknown): PanelDraft {
     },
     backend: {
       backend: asText(section.backend) || EMPTY_DRAFT.backend.backend,
-      baseUrl: asText(systemOne.baseUrl),
-      model: asText(systemOne.model),
-      apiKeyEnv: asText(systemOne.apiKeyEnv),
-      timeoutMs: asText(systemOne.timeoutMs),
+      // The connection fields live on the rows now; nothing is read from the
+      // top of `systemOne` here (g-066), so a document that still carries the
+      // old flat keys seeds no editor for them and the page cannot write them.
       active: asText(systemOne.active),
       // A row is seeded from the authored profile only. The key is NOT seeded:
       // the Host never sends it, and `apiKeyPresent` is filled from the live
@@ -804,7 +889,8 @@ export function unnamedFilledRows(draft: PanelDraft): number[] {
     if (profile.name.trim().length > 0) return;
     const content = [
       profile.baseUrl,
-      profile.model,
+      profile.modelIds,
+      profile.selectedModel,
       profile.apiKeyEnv,
       profile.timeoutMs,
       profile.backend,
@@ -859,10 +945,35 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   if (minConfidence === undefined || minConfidence < 0 || minConfidence > 1) errors.push('errMinConfidence');
 
   if (!BACKEND_CHOICES.includes(draft.backend.backend)) errors.push('errBackend');
-  const timeoutMs = draft.backend.timeoutMs.trim() === '' ? undefined : asNumber(draft.backend.timeoutMs);
-  if (draft.backend.timeoutMs.trim() !== '' && (timeoutMs === undefined || !Number.isInteger(timeoutMs) || timeoutMs < 100)) {
-    errors.push('errTimeout');
+  // Per-row connection fields, which the flat editors used to cover: each row
+  // now owns its timeout and its model selection, so they are validated where
+  // they are edited and the message can name the row (g-066).
+  const badTimeoutRows: string[] = [];
+  const badModelRows: string[] = [];
+  const offListRows: string[] = [];
+  for (const [index, profile] of draft.backend.profiles.entries()) {
+    const label = profileLabel(profile, index);
+    if (profile.timeoutMs.trim() !== '') {
+      const timeout = asNumber(profile.timeoutMs);
+      if (timeout === undefined || !Number.isInteger(timeout) || timeout < 100) badTimeoutRows.push(label);
+    }
+    // Every listed id is a model the user is offering to run, so a half-typed
+    // one is not "almost fine": it would be selectable and would fail at the
+    // gateway instead of here.
+    const ids = modelIdsOf(profile);
+    const listed = splitModelIds(profile.modelIds);
+    if (listed.length !== ids.length || ids.length === 0) {
+      // `ids` drops blanks, so a draft that named anything blank has fewer ids
+      // than the raw field has entries. An empty field is legal: the backend
+      // then applies its own default model.
+      if (profile.modelIds.trim().length > 0) badModelRows.push(label);
+    }
+    const selection = profile.selectedModel.trim();
+    if (selection.length > 0 && ids.length > 0 && !ids.includes(selection)) offListRows.push(label);
   }
+  if (badTimeoutRows.length > 0) errors.push('errTimeout');
+  if (badModelRows.length > 0) errors.push('errProfileModel');
+  if (offListRows.length > 0) errors.push('errProfileModelSelection');
   if (draft.runtime.toolPrefix.trim().length === 0) errors.push('errToolPrefix');
   const pruneThreshold = asNumber(draft.runtime.pruneThreshold);
   if (pruneThreshold === undefined || !Number.isInteger(pruneThreshold) || pruneThreshold < 0) {
@@ -929,7 +1040,12 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   if (unnamed.length > 0) errors.push('errProfileName');
   return {
     errors: [...new Set(errors)],
-    values: unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') },
+    values: {
+      ...(unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') }),
+      ...(badTimeoutRows.length === 0 ? {} : { errTimeout: badTimeoutRows.join(', ') }),
+      ...(badModelRows.length === 0 ? {} : { errProfileModel: badModelRows.join(', ') }),
+      ...(offListRows.length === 0 ? {} : { errProfileModelSelection: offListRows.join(', ') })
+    },
     ok: errors.length === 0
   };
 }
@@ -1019,16 +1135,14 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
       // deletes every stored key, and the page could not restate them (it never
       // received them). Narrow paths only touch what the user actually edited.
       const writes: GroupWrite[] = [{ path: ['backend'], value: present(draft.backend.backend) ?? 'auto' }];
-      const flat: Record<string, unknown> = {};
-      if (present(draft.backend.baseUrl) !== undefined) flat.baseUrl = draft.backend.baseUrl.trim();
-      if (present(draft.backend.model) !== undefined) flat.model = draft.backend.model.trim();
-      if (present(draft.backend.apiKeyEnv) !== undefined) flat.apiKeyEnv = draft.backend.apiKeyEnv.trim();
-      if (asNumber(draft.backend.timeoutMs) !== undefined) flat.timeoutMs = asNumber(draft.backend.timeoutMs);
+      // No flat connection fields are written any more (g-066): they are not
+      // drafted, so there is nothing to state, and leaving them unaddressed is
+      // what keeps a document that still carries them unchanged on disk.
+      //
       // An empty name is an explicit "no active profile", which must be written
       // as an unset rather than left as the previous name.
       if (present(draft.backend.active) === undefined) writes.push({ path: ['systemOne', 'active'], value: undefined });
       else writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });
-      for (const [key, value] of Object.entries(flat)) writes.push({ path: ['systemOne', key], value });
 
       for (const profile of draft.backend.profiles) {
         const name = profile.name.trim();
@@ -1044,13 +1158,42 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
         if (name.length === 0) continue;
         const row: Record<string, unknown> = {};
         if (present(profile.baseUrl) !== undefined) row.baseUrl = profile.baseUrl.trim();
-        if (present(profile.model) !== undefined) row.model = profile.model.trim();
         if (present(profile.apiKeyEnv) !== undefined) row.apiKeyEnv = profile.apiKeyEnv.trim();
         if (asNumber(profile.timeoutMs) !== undefined) row.timeoutMs = asNumber(profile.timeoutMs);
         if (present(profile.backend) !== undefined) row.backend = profile.backend.trim();
-        // Fields the user blanked are unset, so the row keeps inheriting the flat
-        // block instead of carrying an empty string that would override it.
-        for (const field of ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'backend']) {
+        // The model list (g-066). One id is written in the *legacy* shape
+        // (`model`) **only** while the row was read in that shape too, so a
+        // connection authored as `model: x` keeps that spelling for as long as
+        // the user does not ask for a second model — no silent migration. From
+        // two ids up, `modelIds` is the only shape that can express the answer.
+        const modelIds = modelIdsOf(profile);
+        if (modelIds.length === 0) {
+          writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: undefined });
+          writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: undefined });
+          if (profile.legacyModelShape) writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: undefined });
+        } else if (modelIds.length === 1 && profile.legacyModelShape) {
+          writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: modelIds[0] });
+          // The list form must not linger beside it: both authored at once is
+          // refused by resolution, so the row would stop resolving.
+          writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: undefined });
+        } else {
+          writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: modelIds });
+          if (profile.legacyModelShape) writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: undefined });
+        }
+        // The selection is written only when it is not simply "the first id",
+        // and cleared as soon as it is: a stored `selectedModel` that stays
+        // behind after the list shrinks would resolve to no model at all.
+        const selection = profile.selectedModel.trim();
+        const first = modelIds[0];
+        if (selection.length === 0 || selection === first) {
+          writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: undefined });
+        } else {
+          writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: selection });
+        }
+        // Fields the user blanked are unset, so the row states nothing and the
+        // backend's own environment read applies, instead of carrying an empty
+        // string that would override it.
+        for (const field of ['baseUrl', 'apiKeyEnv', 'timeoutMs', 'backend']) {
           if (row[field] === undefined) writes.push({ path: ['systemOne', 'profiles', name, field], value: undefined });
         }
         // The explicit clear wins over a pending value: clearing is a decision.
@@ -1518,6 +1661,16 @@ export interface PanelSnapshotLike {
     activeProfile?: string;
     /** The authored active name matches no profile. */
     activeProfileMissing?: boolean;
+    /**
+     * Why nothing connects, when nothing does (g-066).
+     *
+     * The page renders its unconfigured state from this fact rather than from
+     * the fields it can see, because only the Host's resolution knows whether
+     * an active profile actually resolved.
+     */
+    unconfigured?: 'no-active-profile' | 'no-profiles' | 'active-profile-missing' | 'legacy-config-required';
+    /** The active profile's selected model is not in its list. */
+    activeProfileModelMissing?: boolean;
     /**
      * Live gateway health. Absent for a backend that answers in-process; only
      * `available === false` means the decisions are degraded.

@@ -156,6 +156,10 @@ export const zh = {
     '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
   helpModel:
     '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型（jev 为 jev-latest，simple-jev 为 Qwen/Qwen2.5-7B-Instruct）。',
+  helpModelIds:
+    '用途：这一套连接可用的模型 ID 列表；格式：每行一个（也接受逗号分隔），空行与重复项会被忽略；默认：未设置；留空：由后端决定默认模型。填写多个后，在「当前使用的模型」里单选其中一个。',
+  helpSelectedModel:
+    '用途：这套连接实际使用（运行与「测试」都读这一个）的模型；格式：必须是模型列表里的某一项；默认：列表第一项；留空：按第一项处理。选择不在列表里的模型会被拒绝保存。',
   helpApiKeyEnv:
     '用途：存放 API Key 的环境变量名（不是密钥本身）；格式：大写环境变量名，例如 JEV_API_KEY；默认：未设置；留空：由后端按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 依次兜底，密钥永远不会写进设置文档。',
   helpTimeoutMs:
@@ -240,10 +244,7 @@ export const zh = {
   labelApiKeyEnv: 'API Key 环境变量名',
   labelTimeoutMs: '超时（毫秒）',
   backendHint: '可填环境变量名，或在上方连接配置里直接保存 API Key（只写不读）。',
-  backendFlatFoldRole: '兼容区：新配置请用上方连接配置',
-  backendHintFlat:
-    '兼容区：新连接请用上方「连接配置（可多套）」，这里只作为它未覆盖字段时的兜底。点标题可展开编辑。',
-  backendFlatFoldedSummary: '已折叠（新配置请用上方连接配置）',
+  backendHintRuntime: '连接留空该字段时使用的后端实现。它不包含任何连接地址或密钥：连接只来自当前激活的配置。',
   backendActive: '当前生效实现',
   // Key readiness reports *where* the key came from, in four distinct states
   // (g-059): stored literal / the one named variable / named-but-empty (locked) /
@@ -292,7 +293,24 @@ export const zh = {
   profileTestBadResponse: '响应异常',
   profileTestMisconfigured: '配置不完整',
   profileLatency: '{ms} ms',
-  activeProfileMissing: '激活的配置「{name}」不存在，当前使用扁平字段的回落配置。',
+  activeProfileMissing: '激活的配置「{name}」不存在：当前没有任何连接生效。',
+  unconfiguredTitle: '未配置连接。',
+  unconfiguredNoProfiles: '设置文档里还没有任何连接配置。System 1 不会自行连接任何地址。',
+  unconfiguredNoActive: '已有连接配置，但没有选定当前激活的一项。System 1 不会自行挑一个来用。',
+  unconfiguredActiveMissing: '激活名「{name}」不对应任何已保存的连接配置。System 1 不会回退到其他配置。',
+  unconfiguredLegacy:
+    '设置文档里只有旧版扁平连接字段，它们已不再用于连接。请在上方新增一套连接配置并设为激活（旧字段不会被自动转换或删除）。',
+  unconfiguredEffect: '此时决策使用本地确定性启发式，不发出任何外部请求。',
+  labelModelIds: '模型 ID（可多个，每行一个）',
+  profileModelIdsHint: '这一套连接可用的模型。留空表示由后端决定默认模型。',
+  profileSelectedModel: '当前使用的模型',
+  profileModelMissing: '所选模型「{name}」不在上面的模型列表里：运行时不会发送任何模型，请重新选择。',
+  profileRenameKeyNeeded:
+    '这一行改名后，已保存的 API Key 无法迁移（改名等于换一个保存路径，密钥不会跟着走）。请在此处重新填写 API Key 再保存——留空将拒绝保存。',
+  errProfileModel: '第 {row} 行连接配置的模型 ID 为空或含空行，请检查',
+  errProfileModelSelection: '第 {row} 行连接配置所选的模型不在模型列表里，请重新选择',
+  errProfileRenameKey:
+    '改名后已保存的 API Key 无法迁移，会静默丢失：{row}。请在对应行重新填写 API Key 后保存（来源为环境变量的连接不需要）。',
 
   labelToolPrefix: '工具名前缀',
   labelLedgerPath: '账本 JSONL 路径',
@@ -577,6 +595,10 @@ export const en: Record<keyof typeof zh, string> = {
     'Use: the System One gateway or OpenAI-compatible logits endpoint; Format: http(s) URL; Default: not set; Blank: use the environment or the backend default address (jev: https://api.typesafe.ai/v1/systemone, simple-jev: http://localhost:8000).',
   helpModel:
     'Use: the model id the backend asks for; Format: non-empty string; Default: not set; Blank: use the environment or the backend default model (jev: jev-latest, simple-jev: Qwen/Qwen2.5-7B-Instruct).',
+  helpModelIds:
+    'Use: the model ids this connection may ask for; Format: one per line (commas also accepted), blank lines and duplicates ignored; Default: not set; Blank: the backend applies its own default model. With more than one id, pick the one in force under "Model in use".',
+  helpSelectedModel:
+    'Use: the model this connection actually runs — both the runtime and Test read this field; Format: one of the listed ids; Default: the first listed id; Blank: treated as the first. A selection outside the list cannot be saved.',
   helpApiKeyEnv:
     'Use: the name of the environment variable holding the API key, never the key itself; Format: an uppercase environment variable name, e.g. JEV_API_KEY; Default: not set; Blank: the backend falls back in order to SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY, and the secret never enters the settings document.',
   helpTimeoutMs:
@@ -662,10 +684,8 @@ export const en: Record<keyof typeof zh, string> = {
   labelApiKeyEnv: 'API key environment variable',
   labelTimeoutMs: 'Timeout (ms)',
   backendHint: 'Name an environment variable here, or store the API key directly in a connection profile above (write-only).',
-  backendFlatFoldRole: 'Compatibility area: configure new connections above',
-  backendHintFlat:
-    'Compatibility area: configure new connections in "Connections (multiple)" above; this block only serves as the fallback for fields no profile covers. Click the title to expand and edit.',
-  backendFlatFoldedSummary: 'collapsed (use the connections above for new config)',
+  backendHintRuntime:
+    'Implementation used when a connection leaves the field blank. It carries no address and no key: connections come from the active profile only.',
   backendActive: 'Effective implementation',
   apiKeyFromProfile: 'Key from the configuration (write-only, never shown)',
   apiKeyFromEnv: 'Key from {name}',
@@ -712,7 +732,24 @@ export const en: Record<keyof typeof zh, string> = {
   profileTestBadResponse: 'Bad response',
   profileTestMisconfigured: 'Incomplete configuration',
   profileLatency: '{ms} ms',
-  activeProfileMissing: 'The active profile "{name}" does not exist; the flat fallback settings are in use.',
+  activeProfileMissing: 'The active profile "{name}" does not exist: no connection is in force.',
+  unconfiguredTitle: 'No connection configured.',
+  unconfiguredNoProfiles: 'The settings document holds no connection profile. System 1 will not connect anywhere on its own.',
+  unconfiguredNoActive: 'Profiles exist, but none is the active one. System 1 will not pick one for you.',
+  unconfiguredActiveMissing: 'The active name "{name}" matches no saved profile. System 1 does not fall back to another one.',
+  unconfiguredLegacy:
+    'The document only carries the pre-g-066 flat connection fields, which no longer connect anything. Add a connection profile above and set it active (the old fields are neither converted nor deleted).',
+  unconfiguredEffect: 'Decisions use the local deterministic heuristics and make no external request.',
+  labelModelIds: 'Model ids (any number, one per line)',
+  profileModelIdsHint: 'The models this connection may ask for. Blank lets the backend apply its default model.',
+  profileSelectedModel: 'Model in use',
+  profileModelMissing: 'The selected model "{name}" is not in the list above: the runtime will send no model. Choose again.',
+  profileRenameKeyNeeded:
+    'After this rename the stored API key cannot be moved (a rename is a different settings path, and the secret does not follow it). Retype the API key here to save — leaving it empty refuses the save.',
+  errProfileModel: 'Connection row {row} has a blank model id in its model list',
+  errProfileModelSelection: 'Connection row {row} selects a model that is not in its list; choose again',
+  errProfileRenameKey:
+    'The stored API key cannot move with a rename and would be lost silently: {row}. Retype the key in that row to save (env-backed connections need nothing).',
 
   labelToolPrefix: 'Tool-name prefix',
   labelLedgerPath: 'Ledger JSONL path',

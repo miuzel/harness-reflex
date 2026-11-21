@@ -38,10 +38,13 @@ export const FIELD_GUIDE: Record<string, FieldGuide> = {
   'effort.minConfidence': { labelKey: 'labelEffortMinConfidence', helpKey: 'helpEffortMinConfidence', placeholder: '0.3' },
 
   backend: { labelKey: 'labelBackend', helpKey: 'helpBackend' },
-  'systemOne.baseUrl': { labelKey: 'labelBaseUrl', helpKey: 'helpBaseUrl', placeholder: 'https://api.typesafe.ai/v1/systemone' },
-  'systemOne.model': { labelKey: 'labelModel', helpKey: 'helpModel', placeholder: 'jev-latest' },
-  'systemOne.apiKeyEnv': { labelKey: 'labelApiKeyEnv', helpKey: 'helpApiKeyEnv', placeholder: 'JEV_API_KEY' },
-  'systemOne.timeoutMs': { labelKey: 'labelTimeoutMs', helpKey: 'helpTimeoutMs', placeholder: '10000' },
+  // The connection fields live on a profile now (g-066); the flat entries here
+  // were the compatibility block's, and the block is gone. The profile's own
+  // fields carry their labels from the row, and the model list — the one field
+  // whose shape is new — gets the guidance because it is the one a user will
+  // wonder about.
+  'systemOne.profiles.modelIds': { labelKey: 'labelModelIds', helpKey: 'helpModelIds', placeholder: 'jev-latest' },
+  'systemOne.profiles.selectedModel': { labelKey: 'labelModel', helpKey: 'helpSelectedModel' },
 
   toolPrefix: { labelKey: 'labelToolPrefix', helpKey: 'helpToolPrefix', placeholder: 'reflex_' },
   pruneThreshold: { labelKey: 'labelPruneThreshold', helpKey: 'helpPruneThreshold', placeholder: '500' },

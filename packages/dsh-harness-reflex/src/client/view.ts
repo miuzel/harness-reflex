@@ -31,6 +31,7 @@ import {
   overviewMetrics,
   panelStatus,
   recommendedToolSwitches,
+  splitModelIds,
   systemOneDegraded,
   type PanelDraft,
   type PanelStatusState,
@@ -439,18 +440,34 @@ function Button(props: {
   );
 }
 
-/** A text input bound to a draft field. */
-function TextInput(props: { value: string; onChange: (value: string) => void; placeholder?: string; mono?: boolean; disabled?: boolean }): ReactNode {
-  return h('input', {
-    type: 'text',
-    style: { ...S.input, ...(props.mono === true ? S.mono : {}) },
+/**
+ * A text input bound to a draft field.
+ *
+ * `multiline` renders a `<textarea>` instead, for a field that holds a *list*:
+ * the model ids of one connection are one-per-line, and a single-line input
+ * would hide every entry but the one under the cursor. Both controls route
+ * their edits through the same `onChange` (the draft field), never through an
+ * implicit commit: the value is only written to the Host on an explicit save.
+ */
+function TextInput(props: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  mono?: boolean;
+  disabled?: boolean;
+  multiline?: boolean;
+}): ReactNode {
+  const shared = {
+    style: { ...S.input, ...(props.mono === true ? S.mono : {}), ...(props.multiline === true ? { minHeight: '4.5em', resize: 'vertical' } : {}) },
     value: props.value,
     placeholder: props.placeholder ?? '',
     disabled: props.disabled === true,
     onChange: (event: { target: { value: string } }) => {
       props.onChange(event.target.value);
     }
-  });
+  };
+  if (props.multiline === true) return h('textarea', { ...shared, rows: 3 });
+  return h('input', { ...shared, type: 'text' });
 }
 
 /** A select bound to a draft field. */
@@ -560,6 +577,8 @@ function GuidedField(props: {
   placeholder?: string;
   mono?: boolean;
   disabled?: boolean;
+  /** Render a textarea for a list-valued field (one entry per line). */
+  multiline?: boolean;
   checkbox?: { checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void };
   children?: ReactNode;
 }): ReactNode {
@@ -587,7 +606,8 @@ function GuidedField(props: {
             onChange: props.onChange ?? (() => undefined),
             placeholder: props.placeholder ?? guide?.placeholder,
             mono: props.mono === true,
-            disabled: props.disabled === true
+            disabled: props.disabled === true,
+            multiline: props.multiline === true
           }));
   return h(
     Field,
@@ -962,6 +982,104 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
 }
 
 /**
+ * Whether renaming this saved row asks for its stored key again.
+ *
+ * True exactly when the row's key is a **literal stored in the settings
+ * document** (`apiKeyFromProfile`), the name it is saved under differs from the
+ * name it is being saved as, and the draft states no new value for it. That is
+ * the one combination where the key cannot survive: the Host retires the old
+ * subtree and cannot move a secret to another path.
+ *
+ * Deliberately false for the other two ways a resolved key can exist:
+ *
+ * - the key comes from an **environment variable** (`apiKeyFromProfile` false,
+ *   `apiKeyPresent` true): the variable is named, not re-stored, so a rename
+ *   changes nothing about it and renaming stays free;
+ * - the user **retyped** the key in this save (`apiKey` non-empty) or **cleared**
+ *   it on purpose (`clearKey`): the new path states its own answer.
+ *
+ * @param profile - the draft row.
+ * @param savedName - the name it is saved under (empty for an unsaved row).
+ * @param draftName - the name it is being saved as.
+ * @returns whether the row must ask for the key again.
+ */
+function renameNeedsKey(profile: ProfileDraft, savedName: string, draftName: string): boolean {
+  if (savedName.length === 0 || draftName.length === 0 || savedName === draftName) return false;
+  if (!profile.apiKeyPresent || !profile.apiKeyFromProfile) return false;
+  return profile.apiKey.trim().length === 0 && !profile.clearKey;
+}
+
+/**
+ * The single model a connection runs, chosen from the ids it lists.
+ *
+ * Why a radio group rather than a text field: `selectedModel` must be one of
+ * `modelIds`, and free text makes "selected a model that does not exist" a state
+ * a user can type themselves into. Here it cannot be typed — but it can still
+ * *arise* from a list edit (the selected id was deleted), which is why the group
+ * also reports a selection that no longer matches and why the save refuses one.
+ *
+ * With exactly one listed id the group renders as a plain statement: there is
+ * nothing to choose, and a single radio button reads as a decision the user has
+ * to re-confirm.
+ */
+function ModelSelection(props: {
+  t: Translate;
+  profile: ProfileDraft;
+  disabled: boolean;
+  onEdit: (patch: Partial<ProfileDraft>) => void;
+}): ReactNode {
+  const { t, profile, disabled, onEdit } = props;
+  const ids = splitModelIds(profile.modelIds);
+  const selection = profile.selectedModel.trim();
+  // Blank means "the first listed id", which is exactly what the runtime
+  // resolves for a connection that names no selection at all.
+  const effective = selection.length > 0 ? selection : (ids[0] ?? '');
+  const offList = selection.length > 0 && ids.length > 0 && !ids.includes(selection);
+  if (ids.length === 0) return null;
+  return h(
+    'div',
+    { style: { ...S.fieldRow, alignItems: 'center' }, 'data-profile-model-selection': profile.id },
+    h('span', { style: S.label }, t('profileSelectedModel')),
+    ids.length === 1
+      ? h('span', { style: S.mono, 'data-profile-selected-model': ids[0] }, ids[0] ?? '')
+      : h(
+          'span',
+          { style: { ...S.row, gap: '12px' } },
+          ...ids.map((id) =>
+            h(
+              'label',
+              {
+                key: id,
+                style: { ...S.row, gap: '4px', alignItems: 'center', cursor: disabled ? 'default' : 'pointer' },
+                'data-profile-model-option': id
+              },
+              h('input', {
+                type: 'radio',
+                name: `reflex-profile-model-${profile.id}`,
+                value: id,
+                checked: id === effective,
+                disabled,
+                // Choosing a model is a draft edit like any other: nothing is
+                // written until the user saves, so an exploratory click cannot
+                // change what the running transport sends.
+                onChange: () => onEdit({ selectedModel: id })
+              }),
+              h('span', { style: S.mono }, id)
+            )
+          )
+        ),
+    // Why the runtime would send no model at all, spelled out where the fix is.
+    offList
+      ? h(
+          'span',
+          { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-model-missing': 'true' },
+          t('profileModelMissing').replace('{name}', selection)
+        )
+      : null
+  );
+}
+
+/**
  * One profile row: name, its connection fields, the write-only key input, the
  * active switch, the connection test, and the remove action.
  *
@@ -977,11 +1095,17 @@ function ProfileRow(props: {
   probe: ProbeState | undefined;
   /** Whether this row's name is in the Host snapshot, i.e. the Host can probe it. */
   saved: boolean;
+  /**
+   * The name this row is **saved** under, or `''` for a row the Host has not
+   * read yet. Different from {@link ProfileDraft.name} exactly when the user has
+   * renamed the row and not saved it.
+   */
+  savedName: string;
   disabled: boolean;
   store: PanelStore;
   onEdit: (patch: Partial<ProfileDraft>) => void;
 }): ReactNode {
-  const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
+  const { t, profile, isActive, probe, saved, savedName, disabled, store, onEdit } = props;
   const name = profile.name.trim();
   const named = name.length > 0;
   // A row that carries content is one the user means to save, and an unnamed row
@@ -989,7 +1113,7 @@ function ProfileRow(props: {
   // a grey placeholder where a name would be (g-064: the row looked filled in
   // and the save looked clean, while nothing was written).
   const filled =
-    [profile.baseUrl, profile.model, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some(
+    [profile.baseUrl, profile.modelIds, profile.selectedModel, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some(
       (field) => field.trim().length > 0
     ) || profile.clearKey;
   // The availability matrix (g-062). Activation writes the *draft*, so a named
@@ -1058,22 +1182,31 @@ function ProfileRow(props: {
     h(
       'div',
       { style: S.profileHead },
-      // The name is edited *here*, not through a grey placeholder: the title is
-      // the name field of the row (g-064). A named row keeps it as text so a
-      // stray click cannot rename a row by accident; a new row opens as an input
-      // whose placeholder is the field it is asking for.
-      named
-        ? h('span', { style: S.profileName }, name)
-        : h('input', {
-            type: 'text',
-            style: { ...S.input, ...S.profileName, width: '13em' },
-            'data-profile-name': profile.id,
-            placeholder: t('profileNamePlaceholder'),
-            title: t('profileName'),
-            value: profile.name,
-            disabled,
-            onChange: (event: { target: { value: string } }) => onEdit({ name: event.target.value })
-          }),
+      // The name is edited **here, always as an input** (g-066).
+      //
+      // It used to be a `<span>` once the row was named, and an `<input>` only
+      // while it was not — so the first typed character renamed the row, swapped
+      // the control under the caret, and the element that had focus was replaced
+      // by text: the field looked locked after one keystroke and a *saved* row
+      // could not be renamed at all. The control now stays an input for every
+      // row, keyed by the row identity ({@link ProfileRow} is mounted with
+      // `key: profile.id`), so React re-uses one DOM node for the whole edit and
+      // nothing steals its focus, selection or caret.
+      //
+      // Editing it is still only a **draft** edit: nothing is written, committed
+      // or activated until the explicit save.
+      h('input', {
+        type: 'text',
+        style: { ...S.input, ...S.profileName, width: '13em', flex: '0 0 auto' },
+        'data-profile-name': profile.id,
+        placeholder: t('profileNamePlaceholder'),
+        title: t('profileName'),
+        value: profile.name,
+        disabled,
+        // No `key` prop: the node must be the *same* one across renders, which
+        // is exactly what keeps the caret where the user left it.
+        onChange: (event: { target: { value: string } }) => onEdit({ name: event.target.value })
+      }),
       // Worded, not just painted: the row says it is unnamed, and why that blocks
       // the save, in its own head line.
       named ? null : h('span', { style: S.profileUnnamedTag, 'data-profile-unnamed-tag': 'true' }, t('profileUnnamedTag')),
@@ -1136,6 +1269,21 @@ function ProfileRow(props: {
     testBlocked !== undefined && testBlocked !== t('profileTesting')
       ? h('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
       : null,
+    // A renamed row whose **stored key** would not survive the rename (g-066).
+    //
+    // The Host cannot move a secret to another path, and this page never held the
+    // value, so the save is refused until the user retypes it here. Saying so on
+    // the row — before the save, not as an auth failure afterwards — is the whole
+    // "never silently lose a key" promise. A row that names an environment
+    // variable resolves its key from there, so renaming it stays free: only a
+    // row whose key really is stored in the document can lose one.
+    renameNeedsKey(profile, savedName, name)
+      ? h(
+          'div',
+          { style: { ...S.hint, flexBasis: '100%', color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-rename-key': 'true' },
+          t('profileRenameKeyNeeded').replace('{name}', savedName)
+        )
+      : null,
     // The filled-in-but-unnamed case, spelled out on the row itself: the save is
     // refused for the whole page, so the reason has to be where the fix is.
     !named && filled
@@ -1160,12 +1308,15 @@ function ProfileRow(props: {
       }),
       GuidedField({
         t,
-        path: 'systemOne.profiles.model',
-        label: t('labelModel'),
-        value: profile.model,
+        path: 'systemOne.profiles.modelIds',
+        label: t('labelModelIds'),
+        hint: t('profileModelIdsHint'),
+        value: profile.modelIds,
         mono: true,
+        multiline: true,
         disabled,
-        onChange: (value) => onEdit({ model: value })
+        placeholder: 'jev-latest',
+        onChange: (value) => onEdit({ modelIds: value })
       }),
       GuidedField({
         t,
@@ -1185,6 +1336,10 @@ function ProfileRow(props: {
         onChange: (value) => onEdit({ apiKeyEnv: value })
       })
     ),
+    // The one model in force (g-066). A radio group over the ids the list field
+    // holds — never a free-text box — so the selection can only name a model
+    // that exists: the runtime sends this id and the connection test probes it.
+    ModelSelection({ t, profile, disabled, onEdit }),
     h(
       'div',
       { style: S.row },
@@ -1240,40 +1395,42 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   };
   const profiles = draft.backend.profiles;
   const activeName = draft.backend.active.trim();
-  // The flat block's own key readiness, from the snapshot's provenance: say what
-  // supplied the key ("from the configuration" / "from JEV_API_KEY") or name the
-  // candidates when none did — never claim a specific variable is empty when the
-  // chain may still serve the key from another one.
-  // A blank `env` is passed through as `{name}` so the copy still names the
-  // variable the configuration points at, instead of rendering an empty slot.
-  // Four states (g-059): a literal key, the one named variable, the named
-  // variable that is empty (a lock, not a fallback), or a fallback variable that
-  // answered because nothing was named. The last two call for different fixes,
-  // so they never share copy.
-  const flatKeyState =
+  // Whether anything connects (g-066). The snapshot decides it, never a guess
+  // about which fields look filled in: `unconfigured` is set by the resolution
+  // exactly when no active profile resolved, and it also says *why*.
+  const unconfigured = systemOne?.unconfigured;
+  // The key readiness of the connection in force, from the snapshot's
+  // provenance: say what supplied the key ("from the configuration" / "from
+  // JEV_API_KEY"), or that the variable it names is empty — never echo a value.
+  const connectionKeyState =
     systemOne?.apiKeyPresent !== true
       ? systemOne?.apiKeyLocked === true
-        ? t('apiKeyLockedNamed').replace('{name}', systemOne.apiKeyVariable ?? draft.backend.apiKeyEnv ?? '—')
+        ? t('apiKeyLockedNamed').replace('{name}', systemOne.apiKeyVariable ?? '—')
         : t('apiKeyMissing')
       : systemOne.apiKeySource === 'profile'
         ? t('apiKeyFromProfile')
         : systemOne.apiKeySource === 'fallback'
           ? t('apiKeyFromFallback').replace('{name}', systemOne.apiKeyVariable ?? '—')
           : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
-  // One line for the collapsed header. It leads with the effective key state,
-  // because that is the fact a user comes to this page to check; the note about
-  // which surface to edit is the copy inside the fold.
-  const flatConfigured = [draft.backend.baseUrl, draft.backend.model, draft.backend.apiKeyEnv, draft.backend.timeoutMs].some(
-    (field) => field.trim().length > 0
-  );
-  const flatSummary = `${t('backendFlatFoldRole')} · ${draft.backend.backend} · ${flatKeyState}${
-    flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''
-  }`;
+  const unconfiguredCopy =
+    unconfigured === undefined
+      ? undefined
+      : unconfigured === 'legacy-config-required'
+        ? t('unconfiguredLegacy')
+        : unconfigured === 'no-profiles'
+          ? t('unconfiguredNoProfiles')
+          : unconfigured === 'active-profile-missing'
+            ? t('unconfiguredActiveMissing').replace('{name}', activeName || '—')
+            : t('unconfiguredNoActive');
   const activeMissing = systemOne?.activeProfileMissing === true;
   // Which rows the Host has actually read: the probe route resolves the *saved*
   // document, so this set is what decides whether "测试" can do anything. The
   // draft's names are not enough — a name only a draft knows is not on the Host.
   const savedNames = new Set((systemOne?.profiles ?? []).map((profile) => profile.name?.trim() ?? '').filter((name) => name.length > 0));
+  // The saved name of every row, by page identity: what a rename is measured
+  // against, and the fact the row needs to tell the user its stored key cannot
+  // follow the name (g-066). Seeded rows keep their identity across re-seeds.
+  const originalRows = state.original.backend.profiles;
   // Rows are addressed by their page identity, never by position: one row's edit
   // must never land on whichever row happens to be third after a delete.
   const setProfile = (id: string, patch: Partial<ProfileDraft>): void => {
@@ -1318,6 +1475,7 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
                   isActive: activeName.length > 0 && profile.name.trim() === activeName,
                   probe: state.probes[profile.name.trim()],
                   saved: savedNames.has(profile.name.trim()),
+                  savedName: originalRows.find((row) => row.id === profile.id)?.name.trim() ?? '',
                   disabled,
                   store,
                   onEdit: (patch: Partial<ProfileDraft>) => setProfile(profile.id, patch)
@@ -1327,23 +1485,15 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
         Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() })
       )
     }),
-    // g-058: the flat block is the *compatibility* surface now — profiles above
-    // are the main editing face. It stays a real fallback of the resolution chain
-    // ("active profile > flat block > environment"), so it must remain editable,
-    // but it no longer competes with the profiles card for the same fields.
-    // Deliberately a plain call: `FoldedCard` holds no state of its own, so no
-    // hook can be grafted onto this component's sequence. The open flag lives
-    // here instead — g-059 shipped a crashing page because a *stateful* helper
-    // was invoked this way and React rejected the shifted hook count (#310).
-    FoldedCard({
+    // The *runtime* implementation choice, and — when nothing connects — the
+    // one place the page says so. The flat compatibility editor that used to sit
+    // here is gone (g-066): it was a second editor of the same connection fields,
+    // and its values were a silent fallback the runtime no longer reads.
+    Card({
       title: t('groupBackend'),
-      summary: flatSummary,
-      open: state.flatOpen,
-      onToggle: () => store.setFlatOpen(!state.flatOpen),
       children: h(
         'div',
         { style: S.field },
-        h('span', { style: S.hint }, t('backendHintFlat')),
         h(
           'div',
           { style: S.fieldRow },
@@ -1353,31 +1503,18 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
             value: draft.backend.backend,
             options: BACKEND_CHOICES.map((value) => ({ value, label: value })),
             disabled,
-            onChange: (value) => {
-              if (value === 'jev') {
-                setBackend({
-                  backend: value,
-                  baseUrl: draft.backend.baseUrl || 'https://api.typesafe.ai/v1/systemone',
-                  model: draft.backend.model || 'jev-latest',
-                  apiKeyEnv: draft.backend.apiKeyEnv || 'JEV_API_KEY'
-                });
-              } else {
-                setBackend({ backend: value });
-              }
-            }
-          }),
-          GuidedField({ t, path: 'systemOne.baseUrl', value: draft.backend.baseUrl, disabled, mono: true, onChange: (value) => setBackend({ baseUrl: value }) }),
-          GuidedField({ t, path: 'systemOne.model', value: draft.backend.model, disabled, mono: true, onChange: (value) => setBackend({ model: value }) }),
-          GuidedField({ t, path: 'systemOne.apiKeyEnv', hint: t('backendHint'), value: draft.backend.apiKeyEnv, disabled, mono: true, onChange: (value) => setBackend({ apiKeyEnv: value }) }),
-          GuidedField({ t, path: 'systemOne.timeoutMs', value: draft.backend.timeoutMs, disabled, onChange: (value) => setBackend({ timeoutMs: value }) })
+            // A pure implementation choice now: it names the backend a
+            // connection uses when the connection states none, and it no longer
+            // implies any connection settings at all.
+            hint: t('backendHintRuntime'),
+            onChange: (value) => setBackend({ backend: value })
+          })
         ),
         h(
           'div',
           { style: S.row },
           h('span', { style: S.label }, t('backendActive')),
           h('span', { style: S.mono }, String(systemOne?.active ?? '—')),
-          // Where the key really comes from, read from the snapshot's provenance
-          // rather than guessed from `apiKeyEnv`.
           h(
             'span',
             {
@@ -1389,11 +1526,24 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
                 )
               }
             },
-            flatKeyState
+            connectionKeyState
           )
         )
       )
     }),
+    // Nothing connects: say which absence it is, what that means for the
+    // running plugin, and what to do about it — in that order. Rendered from the
+    // snapshot's own fact, so a document that merely *looks* configured (an old
+    // flat block, a name that matches no row) cannot read as connected.
+    unconfiguredCopy === undefined
+      ? null
+      : h(
+          'div',
+          { style: { ...S.banner, flexBasis: '100%' }, 'data-unconfigured': unconfigured ?? '' },
+          h('strong', null, ` ${t('unconfiguredTitle')} `),
+          h('span', null, unconfiguredCopy),
+          h('span', null, ` ${t('unconfiguredEffect')}`)
+        ),
     Card({
       title: t('groupRuntime'),
       children: h(

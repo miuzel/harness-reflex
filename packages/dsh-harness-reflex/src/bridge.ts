@@ -40,6 +40,7 @@ import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './
 import type { DelegatedEffortInheritance } from './effort-delegation.js';
 import type { DelegationHealth } from './delegation-health.js';
 import type { InterventionEngine } from './interventions.js';
+import { UnconfiguredBackend } from './unconfigured-backend.js';
 import { VirtualModelRouter } from './router.js';
 
 /** Payload of the `choice` operation, mirroring the stdio MCP surface. */
@@ -949,7 +950,11 @@ function backendSignature(config: ResolvedReflexConfig): string {
     Object.entries(systemOne.profiles ?? {}).map(([name, profile]) => [
       name,
       profile.baseUrl ?? '',
-      profile.model ?? '',
+      // The model *list* and the selection, not the resolved model: a save that
+      // only changes which listed model is selected must rebuild the transport,
+      // and so must one that adds a model the selection could point at.
+      (profile.modelIds ?? []).join('\u0000'),
+      profile.selectedModel ?? '',
       profile.apiKeyEnv ?? '',
       profile.timeoutMs ?? null,
       profile.backend ?? '',
@@ -961,6 +966,23 @@ function backendSignature(config: ResolvedReflexConfig): string {
 
 /**
  * Build the backend a plugin activation should use.
+ *
+ * ## Nothing connects without an active profile (g-066)
+ *
+ * The connection fields come from the active profile only, so when
+ * {@link ResolvedSystemOneConfig.unconfigured} is set there is nothing to build
+ * and this function **refuses**. Building a backend anyway is exactly the old
+ * fallback: with no profile resolved, the vendored factory would choose `jev`
+ * because `JEV_API_KEY` happens to be exported, and the plugin would make a
+ * request nobody configured. Returning the mock backend instead was the other
+ * candidate and was rejected as well: "unconfigured" must not look like "answered
+ * locally with heuristics" in the ledger or the panel.
+ *
+ * The replacement is {@link UnconfiguredBackend}: the same deterministic local
+ * heuristics, under a name that says what is wrong, plus a health record that
+ * reports the missing connection instead of staying silent. `backend` may still
+ * be `mock` **explicitly**, which is a deployment choosing the in-process
+ * implementation on purpose — the two must remain distinguishable.
  *
  * The connection block of the resolved config overrides the environment for
  * this plugin instance only: the backend implementations already fall back to
@@ -985,13 +1007,20 @@ function backendSignature(config: ResolvedReflexConfig): string {
  * construction (tests, probes, a bare import) keeps the historical chain.
  * @param config - resolved plugin configuration.
  * @param env - environment the API-key chain reads; defaults to `process.env`.
- * @returns the forced backend, or one chosen from the environment for `auto`.
+ * @returns the forced backend, the local-only one when nothing is configured, or
+ *   one chosen from the environment for `auto`.
  */
 export function createBackend(
   config: ResolvedReflexConfig,
   env: Record<string, string | undefined> = process.env
 ): DecisionBackend {
   const { backend, baseUrl, model, timeoutMs } = config.systemOne;
+  // No active profile, no connection (g-066). Checked before the key chain and
+  // before the provider selector below, because both of them read the
+  // environment: reaching either would be the implicit request this removes.
+  if (config.systemOne.unconfigured !== undefined) {
+    return new UnconfiguredBackend(config.systemOne.unconfigured);
+  }
   const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));
   switch (backend) {
     case 'mock':
