@@ -32,7 +32,9 @@ const AUTHORED: ReflexConfig = {
     }
   },
   effort: { reasoningEffort: 'reflex', fallback: 'low', minConfidence: 0.3 },
-  systemOne: { apiKeyEnv: 'REFLEX_MOUNT_KEY' }
+  // g-066: the key variable is named by the active profile, which is the only
+  // thing that connects.
+  systemOne: { active: 'main', profiles: { main: { apiKeyEnv: 'REFLEX_MOUNT_KEY' } } }
 };
 
 /** A live runtime on the given authored config. */

@@ -43,8 +43,11 @@ export const FIELD_GUIDE: Record<string, FieldGuide> = {
   // fields carry their labels from the row, and the model list — the one field
   // whose shape is new — gets the guidance because it is the one a user will
   // wonder about.
+  'systemOne.profiles.baseUrl': { labelKey: 'labelBaseUrl', helpKey: 'helpBaseUrl', placeholder: 'https://api.typesafe.ai/v1/systemone' },
   'systemOne.profiles.modelIds': { labelKey: 'labelModelIds', helpKey: 'helpModelIds', placeholder: 'jev-latest' },
   'systemOne.profiles.selectedModel': { labelKey: 'labelModel', helpKey: 'helpSelectedModel' },
+  'systemOne.profiles.timeoutMs': { labelKey: 'labelTimeoutMs', helpKey: 'helpTimeoutMs', placeholder: '10000' },
+  'systemOne.profiles.apiKeyEnv': { labelKey: 'labelApiKeyEnv', helpKey: 'helpApiKeyEnv', placeholder: 'JEV_API_KEY' },
 
   toolPrefix: { labelKey: 'labelToolPrefix', helpKey: 'helpToolPrefix', placeholder: 'reflex_' },
   pruneThreshold: { labelKey: 'labelPruneThreshold', helpKey: 'helpPruneThreshold', placeholder: '500' },

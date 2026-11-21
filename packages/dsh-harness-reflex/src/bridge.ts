@@ -936,6 +936,11 @@ function backendSignature(config: ResolvedReflexConfig): string {
   const { backend, systemOne, interventions } = config;
   return JSON.stringify([
     backend,
+    // g-066: the resolved connection fields, which are the *active profile's*
+    // (plus the "unconfigured" reason, so activating or losing a profile
+    // rebuilds). They are listed here rather than left to the per-profile rows
+    // below because a resolved field is the one the transport is built from.
+    systemOne.unconfigured ?? '',
     systemOne.baseUrl ?? '',
     systemOne.model ?? '',
     systemOne.apiKeyEnv ?? '',
@@ -1015,6 +1020,12 @@ export function createBackend(
   env: Record<string, string | undefined> = process.env
 ): DecisionBackend {
   const { backend, baseUrl, model, timeoutMs } = config.systemOne;
+  // An explicitly chosen `mock` is a decision, not a connection: it answers
+  // in-process and reads nothing. It therefore outranks the "no active profile"
+  // rule — which exists to stop *network* connections nobody configured, and
+  // which would otherwise make `backend: 'mock'` impossible to ask for without
+  // also authoring a profile that the mock never uses.
+  if (backend === 'mock') return new MockDecisionBackend();
   // No active profile, no connection (g-066). Checked before the key chain and
   // before the provider selector below, because both of them read the
   // environment: reaching either would be the implicit request this removes.
@@ -1022,9 +1033,9 @@ export function createBackend(
     return new UnconfiguredBackend(config.systemOne.unconfigured);
   }
   const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));
+  // `backend` is narrowed to the three network implementations by the guard
+  // above; the switch below covers exactly those.
   switch (backend) {
-    case 'mock':
-      return new MockDecisionBackend();
     case 'jev':
       return new JevDecisionBackend({
         ...(baseUrl === undefined ? {} : { baseUrl }),

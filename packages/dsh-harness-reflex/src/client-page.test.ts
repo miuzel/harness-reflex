@@ -1317,40 +1317,36 @@ test('the effort page can turn adaptive effort off, and writes it with its group
 test('the backend page shows where the key lives, never the key', async () => {
   process.env.REFLEX_TEST_KEY = SECRET;
   try {
-    const { form } = settingsForm(AUTHORED);
-    const mounted = await mountPanel({ facts: facts(true), form });
+    const { form } = settingsForm(PROFILED);
+    const mounted = await mountPanel({ facts: profiledFacts(), form });
     openTab(mounted.tree, 'System 1 后端');
-    // g-058: the flat block folds by default; its fields are still editable.
-    const tree = await expandFlatBlock(mounted);
+    const tree = await mounted.runtime.flush();
     const text = textOf(tree);
 
+    // The connection fields are the *profile rows'* now (g-066): the flat block
+    // that also edited them is gone, so each fact lives where its row is.
+    assert.equal(inputOf(tree, 'Base URL'), 'http://flat.example', 'the row shows the address it would use');
     assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
-    assert.equal(inputOf(tree, 'Base URL'), 'http://127.0.0.1:8000/v1');
     assert.ok(!text.includes(SECRET), 'the page rendered an API key value');
-    assert.ok(text.includes('密钥来自 JEV_API_KEY'), 'the page does not say where the key came from');
+    assert.ok(!valuesOf(tree).includes(SECRET), 'the page rendered an API key value as an input value or placeholder');
     mounted.unmount();
   } finally {
     delete process.env.REFLEX_TEST_KEY;
   }
 });
 
-test('the backend page tells a locked lookup apart from an unconfigured one', async () => {
-  // g-059 reversed the g-058 wording. Naming a variable now *locks* the lookup,
-  // so "the variable you named is empty" is the truthful sentence — and it must
-  // not be confused with "nothing was named and nothing was found", which calls
-  // for a different fix and therefore different copy.
-  const { form } = settingsForm(AUTHORED);
-  const locked = await mountPanel({
-    facts: { ...facts(false), apiKeyLocked: true, apiKeyVariable: 'REFLEX_TEST_KEY' },
-    form
-  });
+test('a locked lookup and an unconfigured connection read as different facts', async () => {
+  // g-059: naming a variable *locks* the lookup, so "the variable you named is
+  // empty" is the truthful sentence — and g-066 adds the second sentence the page
+  // never had: what an *unconfigured* connection means (nothing connects at all).
+  const { form } = settingsForm(PROFILED);
+  const locked = await mountPanel({ facts: { ...profiledFacts(), apiKeyLocked: true, apiKeyVariable: 'REFLEX_TEST_KEY' }, form });
   try {
     openTab(locked.tree, 'System 1 后端');
-    const tree = await expandFlatBlock(locked);
-    const text = textOf(tree);
+    const text = textOf(await locked.runtime.flush());
     assert.ok(text.includes('已点名 REFLEX_TEST_KEY'), `the locked copy does not name the locked variable: ${text}`);
     assert.ok(text.includes('不会回退'), 'the locked copy does not say the lookup will not fall back');
-    assert.equal(inputOf(tree, 'API Key 环境变量名'), 'REFLEX_TEST_KEY');
+    assert.equal(unconfiguredBanner(await locked.runtime.flush()), undefined, 'a locked lookup is not an unconfigured document');
   } finally {
     locked.unmount();
   }
@@ -1358,111 +1354,132 @@ test('the backend page tells a locked lookup apart from an unconfigured one', as
   const unconfigured = await mountPanel({ facts: facts(false), form });
   try {
     openTab(unconfigured.tree, 'System 1 后端');
-    const tree = await expandFlatBlock(unconfigured);
-    const text = textOf(tree);
-    assert.ok(text.includes('未配置密钥'), 'the unconfigured copy does not state the absence');
-    assert.ok(text.includes('OPENAI_API_KEY'), 'the copy does not name the candidates it checked');
-    assert.ok(!text.includes('已点名'), 'an unconfigured block must not claim a variable was named');
+    const tree = await unconfigured.runtime.flush();
+    const banner = unconfiguredBanner(tree);
+    assert.ok(banner !== undefined, 'an unconfigured document shows no "not configured" banner');
+    const copy = textOf(banner);
+    assert.ok(copy.includes('未配置连接'), `the banner does not state the absence: ${copy}`);
+    assert.ok(copy.includes('不发出任何外部请求'), 'the banner does not say what happens instead');
+    assert.ok(!textOf(tree).includes('已点名'), 'an unconfigured document must not claim a variable was named');
   } finally {
     unconfigured.unmount();
   }
 });
 
-//#region the flat block's compatibility fold (g-058)
+//#region the flat compatibility block is gone (g-066)
 
 /**
- * Expand the compatibility fold on the connection page.
+ * The "nothing connects" banner, when the page renders one.
  *
- * The flat block is the fallback step of the resolution chain, so its fields must
- * stay editable — but they must not compete with the profiles card for the same
- * fields, which is what made the page read as two editors of one thing.
- * @param mounted - the mounted page, already switched to the backend tab.
- * @returns the freshly rendered tree, with the fold open.
+ * Found by its own data attribute rather than by its copy, so an assertion about
+ * *which* document state produced it cannot accidentally match ordinary text.
+ * @param tree - the rendered page.
+ * @returns the banner element, or `undefined`.
  */
-async function expandFlatBlock(mounted: Mounted): Promise<unknown> {
-  // `openTab` only marks the page stale; the tab content appears on the next
-  // render, so look at a freshly flushed tree rather than the previous one.
-  const rendered = await mounted.runtime.flush();
-  const header = elements(rendered).find((element) => element.type === 'button' && textOf(element).includes('决策后端连接'));
-  assert.ok(
-    header !== undefined,
-    `the compatibility fold has no disclosure header among [${elements(rendered)
-      .filter((element) => element.type === 'button')
-      .map((element) => textOf(element))
-      .join(' | ')}]`
-  );
-  assert.equal(header.props['data-reflex-folded'], undefined, 'the fold is not a button-led card');
-  fire(header, 'onClick');
-  return mounted.runtime.flush();
+function unconfiguredBanner(tree: unknown): Element | undefined {
+  return elements(tree).find((element) => typeof element.props['data-unconfigured'] === 'string');
 }
 
-test('the flat connection block folds by default and expands to the same editable fields', async () => {
+test('the flat connection editor is gone, and its fields are not rendered anywhere', async () => {
+  // The reported bug was two editors of the same connection, one of them a silent
+  // fallback the runtime no longer read. Both halves are asserted: no fold, and no
+  // field bound to a `systemOne.*` flat path.
   const { form } = settingsForm(AUTHORED);
   const mounted = await mountPanel({ facts: facts(true), form });
   openTab(mounted.tree, 'System 1 后端');
-  const collapsed = await mounted.runtime.flush();
+  const tree = await mounted.runtime.flush();
 
-  // 1. Collapsed by default: the card exists, its fields are not in the tree.
-  const folds = elements(collapsed).filter((element) => typeof element.props['data-reflex-folded'] === 'string');
-  assert.equal(folds.length, 1, 'exactly one compatibility fold');
-  assert.equal(folds[0]!.props['data-reflex-folded'], 'closed', 'the fold must start collapsed');
-  assert.equal(elements(collapsed).some((e) => e.type === 'label' && textOf(e).includes('API Key 环境变量名')), false, 'the folded block still rendered its fields');
+  const folds = elements(tree).filter((element) => typeof element.props['data-reflex-folded'] === 'string');
+  assert.deepEqual(folds, [], 'the compatibility fold is still rendered');
+  assert.ok(!textOf(tree).includes('兼容区'), 'the compatibility copy is still rendered');
+  assert.ok(!textOf(tree).includes('新配置请用上方连接配置'), 'the compatibility pointer is still rendered');
+  assert.ok(!textOf(tree).includes('已折叠'), 'the collapsed-state copy is still rendered');
 
-  // 2. The collapsed header still answers "is my key working", and says which
-  //    variable supplied it — the fact the old page got wrong.
-  const collapsedText = textOf(folds[0]!);
-  assert.ok(collapsedText.includes('决策后端连接'), 'the fold has no title');
-  assert.ok(collapsedText.includes('兼容区'), 'the fold does not explain its role');
-  assert.ok(collapsedText.includes('密钥来自 JEV_API_KEY'), 'the collapsed header does not report where the key came from');
-  assert.ok(collapsedText.includes('新配置请用上方连接配置'), 'the collapsed header does not point at the profiles above');
-
-  // 3. Expanding reveals the editable fields and their values, unchanged, plus
-  //    the explanation of the fold's role.
-  fire(folds[0]!.children[0] as any, 'onClick');
-  const expanded = await mounted.runtime.flush();
-  const expandedFold = elements(expanded).find((element) => typeof element.props['data-reflex-folded'] === 'string');
-  assert.ok(expandedFold !== undefined, 'the fold disappeared');
-  assert.equal(expandedFold.props['data-reflex-folded'], 'open', 'the fold did not open');
-  assert.equal(inputOf(expanded, 'API Key 环境变量名'), 'REFLEX_TEST_KEY', 'the expanded field lost its value');
-  assert.equal(inputOf(expanded, 'Base URL'), 'http://127.0.0.1:8000/v1');
-  assert.ok(textOf(expandedFold).includes('新连接请用上方'), 'the open fold does not say to use the profiles above');
-
-  // 4. The profiles card is the main editing surface: it is not folded, and its
-  //    own controls are on screen without expanding anything.
-  assert.ok(textOf(collapsed).includes('连接配置（可多套）'), 'the profiles card is missing');
-  assert.ok(find(collapsed, 'button', '新增配置') !== undefined, 'the profiles card is not editable on screen');
+  // No control addresses a flat connection path. The row editors address
+  // `systemOne.profiles.*`, which is a different (and the only) surface.
+  for (const element of elements(tree)) {
+    const field = element.props['data-reflex-path'];
+    if (typeof field !== 'string') continue;
+    assert.ok(
+      !/^systemOne\.(baseUrl|model|apiKeyEnv|timeoutMs)$/.test(field),
+      `the page still renders a flat connection field: ${field}`
+    );
+  }
+  // The profiles card, the runtime implementation choice and the runtime fields
+  // are what the page is made of now.
+  assert.ok(textOf(tree).includes('连接配置（可多套）'), 'the profiles card is missing');
+  assert.ok(find(tree, 'button', '新增配置') !== undefined, 'the profiles card is not editable on screen');
   mounted.unmount();
 });
 
-test('folding the flat block does not change what a save writes', async () => {
-  // The fold is presentational: both states render the same draft and the write
-  // path is untouched. This pins the "collapsed" state specifically, so a future
-  // refactor that derives the write from what is on screen would go red.
-  const { form } = settingsForm(PROFILED);
-  const mounted = await mountPanel({ facts: profiledFacts(), form });
-  openTab(mounted.tree, 'System 1 后端');
-  const tree = await mounted.runtime.flush();
-  const folded = elements(tree).find((element) => element.props['data-reflex-folded'] === 'closed');
-  assert.ok(folded !== undefined, 'the flat block did not start collapsed');
+test('an unconfigured document says so, and names which absence it is', async () => {
+  const cases: { authored: ReflexConfig; marker: string; needle: string }[] = [
+    { authored: { backend: 'jev', systemOne: {} } as ReflexConfig, marker: 'no-profiles', needle: '还没有任何连接配置' },
+    {
+      authored: { backend: 'jev', systemOne: { profiles: { p: { baseUrl: 'http://a' } } } } as ReflexConfig,
+      marker: 'no-active-profile',
+      needle: '没有选定当前激活'
+    },
+    {
+      authored: { backend: 'jev', systemOne: { active: 'typo', profiles: { p: { baseUrl: 'http://a' } } } } as ReflexConfig,
+      marker: 'active-profile-missing',
+      needle: '不对应任何已保存的连接配置'
+    },
+    {
+      // The pre-g-066 shape: a document that plainly holds an address and still
+      // connects nothing. This is the case the diagnosis exists for.
+      authored: { backend: 'jev', systemOne: { baseUrl: 'http://old', model: 'm' } } as unknown as ReflexConfig,
+      marker: 'legacy-config-required',
+      needle: '不构成一套连接配置'
+    }
+  ];
+  for (const { authored, marker, needle } of cases) {
+    // Both halves are the *same* document: the form is what the page edits, and
+    // the snapshot is where "unconfigured" is read from (the projection of this
+    // very config), so passing the default `facts(true)` here would describe
+    // AUTHORED instead and the case would prove nothing.
+    const { form } = settingsForm(authored);
+    const mounted = await mountPanel({ facts: { ...facts(true), config: resolveConfig(authored) }, form });
+    try {
+      openTab(mounted.tree, 'System 1 后端');
+      const tree = await mounted.runtime.flush();
+      const banner = unconfiguredBanner(tree);
+      assert.ok(banner !== undefined, `${marker}: no unconfigured banner`);
+      assert.equal(banner.props['data-unconfigured'], marker, `${marker}: wrong reason reported`);
+      assert.ok(textOf(banner).includes(needle), `${marker}: the copy does not explain it (${textOf(banner)})`);
+      assert.ok(textOf(banner).includes('不发出任何外部请求'), `${marker}: the consequence is not stated`);
+    } finally {
+      mounted.unmount();
+    }
+  }
+});
 
-  // Save with the fold still closed: the narrow-path write of the flat block and
-  // of every profile must still happen, and never a whole-group `systemOne` write.
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush(2);
-  const writes = mounted.observed.calls.map((call) => call.url);
-  assert.ok(writes.length > 0, 'saving wrote nothing');
-  const ops = (mounted.observed as unknown as { mutations?: { ops: { op?: string; path: string[] }[] }[] }).mutations;
-  if (ops !== undefined) {
-    for (const mutation of ops) {
-      for (const op of mutation.ops) {
+test('a save from the page never writes the flat connection fields', async () => {
+  // The write half of the same rule: even with a legacy document loaded, saving
+  // the page addresses neither `systemOne.baseUrl` nor its siblings, so the old
+  // keys neither leak into resolution nor get silently rewritten.
+  const legacy = { backend: 'jev', systemOne: { baseUrl: 'http://old', model: 'm', apiKeyEnv: 'K' } } as unknown as ReflexConfig;
+  const { form, mutations } = settingsForm(legacy);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  try {
+    openTab(mounted.tree, 'System 1 后端');
+    let tree = await mounted.runtime.flush();
+    type(inputElement(tree, '工具名前缀'), 'rv_');
+    tree = await mounted.runtime.flush();
+    fire(find(tree, 'button', '保存'), 'onClick');
+    await mounted.runtime.flush(2);
+    assert.ok(mutations.length > 0, 'saving wrote nothing');
+    for (const mutation of mutations) {
+      for (const op of plain(mutation.ops) as { op?: string; path: string[] }[]) {
         assert.ok(
-          !(op.op === 'set' && op.path.length === 1 && op.path[0] === 'systemOne'),
-          'a collapsed flat block produced a whole-group systemOne write'
+          !(op.path.length === 2 && op.path[0] === 'systemOne' && ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs'].includes(op.path[1]!)),
+          `the save addressed a flat connection field: ${op.path.join('.')}`
         );
       }
     }
+  } finally {
+    mounted.unmount();
   }
-  mounted.unmount();
 });
 
 //#endregion
@@ -1476,13 +1493,12 @@ const PROFILE_SECRET = 'sk-ui-profile-never-rendered-4d21';
 const PROFILED = {
   ...AUTHORED,
   systemOne: {
-    baseUrl: 'http://flat.example',
-    model: 'flat-model',
-    apiKeyEnv: 'REFLEX_TEST_KEY',
-    timeoutMs: 4000,
     active: 'primary',
     profiles: {
-      primary: { model: 'primary-model' },
+      // Every field a row is expected to show lives on the row it belongs to
+      // (g-066): there is no flat block beneath a profile to inherit from, so a
+      // fixture that kept one would make these assertions pass for the old reason.
+      primary: { baseUrl: 'http://flat.example', model: 'primary-model', apiKeyEnv: 'REFLEX_TEST_KEY', timeoutMs: 4000 },
       secondary: { baseUrl: 'http://secondary.example', model: 'secondary-model' }
     }
   }
@@ -1508,9 +1524,11 @@ test('the connection page lists every profile with its non-secret fields and the
   const tree = await mounted.runtime.flush();
   const text = textOf(tree);
 
-  // Both rows are listed by name, with their effective connection fields.
-  assert.ok(text.includes('primary'), 'the active profile row is missing');
-  assert.ok(text.includes('secondary'), 'the inactive profile row is missing');
+  // Both rows are listed, each by the name its field carries (the name is an
+  // editable input on every row since g-066, so it is a value, not text), with
+  // their effective connection fields.
+  assert.ok(namedRow(tree, 'primary') !== undefined, 'the active profile row is missing');
+  assert.ok(namedRow(tree, 'secondary') !== undefined, 'the inactive profile row is missing');
   assert.ok(text.includes('已激活'), 'the active marker is missing');
   assert.ok(text.includes('设为激活'), 'the activation switch is missing');
   // Presence is reported as a fact, and the key is never rendered.
@@ -1604,6 +1622,22 @@ function profileRows(tree: unknown): Element[] {
 }
 
 /** One button of one profile row, found by its label. */
+/**
+ * The row whose **name field** holds `name`.
+ *
+ * The name is an `<input>` value on every row now (g-066), so it is not part of
+ * the row's rendered text: looking a row up by `textOf(row).includes(name)`
+ * silently stops finding anything, which is exactly what these tests did.
+ * @param tree - the rendered page.
+ * @param name - the profile name to look for.
+ * @returns the row, or `undefined`.
+ */
+function namedRow(tree: unknown, name: string): Element | undefined {
+  return profileRows(tree).find((row) =>
+    elements(row).some((element) => element.props['data-profile-name'] !== undefined && String(element.props.value) === name)
+  );
+}
+
 function rowButton(row: Element, label: string): Element | undefined {
   return elements(row).find((element) => element.type === 'button' && textOf(element) === label);
 }
@@ -1643,7 +1677,10 @@ test('a new, unnamed row disables both actions and says why', async () => {
   assert.equal(new Set(keys.map((key) => String(key.props['data-profile-key']))).size, keys.length, 'two key inputs share a key');
 
   // The unnamed rows: activation and testing are greyed *out loud*.
-  const unnamed = rows.filter((row) => !textOf(row).includes('primary') && !textOf(row).includes('secondary'));
+  // Identified by the row's own marker, not by "the text does not mention a
+  // sibling": every row carries a name *input* now (g-066), and `valuesOf`-style
+  // matching on absence is what this replaces.
+  const unnamed = rows.filter((row) => String(row.props['data-profile-unnamed']) === 'true');
   assert.equal(unnamed.length, 2, 'the two new rows are not identifiable');
   for (const row of unnamed) {
     const activate = rowButton(row, '设为激活');
@@ -1661,9 +1698,13 @@ test('a new, unnamed row disables both actions and says why', async () => {
     assert.equal(remove?.props.disabled, false, 'an unnamed row must always be removable');
   }
 
-  // A saved row can be tested at once; the unsaved-but-named row cannot.
-  const saved = rows.find((row) => textOf(row).includes('primary'));
-  assert.ok(saved !== undefined);
+  // A saved row can be tested at once; the unsaved-but-named row cannot. Found
+  // by its *name field's value*, which is the row's own fact: the name lives in
+  // an input now (g-066), so it is not part of the row's text.
+  const saved = rows.find((row) =>
+    elements(row).some((element) => element.props['data-profile-name'] !== undefined && String(element.props.value) === 'primary')
+  );
+  assert.ok(saved !== undefined, 'the saved `primary` row is not identifiable by its name field');
   assert.equal(rowButton(saved, '测试')?.props.disabled, false, 'a saved row must be testable');
   mounted.unmount();
 });
@@ -1704,20 +1745,24 @@ test('an unnamed row keeps its typed connection fields, and says where its key w
   fire(find(tree, 'button', '新增配置'), 'onClick');
   tree = await mounted.runtime.flush();
 
-  const row = profileRows(tree).find((candidate) => !textOf(candidate).includes('primary') && !textOf(candidate).includes('secondary'));
+  const row = profileRows(tree).find((candidate) => String(candidate.props['data-profile-unnamed']) === 'true');
   assert.ok(row !== undefined, 'the new row is missing');
   // Fill it in the way the report did — including the variable name — without
   // ever saving it.
-  const inputs = elements(row).filter((element) => element.type === 'input');
-  assert.ok(inputs.length >= 4, `the row has no connection inputs: ${inputs.length}`);
-  // The name field comes first (g-064), then baseUrl, model, timeoutMs and
-  // apiKeyEnv in order; named by what they are, so a field addition fails loudly
-  // instead of shifting every value one box to the left.
-  const nameInput = inputs.find((element) => typeof element.props['data-profile-name'] === 'string');
+  const controls = elements(row).filter(
+    (element) => (element.type === 'input' || element.type === 'textarea') && element.props.type !== 'radio'
+  );
+  // The name field comes first (g-064), then baseUrl, the model list, timeoutMs
+  // and apiKeyEnv; found by what they are, so a field addition fails loudly
+  // instead of shifting every value one box to the left. The model list is a
+  // `<textarea>` (one id per line) since g-066, hence the looser tag filter —
+  // and the selection radios, which are a choice rather than a field, are skipped.
+  const nameInput = controls.find((element) => typeof element.props['data-profile-name'] === 'string');
   assert.ok(nameInput !== undefined, 'the row has no name field');
-  const connection = inputs.filter((element) => element !== nameInput && element.props.type !== 'password');
+  const connection = controls.filter((element) => element !== nameInput && element.props.type !== 'password');
   assert.equal(connection.length, 4, `expected four connection fields, saw ${connection.length}`);
   assert.equal(String(connection[0]?.props.placeholder), 'http://127.0.0.1:8000/v1', 'the first connection field is not Base URL');
+  assert.equal(connection[1]?.type, 'textarea', 'the second connection field is the model list');
   type(connection[0], 'https://newapi.aseit.cn/v1');
   type(connection[1], 'd3-ultra');
   type(connection[2], '2000');
@@ -1811,13 +1856,13 @@ test('activating a saved row shows the marker at once', async () => {
   let tree = await mounted.runtime.flush();
 
   // `secondary` is not the active profile yet.
-  const secondaryRow = profileRows(tree).find((row) => textOf(row).includes('secondary'));
+  const secondaryRow = namedRow(tree, 'secondary');
   assert.ok(secondaryRow !== undefined);
   assert.ok(!textOf(secondaryRow).includes('已激活'), 'the fixture already shows the marker');
   fire(rowButton(secondaryRow, '设为激活'), 'onClick');
   tree = await mounted.runtime.flush();
 
-  const activated = profileRows(tree).find((row) => textOf(row).includes('secondary'));
+  const activated = namedRow(tree, 'secondary');
   assert.ok(activated !== undefined);
   assert.ok(textOf(activated).includes('已激活'), 'the activation did not show up on the row');
   // The marker is a draft edit, so nothing was written yet.
@@ -2265,8 +2310,12 @@ function hostAcceptsPath(schema: HostSchemaNode, path: readonly string[]): boole
 }
 
 /** Apply path ops to a section the way the Host does, so the resolver can read it. */
-function applyOps(ops: readonly { op: string; path: string[]; value?: unknown }[]): Record<string, unknown> {
-  const section: Record<string, unknown> = {};
+function applyOps(ops: readonly { op: string; path: string[]; value?: unknown }[], base: Record<string, unknown> = {}): Record<string, unknown> {
+  // The Host applies each op to the *stored* section, not to an empty one, so a
+  // deep path (`systemOne.profiles.p.timeoutMs`) lands beside the siblings it
+  // does not mention. Building from `{}` would make a per-path write look like a
+  // replacement of the whole block — the bug this shape guards against.
+  const section: Record<string, unknown> = structuredClone(base);
   const edit = (at: Record<string, unknown>, path: readonly string[], op: { op: string; value?: unknown }): void => {
     const [head, ...rest] = path;
     if (head === undefined) return;
@@ -2288,41 +2337,32 @@ function applyOps(ops: readonly { op: string; path: string[]; value?: unknown }[
  * @param tree - the rendered page.
  */
 function editBackendPage(tree: unknown): void {
+  // One field per surface the page owns: a row field (the profile the row edits),
+  // and the runtime-level fields, which are untouched by the row edit and would
+  // otherwise drop out of the write inventory below.
   type(inputElement(tree, '超时（毫秒）'), '9000');
   type(inputElement(tree, '工具名前缀'), 'rv_');
-}
-
-/**
- * The disclosure button of the flat block's compatibility fold.
- * @param tree - the rendered page.
- * @param title - the fold's title in the page's language.
- * @returns the header element.
- */
-function flatFoldHeader(tree: unknown, title = '决策后端连接'): Element {
-  const header = elements(tree).find((element) => element.type === 'button' && textOf(element).includes(title));
-  assert.ok(
-    header !== undefined,
-    `the compatibility fold is missing among [${elements(tree)
-      .filter((element) => element.type === 'button')
-      .map((element) => textOf(element))
-      .join(' | ')}]`
-  );
-  return header;
+  type(inputElement(tree, '裁剪阈值（字符）'), '600');
+  type(inputElement(tree, '账本 JSONL 路径'), '.reflex/ledger.jsonl');
+  type(inputElement(tree, '校准曲线路径'), 'calibration.json');
+  // The implementation fallback is not restated by a row edit, so it is edited
+  // here too — otherwise the scalar `backend` path leaves the inventory.
+  fire(selectOf(tree, '后端实现'), 'onChange', { target: { value: 'mock' } });
 }
 
 //#endregion
 
-test('the System 1 backend page writes the scalar and its block, on the paths the Host declares', async () => {
-  const { form, mutations } = settingsForm(AUTHORED);
-  const mounted = await mountPanel({ facts: facts(true), form });
+test('the System 1 backend page writes the scalar and its rows, on the paths the Host declares', async () => {
+  const { form, mutations } = settingsForm(PROFILED);
+  const mounted = await mountPanel({ facts: profiledFacts(), form });
   openTab(mounted.tree, 'System 1 后端');
   let tree = await mounted.runtime.flush();
 
-  // g-058: the flat block folds by default; its fields stay editable once open.
-  fire(flatFoldHeader(tree), 'onClick');
-  tree = await mounted.runtime.flush();
-
-  editBackendPage(tree);
+  // Two edits, one per surface the page writes: a row field and a runtime field.
+  // (`editBackendPage` touches more surfaces for the write-inventory sweep below;
+  // naming the edits here keeps this test about *where* they land.)
+  type(inputElement(tree, '超时（毫秒）'), '9000');
+  type(inputElement(tree, '工具名前缀'), 'rv_');
   tree = await mounted.runtime.flush();
   fire(find(tree, 'button', '保存'), 'onClick');
   await mounted.runtime.flush();
@@ -2332,42 +2372,42 @@ test('the System 1 backend page writes the scalar and its block, on the paths th
   assert.deepEqual(
     ops.map((op) => [op.op, op.path]),
     [
-      // Unsets are emitted first so the operation list is stable; the sets then
-      // follow in page order.
-      // Every unset is emitted before every set (a stable, order-independent list).
-      ['unset', ['systemOne', 'active']],
-      ['unset', ['ledgerPath']],
-      ['unset', ['calibrationPath']],
-      // g-057: the connection block is written field by field, never as one
-      // group. A group `set` replaces the stored subtree, which would silently
-      // delete every `role('secret')` key the page never received.
-      ['set', ['backend']],
-      ['set', ['systemOne', 'baseUrl']],
-      ['set', ['systemOne', 'model']],
-      ['set', ['systemOne', 'apiKeyEnv']],
-      ['set', ['systemOne', 'timeoutMs']],
-      ['set', ['toolPrefix']],
-      ['set', ['pruneThreshold']]
+      // Exactly the two fields the test edited, and nothing else (g-066).
+      //
+      // The write is per path: a group whose expansion differs contributes only
+      // the paths whose value changed, so an unrelated edit no longer restates
+      // the whole connection block — nor emits the unsets that used to accompany
+      // every field the page had no opinion about.
+      //
+      // g-057's rule still holds inside that: the connection is addressed field
+      // by field, never as one group (a group `set` would delete every
+      // `role('secret')` key the page never received), and the only flat paths
+      // left are the ones in the schema at all — there are no flat connection
+      // fields any more.
+      ['set', ['systemOne', 'profiles', 'primary', 'timeoutMs']],
+      ['set', ['toolPrefix']]
     ],
     'the backend page must address the fields the Host declares, never its own group name'
   );
+  // `backend` is unchanged by this edit, so the per-path rule leaves it out — the
+  // scalar-union shape is pinned by the page's own choice list and by
+  // `groupWrites` (see `client-profiles.test.ts`), not by a re-statement here.
   const backendOp = ops.find((op) => op.path.length === 1 && op.path[0] === 'backend');
-  assert.equal(backendOp?.value, 'jev', '`backend` is a scalar union, never a block');
+  assert.equal(backendOp, undefined, 'an unchanged group is not restated');
   assert.equal(
     ops.some((op) => op.path.length === 1 && op.path[0] === 'systemOne'),
     false,
     'a whole-group systemOne write would delete stored secrets'
   );
-  const fieldValue = (name: string): unknown => ops.find((op) => op.path[1] === name && op.path[0] === 'systemOne')?.value;
-  assert.equal(fieldValue('timeoutMs'), 9000);
-  assert.equal(fieldValue('baseUrl'), 'http://127.0.0.1:8000/v1', 'an untouched field must round-trip');
+  const timeoutOp = ops.find((op) => op.path.join('.') === 'systemOne.profiles.primary.timeoutMs');
+  assert.equal(timeoutOp?.value, 9000, 'the edited timeout must land on the row it was edited in');
 
   // The Host accepts what the page wrote, and each field lands where it belongs.
-  const resolved = resolveConfig({ ...AUTHORED, ...applyOps(ops) } as ReflexConfig);
+  const resolved = resolveConfig({ ...PROFILED, ...applyOps(ops, { ...PROFILED }) } as ReflexConfig);
   assert.equal(resolved.backend, 'jev');
   assert.equal(resolved.toolPrefix, 'rv_');
-  assert.equal(resolved.systemOne.timeoutMs, 9000);
-  assert.equal(resolved.systemOne.baseUrl, 'http://127.0.0.1:8000/v1');
+  assert.equal(resolved.systemOne.timeoutMs, 9000, 'and the runtime reads it back from the active profile');
+  assert.equal(resolved.systemOne.baseUrl, 'http://flat.example', 'an untouched field round-trips from the row');
   assert.equal(resolved.pruneThreshold, 500);
   mounted.unmount();
 });
@@ -2394,17 +2434,13 @@ test('every path the panel writes is a path the Host declares volatile', async (
   ];
   const paths = new Set<string>();
   for (const perturb of perturbs) {
-    const { form, mutations } = settingsForm(AUTHORED);
-    const mounted = await mountPanel({ facts: facts(true), form });
+    // The fixture carries a connection row: the backend page edits *rows* now
+    // (g-066), and a document with no profile has no row field to touch — the
+    // sweep would then miss every `systemOne.profiles.*` path it exists to fence.
+    const { form, mutations } = settingsForm(PROFILED);
+    const mounted = await mountPanel({ facts: profiledFacts(), form });
     openTab(mounted.tree, perturb.tab);
     let tree = await mounted.runtime.flush();
-    // g-058: the backend page's flat block folds by default. Opening it is the
-    // step a user takes before editing those fields, and the write path behind
-    // them is unchanged.
-    if (perturb.tab === 'System 1 后端') {
-      fire(flatFoldHeader(tree), 'onClick');
-      tree = await mounted.runtime.flush();
-    }
     perturb.edit(tree);
     tree = await mounted.runtime.flush();
     fire(find(tree, 'button', '保存'), 'onClick');
@@ -2431,12 +2467,10 @@ test('every path the panel writes is a path the Host declares volatile', async (
       'routing',
       // g-057 writes the connection block field by field rather than as one
       // group (a group `set` would delete stored secrets), so the inventory names
-      // the leaves instead of `systemOne`.
-      'systemOne.active',
-      'systemOne.apiKeyEnv',
-      'systemOne.baseUrl',
-      'systemOne.model',
-      'systemOne.timeoutMs',
+      // the leaves instead of `systemOne`. g-066 moved those leaves onto the rows
+      // and made the write per path, so a save names exactly what it changed: the
+      // one row field it touched, and the runtime-level fields beside it.
+      'systemOne.profiles.primary.timeoutMs',
       'toolPrefix',
       'tools'
     ],
@@ -2622,16 +2656,27 @@ function leafPaths(value: unknown, prefix = ''): string[] {
 const OPTIONAL_SCHEMA_PATHS = [
   'routing.fallback',
   'effort.setting',
-  'systemOne.baseUrl',
-  'systemOne.model',
-  'systemOne.apiKeyEnv',
-  'systemOne.timeoutMs',
+  // The connection fields are the *profile's* now (g-066): a profile states each
+  // one individually, so none of them is guaranteed to appear in a resolved
+  // config, and the page renders them on every row it lists.
+  'systemOne.profiles.baseUrl',
+  'systemOne.profiles.modelIds',
+  'systemOne.profiles.selectedModel',
+  'systemOne.profiles.apiKeyEnv',
+  'systemOne.profiles.timeoutMs',
   'ledgerPath',
   'calibrationPath'
 ] as const;
 
-/** Resolved keys that are derived rather than edited on the page. */
-const DERIVED_SCHEMA_PATHS = new Set(['systemOne.backend', 'interventions.enabled']);
+/**
+ * Resolved keys that are derived rather than edited on the page.
+ *
+ * `systemOne.unconfigured` (g-066) is the newest: it is a *diagnosis* the
+ * resolution adds, not a field of the document — the page renders it as the
+ * "nothing connects" banner, and it is covered by its own test, which asserts the
+ * four reasons and the copy each one shows.
+ */
+const DERIVED_SCHEMA_PATHS = new Set(['systemOne.backend', 'interventions.enabled', 'systemOne.unconfigured']);
 
 /** Schema path → the page group that renders it. */
 function tabOfPath(path: string): string {
@@ -2653,6 +2698,8 @@ interface GuidanceCopy {
   optionalDefault: string;
   leaveDefault: string;
   unsetDefault: string;
+  /** The default of a field whose answer is relative to its row (the model selection). */
+  firstListed: string;
   onDefault: string;
   offDefault: string;
 }
@@ -2665,6 +2712,7 @@ const GUIDANCE_COPY: Record<'zh' | 'en', GuidanceCopy> = {
     optionalDefault: '不干预',
     leaveDefault: '不干预',
     unsetDefault: '未设置',
+    firstListed: '列表第一项',
     onDefault: '开启',
     offDefault: '关闭'
   },
@@ -2675,6 +2723,7 @@ const GUIDANCE_COPY: Record<'zh' | 'en', GuidanceCopy> = {
     optionalDefault: 'leave untouched',
     leaveDefault: 'leave untouched',
     unsetDefault: 'not set',
+    firstListed: 'the first listed id',
     onDefault: 'on',
     offDefault: 'off'
   }
@@ -2684,6 +2733,11 @@ const GUIDANCE_COPY: Record<'zh' | 'en', GuidanceCopy> = {
 function expectedDefaultToken(path: string, resolved: unknown, language: 'zh' | 'en'): string | undefined {
   const copy = GUIDANCE_COPY[language];
   if (path === 'effort.setting') return copy.leaveDefault;
+  // The model selection is not a resolved leaf of the default config: its
+  // default is *relative* to the row it belongs to ("the first listed id"), which
+  // no single resolved value can state. The copy says exactly that, and the
+  // behaviour is pinned in `systemone-profiles.test.ts` instead.
+  if (path === 'systemOne.profiles.selectedModel') return copy.firstListed;
   if (path.startsWith('interventions.capabilities.')) return 'inherit';
   if (path.startsWith('tools.enabled.')) {
     const suffix = path.split('.').pop() ?? '';
@@ -2731,8 +2785,8 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
 
   for (const language of ['zh', 'en'] as const) {
     const copy = GUIDANCE_COPY[language];
-    const { form } = settingsForm(AUTHORED);
-    const mounted = await mountPanel({ facts: facts(true), form, language });
+    const { form } = settingsForm(PROFILED);
+    const mounted = await mountPanel({ facts: profiledFacts(), form, language });
     keysByLanguage[language] = Object.keys(mounted.dictionaries['dsh-reflex.panel'] ?? {}).sort();
 
     const tabLabels: Record<string, string> = {
@@ -2751,16 +2805,10 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
       // a `useState` left non-default on one tab would leak into the `?`
       // expansion checks of the next. g-058 added such a state (the flat block's
       // fold), which is why this walk no longer shares one mounted page.
-      const { form: tabForm } = settingsForm(AUTHORED);
-      const page = await mountPanel({ facts: facts(true), form: tabForm, language });
+      const { form: tabForm } = settingsForm(PROFILED);
+      const page = await mountPanel({ facts: profiledFacts(), form: tabForm, language });
       openTab(page.tree, tabLabels[tab] as string);
-      let tree = await page.runtime.flush();
-      if (tab === 'backend') {
-        // The flat connection block folds by default; open it so its schema
-        // fields are still inspected.
-        fire(flatFoldHeader(tree, language === 'zh' ? '决策后端连接' : 'Backend connection'), 'onClick');
-        tree = await page.runtime.flush();
-      }
+      const tree = await page.runtime.flush();
       const wrappers = elements(tree).filter((element) => typeof element.props['data-reflex-path'] === 'string');
       for (const wrapper of wrappers) renderedPaths.add(String(wrapper.props['data-reflex-path']));
       const pathsInTab = uniquePaths.filter((path) => groupOf(path) === tab);
@@ -2772,11 +2820,14 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
         covered += 1;
 
         // Placeholder: every text input must show a non-empty example.
+        // A list-valued field is a `<textarea>` and a single choice among ids is a
+        // radio group (both g-066), so a *control* is any interactive element —
+        // the point is that the field is operable, not which tag expresses it.
         const control = elements(wrapper).find(
-          (element) => element.type === 'input' || element.type === 'select'
+          (element) => element.type === 'input' || element.type === 'select' || element.type === 'textarea' || element.type === 'button'
         );
         assert.ok(control !== undefined, `field ${path} has no control`);
-        const isText = control.type === 'input' && control.props.type === 'text';
+        const isText = (control.type === 'input' && control.props.type === 'text') || control.type === 'textarea';
         if (isText) {
           const placeholder = String(control.props.placeholder ?? '');
           assert.ok(placeholder.trim().length > 0, `field ${path} has an empty placeholder`);

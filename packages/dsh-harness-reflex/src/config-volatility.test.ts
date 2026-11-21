@@ -61,7 +61,11 @@ test('the System 1 backend block is writable field by field', () => {
   // The block itself is volatile, which is what makes its every field writable —
   // including any field a later version adds. Naming each one keeps the audit
   // honest: a field that moves out of the block has to keep a volatile parent.
-  const fields = ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'profiles', 'active'];
+  // g-066 removed the four flat connection fields: a connection is one active
+  // profile, so the block itself holds only the profiles and which one is in
+  // force. Their absence is asserted below, because a silently re-declared flat
+  // field would bring the implicit fallback back.
+  const fields = ['profiles', 'active'];
   assert.deepEqual(Object.keys(root.dict?.systemOne?.dict ?? {}), fields, 'the System 1 block changed shape');
   for (const field of fields) {
     assert.ok(isVolatilePath(root, ['systemOne', field]), `systemOne.${field} is not writable`);
@@ -70,7 +74,9 @@ test('the System 1 backend block is writable field by field', () => {
   // narrow path, so every one of them must be writable — including `apiKey`,
   // which is a `role('secret')` slot but is still an ordinary writable leaf. The
   // role governs *reads*, not writes: the page has to be able to store a key.
-  const profileFields = ['baseUrl', 'model', 'apiKey', 'apiKeyEnv', 'timeoutMs', 'backend'];
+  // `modelIds`/`selectedModel` are the g-066 model list; `model` stays because a
+  // one-model connection keeps working untouched.
+  const profileFields = ['baseUrl', 'model', 'modelIds', 'selectedModel', 'apiKey', 'apiKeyEnv', 'timeoutMs', 'backend'];
   const profileNode = root.dict?.systemOne?.dict?.profiles as (SchemaNode & { inner?: SchemaNode }) | undefined;
   assert.deepEqual(Object.keys(profileNode?.inner?.dict ?? {}), profileFields, 'the profile shape changed');
   for (const field of profileFields) {
@@ -80,6 +86,11 @@ test('the System 1 backend block is writable field by field', () => {
     );
   }
   assert.equal(profileNode?.inner?.dict?.apiKey?.meta.role, 'secret', 'apiKey must stay a declared secret');
+  // The flat block is gone: an undeclared field is one a save cannot address, so
+  // a document that still carries it keeps it exactly as written.
+  for (const field of ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs']) {
+    assert.equal(root.dict?.systemOne?.dict?.[field], undefined, `systemOne.${field} must not be declared any more`);
+  }
   // Sibling blocks the panel writes, and the dynamic dictionaries inside them.
   for (const path of [
     ['routing'],

@@ -2986,7 +2986,12 @@ function jevEngineFor(
 ): InterventionEngine {
   const resolved = resolveConfig({
     backend: 'jev',
-    systemOne: { baseUrl: 'http://jev.stub/v1/systemone', model: 'jev-latest', timeoutMs: 500 },
+    // g-066: the connection is one active profile; a flat block no longer
+    // connects, and `createBackend` would hand back the local-only backend.
+    systemOne: {
+      active: 'judge',
+      profiles: { judge: { baseUrl: 'http://jev.stub/v1/systemone', model: 'jev-latest', timeoutMs: 500 } }
+    },
     pruneThreshold: 500,
     interventions: { mode: 'active', capabilities: { prune: 'active' }, pruneJudgeMinChars }
   });

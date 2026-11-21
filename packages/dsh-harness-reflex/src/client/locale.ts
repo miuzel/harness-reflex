@@ -153,7 +153,7 @@ export const zh = {
   helpBackend:
     '用途：选择决策后端实现；格式：auto / mock / jev / vllm 之一；默认：auto；留空：按 auto 处理，由环境自动挑选可用后端。',
   helpBaseUrl:
-    '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
+    '用途：这一套连接指向的 System One 网关或 OpenAI 兼容 logits 端点；格式：http(s) URL；默认：未设置；留空：由后端决定地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
   helpModel:
     '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型（jev 为 jev-latest，simple-jev 为 Qwen/Qwen2.5-7B-Instruct）。',
   helpModelIds:
@@ -299,18 +299,18 @@ export const zh = {
   unconfiguredNoActive: '已有连接配置，但没有选定当前激活的一项。System 1 不会自行挑一个来用。',
   unconfiguredActiveMissing: '激活名「{name}」不对应任何已保存的连接配置。System 1 不会回退到其他配置。',
   unconfiguredLegacy:
-    '设置文档里只有旧版扁平连接字段，它们已不再用于连接。请在上方新增一套连接配置并设为激活（旧字段不会被自动转换或删除）。',
+    '设置文档里只有连接地址、模型这类顶层字段，它们不构成一套连接配置。请在上方新增一套连接配置并设为激活；顶层字段保持原样，不会被改写。',
   unconfiguredEffect: '此时决策使用本地确定性启发式，不发出任何外部请求。',
   labelModelIds: '模型 ID（可多个，每行一个）',
   profileModelIdsHint: '这一套连接可用的模型。留空表示由后端决定默认模型。',
   profileSelectedModel: '当前使用的模型',
   profileModelMissing: '所选模型「{name}」不在上面的模型列表里：运行时不会发送任何模型，请重新选择。',
   profileRenameKeyNeeded:
-    '这一行改名后，已保存的 API Key 无法迁移（改名等于换一个保存路径，密钥不会跟着走）。请在此处重新填写 API Key 再保存——留空将拒绝保存。',
+    '改名后，这套配置已保存的 API Key 带不到新名字下（名字就是保存路径）。请在此处重新填写 API Key 再保存——留空会拒绝保存。',
   errProfileModel: '第 {row} 行连接配置的模型 ID 为空或含空行，请检查',
   errProfileModelSelection: '第 {row} 行连接配置所选的模型不在模型列表里，请重新选择',
   errProfileRenameKey:
-    '改名后已保存的 API Key 无法迁移，会静默丢失：{row}。请在对应行重新填写 API Key 后保存（来源为环境变量的连接不需要）。',
+    '这些配置改名后，已保存的 API Key 会随之丢失：{row}。请在对应行重新填写 API Key 后再保存（密钥来自环境变量的配置不受影响）。',
 
   labelToolPrefix: '工具名前缀',
   labelLedgerPath: '账本 JSONL 路径',
@@ -738,18 +738,18 @@ export const en: Record<keyof typeof zh, string> = {
   unconfiguredNoActive: 'Profiles exist, but none is the active one. System 1 will not pick one for you.',
   unconfiguredActiveMissing: 'The active name "{name}" matches no saved profile. System 1 does not fall back to another one.',
   unconfiguredLegacy:
-    'The document only carries the pre-g-066 flat connection fields, which no longer connect anything. Add a connection profile above and set it active (the old fields are neither converted nor deleted).',
+    'The document only carries top-level connection fields (address, model, key variable), which do not form a connection profile. Add a profile above and set it active; the top-level fields are left exactly as they are.',
   unconfiguredEffect: 'Decisions use the local deterministic heuristics and make no external request.',
   labelModelIds: 'Model ids (any number, one per line)',
   profileModelIdsHint: 'The models this connection may ask for. Blank lets the backend apply its default model.',
   profileSelectedModel: 'Model in use',
   profileModelMissing: 'The selected model "{name}" is not in the list above: the runtime will send no model. Choose again.',
   profileRenameKeyNeeded:
-    'After this rename the stored API key cannot be moved (a rename is a different settings path, and the secret does not follow it). Retype the API key here to save — leaving it empty refuses the save.',
+    'After the rename this connection\'s stored API key does not follow the new name (the name is the settings path). Retype the API key here to save — leaving it empty refuses the save.',
   errProfileModel: 'Connection row {row} has a blank model id in its model list',
   errProfileModelSelection: 'Connection row {row} selects a model that is not in its list; choose again',
   errProfileRenameKey:
-    'The stored API key cannot move with a rename and would be lost silently: {row}. Retype the key in that row to save (env-backed connections need nothing).',
+    'The stored API key of these connections would be lost with the rename: {row}. Retype the key in each row before saving (connections whose key comes from an environment variable are unaffected).',
 
   labelToolPrefix: 'Tool-name prefix',
   labelLedgerPath: 'Ledger JSONL path',

@@ -480,6 +480,20 @@ function modelIdsOf(profile: ProfileDraft): string[] {
   return splitModelIds(profile.modelIds);
 }
 
+/**
+ * A row's text field as a string, tolerating a draft that does not carry it.
+ *
+ * Drafts are also built by callers other than {@link draftFromConfig} (tests, a
+ * FutureHost that re-seeds without the field), and a read of a missing field must
+ * never throw out of a validation or a diff: the page would freeze instead of
+ * refusing a save.
+ * @param value - the field's value.
+ * @returns the value, or `''`.
+ */
+function textOf(value: string | undefined | null): string {
+  return typeof value === 'string' ? value : '';
+}
+
 /** Read the authored pools of a routing section. */
 function poolsFromRouting(routing: Record<string, unknown>): PoolDraft[] {
   const models = asRecord(routing.models);
@@ -900,7 +914,7 @@ export function unnamedFilledRows(draft: PanelDraft): number[] {
     ];
     // `clearKey` on a row whose name is empty targets a slot that cannot exist,
     // so it is not content of its own.
-    if (content.some((field) => field.trim().length > 0)) rows.push(index + 1);
+    if (content.some((field) => textOf(field).trim().length > 0)) rows.push(index + 1);
   });
   return rows;
 }
@@ -953,7 +967,7 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
   const offListRows: string[] = [];
   for (const [index, profile] of draft.backend.profiles.entries()) {
     const label = profileLabel(profile, index);
-    if (profile.timeoutMs.trim() !== '') {
+    if (textOf(profile.timeoutMs).trim() !== '') {
       const timeout = asNumber(profile.timeoutMs);
       if (timeout === undefined || !Number.isInteger(timeout) || timeout < 100) badTimeoutRows.push(label);
     }
@@ -961,13 +975,10 @@ export function validateDraft(draft: PanelDraft): DraftValidation {
     // one is not "almost fine": it would be selectable and would fail at the
     // gateway instead of here.
     const ids = modelIdsOf(profile);
-    const listed = splitModelIds(profile.modelIds);
-    if (listed.length !== ids.length || ids.length === 0) {
-      // `ids` drops blanks, so a draft that named anything blank has fewer ids
-      // than the raw field has entries. An empty field is legal: the backend
-      // then applies its own default model.
-      if (profile.modelIds.trim().length > 0) badModelRows.push(label);
-    }
+    // An empty field is legal — the backend then applies its own default model —
+    // so only a field that *names* something but yields no usable id (blank
+    // lines, commas only) is refused.
+    if (ids.length === 0 && textOf(profile.modelIds).trim().length > 0) badModelRows.push(label);
     const selection = profile.selectedModel.trim();
     if (selection.length > 0 && ids.length > 0 && !ids.includes(selection)) offListRows.push(label);
   }
@@ -1183,7 +1194,7 @@ export function groupWrites(draft: PanelDraft, group: keyof PanelDraft): GroupWr
         // The selection is written only when it is not simply "the first id",
         // and cleared as soon as it is: a stored `selectedModel` that stays
         // behind after the list shrinks would resolve to no model at all.
-        const selection = profile.selectedModel.trim();
+        const selection = textOf(profile.selectedModel);
         const first = modelIds[0];
         if (selection.length === 0 || selection === first) {
           writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: undefined });
@@ -1383,7 +1394,19 @@ export function diffDraft(original: PanelDraft, draft: PanelDraft, user?: unknow
     const before = groupWrites(original, group);
     const after = groupWrites(draft, group);
     if (sameValue(before, after)) continue;
+    // A change lands only where the *path* says something different.
+    //
+    // A group is written whole (that is `groupWrites`'s contract), but its
+    // expansion now names one path per row field, and re-stating every row
+    // because one of them changed is exactly what made an unrelated save look
+    // like a rewrite of the connection block (g-066). Comparing the value at the
+    // same path keeps the group-level rule — a row that *moves* still writes its
+    // new path, and the old one is retired above — while an untouched row
+    // contributes nothing at all.
+    const was = new Map(before.map((write) => [write.path.join('\u0000'), write.value]));
     for (const write of after) {
+      const key = write.path.join('\u0000');
+      if (was.has(key) && sameValue(was.get(key), write.value)) continue;
       ops.push(write.value === undefined ? { op: 'unset', path: write.path } : { op: 'set', path: write.path, value: write.value });
     }
   }

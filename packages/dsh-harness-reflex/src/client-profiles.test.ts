@@ -64,7 +64,9 @@ function row(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
     name: 'primary',
     baseUrl: '',
-    model: '',
+    modelIds: '',
+    selectedModel: '',
+    legacyModelShape: false,
     apiKeyEnv: '',
     timeoutMs: '',
     backend: '',
@@ -97,7 +99,7 @@ function writeAt(writes: { path: string[]; value?: unknown }[], path: string[]):
 }
 
 test('the page never writes the systemOne group, which would delete a stored key', () => {
-  const writes = panel.groupWrites(draftWith([row({ model: 'm1' }), row({ name: 'secondary', baseUrl: 'http://b' })]), 'backend');
+  const writes = panel.groupWrites(draftWith([row({ modelIds: 'm1' }), row({ name: 'secondary', baseUrl: 'http://b' })]), 'backend');
   assert.equal(hasGroupWrite(writes), false, 'a group write would drop every secret slot');
   for (const write of writes) {
     if (write.path[0] !== 'systemOne') continue;
@@ -146,7 +148,8 @@ test('the key is never seeded from a read, and presence comes from the Host', ()
   );
   const [primary] = seeded.backend.profiles;
   assert.equal(primary.name, 'primary');
-  assert.equal(primary.model, 'm1');
+  assert.equal(primary.modelIds, 'm1', 'a legacy single model seeds the one-entry list');
+  assert.equal(primary.selectedModel, 'm1', 'and is the selected one, so nothing runs unselected');
   assert.equal(primary.apiKey, '', 'a read must never seed the key');
   assert.equal(primary.apiKeyPresent, false, 'presence is unknown until the live snapshot says');
 });
@@ -160,13 +163,22 @@ test('an unrelated edit of a row that has a stored key leaves that key alone', (
     ...seeded,
     backend: {
       ...seeded.backend,
-      profiles: seeded.backend.profiles.map((profile: any) => ({ ...profile, model: 'new-model', apiKeyPresent: true, apiKeyFromProfile: true }))
+      profiles: seeded.backend.profiles.map((profile: any) => ({
+        ...profile,
+        modelIds: 'new-model',
+        selectedModel: 'new-model',
+        apiKeyPresent: true,
+        apiKeyFromProfile: true
+      }))
     }
   };
   const writes = panel.groupWrites(edited, 'backend');
   assert.equal(hasGroupWrite(writes), false);
   assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'apiKey']), undefined, 'the stored key survives');
+  // The row was read in the legacy shape and still holds one model, so the save
+  // keeps that shape: `model` is updated, and no `modelIds` is left beside it.
   assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'model'])?.value, 'new-model');
+  assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'modelIds'])?.value, undefined, 'no second shape');
 });
 
 test('a blanked profile field becomes an unset so the row inherits again', () => {
@@ -182,7 +194,7 @@ test('a blanked profile field becomes an unset so the row inherits again', () =>
     }
   };
   const writes = panel.groupWrites(blanked, 'backend');
-  assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'baseUrl'])?.value, undefined, 'inherits the flat block again');
+  assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'baseUrl'])?.value, undefined, 'the row states no address');
   assert.equal(writeAt(writes, ['systemOne', 'profiles', 'primary', 'model'])?.value, 'm1', 'the untouched field is kept');
 });
 
@@ -193,7 +205,7 @@ test('an unnamed row is still never written, but it is no longer silently accept
   // the same empty write list, the diff came out empty, and the save reported
   // "clean" while the row silently vanished. The row cannot be written (this
   // assertion, unchanged) and must now be *refused* instead (the next ones).
-  const writes = panel.groupWrites(draftWith([row({ name: '', model: 'm' })]), 'backend');
+  const writes = panel.groupWrites(draftWith([row({ name: '', modelIds: 'm' })]), 'backend');
   assert.equal(writes.some((write) => write.path.includes('')), false, 'an empty path segment would be invalid');
   // A blank row is not refused: "新增配置" leaves one behind and it must not
   // block the rest of the page.
@@ -621,12 +633,15 @@ test('renaming several rows at once retires every old name', async () => {
   const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
   assert.equal(hasSubtreeUnset(ops, 'alpha'), true, `alpha not deleted: ${profileOps(ops).join(' | ')}`);
   assert.equal(hasSubtreeUnset(ops, 'beta'), true, `beta not deleted: ${profileOps(ops).join(' | ')}`);
-  // The untouched row is left exactly as it was. `backend` is one group, so a
-  // group write may restate it — but nothing may *delete* it, and its own value
-  // must be carried over unchanged.
+  // The untouched row is left exactly as it was. The write is per path now
+  // (g-066), so "left alone" is the stronger statement: no operation addresses
+  // `gamma` at all, which is neither a deletion nor a restatement.
   assert.equal(hasSubtreeUnset(ops, 'gamma'), false, 'an untouched row must not be deleted');
-  const gammaModel = ops.find((op) => op.op === 'set' && op.path.join('.') === 'systemOne.profiles.gamma.model');
-  assert.equal(gammaModel?.value, 'g', 'the untouched row must keep its value');
+  assert.deepEqual(
+    ops.filter((op) => op.path.includes('gamma')),
+    [],
+    `an untouched row was rewritten: ${profileOps(ops).join(' | ')}`
+  );
   assert.equal(form.mutations.length, 1, 'one save, one atomic write');
 });
 
@@ -640,7 +655,7 @@ test('renaming a row while editing its fields deletes the old name and writes th
     backend: {
       ...current.backend,
       profiles: current.backend.profiles.map((row: any) =>
-        row.id === saved.id ? { ...row, name: 'newname', model: 'm2', apiKeyEnv: 'NEW_KEY' } : row
+        row.id === saved.id ? { ...row, name: 'newname', modelIds: 'm2', selectedModel: 'm2', apiKeyEnv: 'NEW_KEY' } : row
       )
     }
   }));
@@ -650,6 +665,8 @@ test('renaming a row while editing its fields deletes the old name and writes th
   assert.equal(hasSubtreeUnset(ops, 'oldname'), true, `the old name was not deleted: ${profileOps(ops).join(' | ')}`);
   const valueAt = (field: string): unknown =>
     ops.find((op) => op.op === 'set' && op.path.join('.') === `systemOne.profiles.newname.${field}`)?.value;
+  // The row was read as a legacy one-model connection and the user replaced the
+  // id, so the save keeps that shape (`model`) rather than migrating it.
   assert.equal(valueAt('model'), 'm2', 'the edited value must land under the new name');
   assert.equal(valueAt('apiKeyEnv'), 'NEW_KEY', 'the newly typed value must land under the new name');
   assert.equal(valueAt('baseUrl'), 'http://a', 'the untouched value travels with the row');

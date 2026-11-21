@@ -681,7 +681,10 @@ export function projectSystemOne(config: ResolvedReflexConfig, facts: PanelRunti
       ...(projected.timeoutMs === undefined ? {} : { timeoutMs: projected.timeoutMs }),
       ...(projected.backend === undefined ? {} : { backend: projected.backend }),
       ...(profile.modelIds === undefined ? {} : { modelIds: [...profile.modelIds] }),
-      ...(profile.selectedModel === undefined ? {} : { selectedModel: profile.selectedModel }),
+      // The *effective* selection, including the implicit "first listed id", so
+      // the page can show which model runs instead of rendering an empty choice.
+      // A broken selection projects no model at all (see `modelMissing`).
+      ...(projected.model === undefined ? {} : { selectedModel: projected.model }),
       ...(selectedOutsideList ? { modelMissing: true } : {})
     };
   });

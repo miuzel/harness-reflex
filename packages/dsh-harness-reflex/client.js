@@ -460,10 +460,16 @@ window.__ModuleLoader__.load({
 			    'effort.fallback': { labelKey: 'labelEffortFallback', helpKey: 'helpEffortFallback' },
 			    'effort.minConfidence': { labelKey: 'labelEffortMinConfidence', helpKey: 'helpEffortMinConfidence', placeholder: '0.3' },
 			    backend: { labelKey: 'labelBackend', helpKey: 'helpBackend' },
-			    'systemOne.baseUrl': { labelKey: 'labelBaseUrl', helpKey: 'helpBaseUrl', placeholder: 'https://api.typesafe.ai/v1/systemone' },
-			    'systemOne.model': { labelKey: 'labelModel', helpKey: 'helpModel', placeholder: 'jev-latest' },
-			    'systemOne.apiKeyEnv': { labelKey: 'labelApiKeyEnv', helpKey: 'helpApiKeyEnv', placeholder: 'JEV_API_KEY' },
-			    'systemOne.timeoutMs': { labelKey: 'labelTimeoutMs', helpKey: 'helpTimeoutMs', placeholder: '10000' },
+			    // The connection fields live on a profile now (g-066); the flat entries here
+			    // were the compatibility block's, and the block is gone. The profile's own
+			    // fields carry their labels from the row, and the model list — the one field
+			    // whose shape is new — gets the guidance because it is the one a user will
+			    // wonder about.
+			    'systemOne.profiles.baseUrl': { labelKey: 'labelBaseUrl', helpKey: 'helpBaseUrl', placeholder: 'https://api.typesafe.ai/v1/systemone' },
+			    'systemOne.profiles.modelIds': { labelKey: 'labelModelIds', helpKey: 'helpModelIds', placeholder: 'jev-latest' },
+			    'systemOne.profiles.selectedModel': { labelKey: 'labelModel', helpKey: 'helpSelectedModel' },
+			    'systemOne.profiles.timeoutMs': { labelKey: 'labelTimeoutMs', helpKey: 'helpTimeoutMs', placeholder: '10000' },
+			    'systemOne.profiles.apiKeyEnv': { labelKey: 'labelApiKeyEnv', helpKey: 'helpApiKeyEnv', placeholder: 'JEV_API_KEY' },
 			    toolPrefix: { labelKey: 'labelToolPrefix', helpKey: 'helpToolPrefix', placeholder: 'reflex_' },
 			    pruneThreshold: { labelKey: 'labelPruneThreshold', helpKey: 'helpPruneThreshold', placeholder: '500' },
 			    ledgerPath: { labelKey: 'labelLedgerPath', helpKey: 'helpLedgerPath', placeholder: '.reflex/ledger.jsonl' },
@@ -816,8 +822,10 @@ window.__ModuleLoader__.load({
 			    helpEffortFallback: '用途：System One 与线索分类器都没有证据时使用的兜底档位；格式：一个自适应档位；默认：medium；范围：必须是已提供的自适应档位之一，留空按默认处理。',
 			    helpEffortMinConfidence: '用途：System One 的置信度达到多少才压过线索分类器；格式：小数；默认：0.3；范围：0~1，越界会被拒绝。',
 			    helpBackend: '用途：选择决策后端实现；格式：auto / mock / jev / vllm 之一；默认：auto；留空：按 auto 处理，由环境自动挑选可用后端。',
-			    helpBaseUrl: '用途：System One 网关或 OpenAI 兼容 logits 端点的地址；格式：http(s) URL；默认：未设置；留空：使用环境变量或后端内置默认地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
+			    helpBaseUrl: '用途：这一套连接指向的 System One 网关或 OpenAI 兼容 logits 端点；格式：http(s) URL；默认：未设置；留空：由后端决定地址（jev 为 https://api.typesafe.ai/v1/systemone，simple-jev 为 http://localhost:8000）。',
 			    helpModel: '用途：后端请求使用的模型 ID；格式：非空字符串；默认：未设置；留空：使用环境变量或后端内置默认模型（jev 为 jev-latest，simple-jev 为 Qwen/Qwen2.5-7B-Instruct）。',
+			    helpModelIds: '用途：这一套连接可用的模型 ID 列表；格式：每行一个（也接受逗号分隔），空行与重复项会被忽略；默认：未设置；留空：由后端决定默认模型。填写多个后，在「当前使用的模型」里单选其中一个。',
+			    helpSelectedModel: '用途：这套连接实际使用（运行与「测试」都读这一个）的模型；格式：必须是模型列表里的某一项；默认：列表第一项；留空：按第一项处理。选择不在列表里的模型会被拒绝保存。',
 			    helpApiKeyEnv: '用途：存放 API Key 的环境变量名（不是密钥本身）；格式：大写环境变量名，例如 JEV_API_KEY；默认：未设置；留空：由后端按 SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY 依次兜底，密钥永远不会写进设置文档。',
 			    helpTimeoutMs: '用途：单次后端请求的超时时间；格式：毫秒整数；默认：未设置；留空：使用后端默认超时（jev 10000 ms、simple-jev 8000 ms），小于 100 会被拒绝。',
 			    helpToolPrefix: '用途：所有 reflex_* 工具注册名的前缀；格式：小写字母、数字与下划线；默认：reflex_；留空：按默认前缀注册，空字符串会被拒绝。',
@@ -874,9 +882,7 @@ window.__ModuleLoader__.load({
 			    labelApiKeyEnv: 'API Key 环境变量名',
 			    labelTimeoutMs: '超时（毫秒）',
 			    backendHint: '可填环境变量名，或在上方连接配置里直接保存 API Key（只写不读）。',
-			    backendFlatFoldRole: '兼容区：新配置请用上方连接配置',
-			    backendHintFlat: '兼容区：新连接请用上方「连接配置（可多套）」，这里只作为它未覆盖字段时的兜底。点标题可展开编辑。',
-			    backendFlatFoldedSummary: '已折叠（新配置请用上方连接配置）',
+			    backendHintRuntime: '连接留空该字段时使用的后端实现。它不包含任何连接地址或密钥：连接只来自当前激活的配置。',
 			    backendActive: '当前生效实现',
 			    // Key readiness reports *where* the key came from, in four distinct states
 			    // (g-059): stored literal / the one named variable / named-but-empty (locked) /
@@ -924,7 +930,21 @@ window.__ModuleLoader__.load({
 			    profileTestBadResponse: '响应异常',
 			    profileTestMisconfigured: '配置不完整',
 			    profileLatency: '{ms} ms',
-			    activeProfileMissing: '激活的配置「{name}」不存在，当前使用扁平字段的回落配置。',
+			    activeProfileMissing: '激活的配置「{name}」不存在：当前没有任何连接生效。',
+			    unconfiguredTitle: '未配置连接。',
+			    unconfiguredNoProfiles: '设置文档里还没有任何连接配置。System 1 不会自行连接任何地址。',
+			    unconfiguredNoActive: '已有连接配置，但没有选定当前激活的一项。System 1 不会自行挑一个来用。',
+			    unconfiguredActiveMissing: '激活名「{name}」不对应任何已保存的连接配置。System 1 不会回退到其他配置。',
+			    unconfiguredLegacy: '设置文档里只有连接地址、模型这类顶层字段，它们不构成一套连接配置。请在上方新增一套连接配置并设为激活；顶层字段保持原样，不会被改写。',
+			    unconfiguredEffect: '此时决策使用本地确定性启发式，不发出任何外部请求。',
+			    labelModelIds: '模型 ID（可多个，每行一个）',
+			    profileModelIdsHint: '这一套连接可用的模型。留空表示由后端决定默认模型。',
+			    profileSelectedModel: '当前使用的模型',
+			    profileModelMissing: '所选模型「{name}」不在上面的模型列表里：运行时不会发送任何模型，请重新选择。',
+			    profileRenameKeyNeeded: '改名后，这套配置已保存的 API Key 带不到新名字下（名字就是保存路径）。请在此处重新填写 API Key 再保存——留空会拒绝保存。',
+			    errProfileModel: '第 {row} 行连接配置的模型 ID 为空或含空行，请检查',
+			    errProfileModelSelection: '第 {row} 行连接配置所选的模型不在模型列表里，请重新选择',
+			    errProfileRenameKey: '这些配置改名后，已保存的 API Key 会随之丢失：{row}。请在对应行重新填写 API Key 后再保存（密钥来自环境变量的配置不受影响）。',
 			    labelToolPrefix: '工具名前缀',
 			    labelLedgerPath: '账本 JSONL 路径',
 			    labelPruneThreshold: '裁剪阈值（字符）',
@@ -1163,6 +1183,8 @@ window.__ModuleLoader__.load({
 			    helpBackend: 'Use: choose the decision backend implementation; Format: one of auto / mock / jev / vllm; Default: auto; Blank: treated as auto, which picks an available backend from the environment.',
 			    helpBaseUrl: 'Use: the System One gateway or OpenAI-compatible logits endpoint; Format: http(s) URL; Default: not set; Blank: use the environment or the backend default address (jev: https://api.typesafe.ai/v1/systemone, simple-jev: http://localhost:8000).',
 			    helpModel: 'Use: the model id the backend asks for; Format: non-empty string; Default: not set; Blank: use the environment or the backend default model (jev: jev-latest, simple-jev: Qwen/Qwen2.5-7B-Instruct).',
+			    helpModelIds: 'Use: the model ids this connection may ask for; Format: one per line (commas also accepted), blank lines and duplicates ignored; Default: not set; Blank: the backend applies its own default model. With more than one id, pick the one in force under "Model in use".',
+			    helpSelectedModel: 'Use: the model this connection actually runs — both the runtime and Test read this field; Format: one of the listed ids; Default: the first listed id; Blank: treated as the first. A selection outside the list cannot be saved.',
 			    helpApiKeyEnv: 'Use: the name of the environment variable holding the API key, never the key itself; Format: an uppercase environment variable name, e.g. JEV_API_KEY; Default: not set; Blank: the backend falls back in order to SYSTEM_ONE_API_KEY → JEV_API_KEY → VLLM_API_KEY → OPENAI_API_KEY, and the secret never enters the settings document.',
 			    helpTimeoutMs: 'Use: the per-request backend timeout; Format: integer milliseconds; Default: not set; Blank: use the backend default (10000 ms for jev, 8000 ms for simple-jev), and values below 100 are rejected.',
 			    helpToolPrefix: 'Use: the prefix of every registered reflex_* tool name; Format: lowercase letters, digits and underscores; Default: reflex_; Blank: register with the default prefix, and an empty string is rejected.',
@@ -1219,9 +1241,7 @@ window.__ModuleLoader__.load({
 			    labelApiKeyEnv: 'API key environment variable',
 			    labelTimeoutMs: 'Timeout (ms)',
 			    backendHint: 'Name an environment variable here, or store the API key directly in a connection profile above (write-only).',
-			    backendFlatFoldRole: 'Compatibility area: configure new connections above',
-			    backendHintFlat: 'Compatibility area: configure new connections in "Connections (multiple)" above; this block only serves as the fallback for fields no profile covers. Click the title to expand and edit.',
-			    backendFlatFoldedSummary: 'collapsed (use the connections above for new config)',
+			    backendHintRuntime: 'Implementation used when a connection leaves the field blank. It carries no address and no key: connections come from the active profile only.',
 			    backendActive: 'Effective implementation',
 			    apiKeyFromProfile: 'Key from the configuration (write-only, never shown)',
 			    apiKeyFromEnv: 'Key from {name}',
@@ -1265,7 +1285,21 @@ window.__ModuleLoader__.load({
 			    profileTestBadResponse: 'Bad response',
 			    profileTestMisconfigured: 'Incomplete configuration',
 			    profileLatency: '{ms} ms',
-			    activeProfileMissing: 'The active profile "{name}" does not exist; the flat fallback settings are in use.',
+			    activeProfileMissing: 'The active profile "{name}" does not exist: no connection is in force.',
+			    unconfiguredTitle: 'No connection configured.',
+			    unconfiguredNoProfiles: 'The settings document holds no connection profile. System 1 will not connect anywhere on its own.',
+			    unconfiguredNoActive: 'Profiles exist, but none is the active one. System 1 will not pick one for you.',
+			    unconfiguredActiveMissing: 'The active name "{name}" matches no saved profile. System 1 does not fall back to another one.',
+			    unconfiguredLegacy: 'The document only carries top-level connection fields (address, model, key variable), which do not form a connection profile. Add a profile above and set it active; the top-level fields are left exactly as they are.',
+			    unconfiguredEffect: 'Decisions use the local deterministic heuristics and make no external request.',
+			    labelModelIds: 'Model ids (any number, one per line)',
+			    profileModelIdsHint: 'The models this connection may ask for. Blank lets the backend apply its default model.',
+			    profileSelectedModel: 'Model in use',
+			    profileModelMissing: 'The selected model "{name}" is not in the list above: the runtime will send no model. Choose again.',
+			    profileRenameKeyNeeded: 'After the rename this connection\'s stored API key does not follow the new name (the name is the settings path). Retype the API key here to save — leaving it empty refuses the save.',
+			    errProfileModel: 'Connection row {row} has a blank model id in its model list',
+			    errProfileModelSelection: 'Connection row {row} selects a model that is not in its list; choose again',
+			    errProfileRenameKey: 'The stored API key of these connections would be lost with the rename: {row}. Retype the key in each row before saving (connections whose key comes from an environment variable are unaffected).',
 			    labelToolPrefix: 'Tool-name prefix',
 			    labelLedgerPath: 'Ledger JSONL path',
 			    labelPruneThreshold: 'Prune threshold (characters)',
@@ -1712,6 +1746,7 @@ window.__ModuleLoader__.load({
 			exports.asText = asText;
 			exports.asNumber = asNumber;
 			exports.textToTags = textToTags;
+			exports.splitModelIds = splitModelIds;
 			exports.draftFromSnapshot = draftFromSnapshot;
 			exports.draftFromLayers = draftFromLayers;
 			exports.profileRowsFrom = profileRowsFrom;
@@ -1858,7 +1893,7 @@ window.__ModuleLoader__.load({
 			exports.EMPTY_DRAFT = {
 			    routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
 			    effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
-			    backend: { backend: 'auto', baseUrl: '', model: '', apiKeyEnv: '', timeoutMs: '', active: '', profiles: [] },
+			    backend: { backend: 'auto', active: '', profiles: [] },
 			    runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
 			    interventions: {
 			        mode: 'observe',
@@ -1922,6 +1957,64 @@ window.__ModuleLoader__.load({
 			        .split(',')
 			        .map((tag) => tag.trim())
 			        .filter((tag) => tag.length > 0);
+			}
+			/**
+			 * How an error message names a row: its number, and its name when it has one.
+			 *
+			 * The number is the position the user sees, counted from one; a named row also
+			 * says which name, because the fix is then in a row the user can find by name.
+			 * @param profile - the row.
+			 * @param index - its zero-based position in the draft.
+			 * @returns the label.
+			 */
+			function profileLabel(profile, index) {
+			    const name = profile.name.trim();
+			    return name.length === 0 ? String(index + 1) : `${String(index + 1)} (${name})`;
+			}
+			/**
+			 * Split a model-list field into ids.
+			 *
+			 * One id per line, and commas are accepted as well because users paste lists
+			 * both ways. Blank entries are dropped (they are separators, not ids) and
+			 * duplicates collapse: the list is a set of choices, and a repeated id would
+			 * render two radio rows that mean the same thing.
+			 * @param text - the draft field.
+			 * @returns the ids, in authored order.
+			 */
+			function splitModelIds(text) {
+			    const ids = [];
+			    // Tolerant on purpose: drafts also arrive from tests, older callers, and a
+			    // re-seeded page, and a missing field must read as "no ids", not throw.
+			    if (typeof text !== 'string')
+			        return ids;
+			    for (const raw of text.split(/[\n,]/)) {
+			        const id = raw.trim();
+			        if (id.length === 0 || ids.includes(id))
+			            continue;
+			        ids.push(id);
+			    }
+			    return ids;
+			}
+			/**
+			 * The model ids one row offers.
+			 * @param profile - the row.
+			 * @returns its ids, in authored order.
+			 */
+			function modelIdsOf(profile) {
+			    return splitModelIds(profile.modelIds);
+			}
+			/**
+			 * A row's text field as a string, tolerating a draft that does not carry it.
+			 *
+			 * Drafts are also built by callers other than {@link draftFromConfig} (tests, a
+			 * FutureHost that re-seeds without the field), and a read of a missing field must
+			 * never throw out of a validation or a diff: the page would freeze instead of
+			 * refusing a save.
+			 * @param value - the field's value.
+			 * @returns the value, or `''`.
+			 */
+			function textOf(value) {
+			    return typeof value === 'string' ? value : '';
 			}
 			/** Read the authored pools of a routing section. */
 			function poolsFromRouting(routing) {
@@ -2064,12 +2157,22 @@ window.__ModuleLoader__.load({
 			        if (entry === null || typeof entry !== 'object' || Array.isArray(entry))
 			            return [];
 			        const profile = asRecord(entry);
+			        // Two authored model shapes, one draft (g-066): `modelIds` + `selectedModel`
+			        // is the current one, and a legacy single `model` seeds the same two fields
+			        // as a one-line list — so an existing connection opens editable and is
+			        // written back in the shape it was read in (see `groupWrites`).
+			        const modelIds = Array.isArray(profile.modelIds)
+			            ? profile.modelIds.map((id) => asText(id)).filter((id) => id.length > 0)
+			            : [];
+			        const legacyModel = asText(profile.model);
 			        return [
 			            {
 			                id: createProfileRowId(),
 			                name,
 			                baseUrl: asText(profile.baseUrl),
-			                model: asText(profile.model),
+			                modelIds: (modelIds.length > 0 ? modelIds : legacyModel.length > 0 ? [legacyModel] : []).join('\n'),
+			                selectedModel: asText(profile.selectedModel) || (modelIds.length > 0 ? modelIds[0] : legacyModel),
+			                legacyModelShape: modelIds.length === 0 && legacyModel.length > 0,
 			                apiKeyEnv: asText(profile.apiKeyEnv),
 			                timeoutMs: asText(profile.timeoutMs),
 			                backend: asText(profile.backend),
@@ -2127,7 +2230,9 @@ window.__ModuleLoader__.load({
 			function reseedProfileRows(previous, seeded) {
 			    if (previous.length === 0)
 			        return seeded.map((row) => ({ ...row }));
-			    const content = (row) => [row.baseUrl, row.model, row.apiKeyEnv, row.timeoutMs, row.backend].map((field) => field.trim()).join('\u0000');
+			    const content = (row) => [row.baseUrl, row.modelIds, row.selectedModel, row.apiKeyEnv, row.timeoutMs, row.backend]
+			        .map((field) => field.trim())
+			        .join('\u0000');
 			    const claimed = new Set();
 			    const fresh = seeded.map(() => false);
 			    const kept = seeded.map(() => undefined);
@@ -2224,10 +2329,9 @@ window.__ModuleLoader__.load({
 			        },
 			        backend: {
 			            backend: asText(section.backend) || exports.EMPTY_DRAFT.backend.backend,
-			            baseUrl: asText(systemOne.baseUrl),
-			            model: asText(systemOne.model),
-			            apiKeyEnv: asText(systemOne.apiKeyEnv),
-			            timeoutMs: asText(systemOne.timeoutMs),
+			            // The connection fields live on the rows now; nothing is read from the
+			            // top of `systemOne` here (g-066), so a document that still carries the
+			            // old flat keys seeds no editor for them and the page cannot write them.
 			            active: asText(systemOne.active),
 			            // A row is seeded from the authored profile only. The key is NOT seeded:
 			            // the Host never sends it, and `apiKeyPresent` is filled from the live
@@ -2304,7 +2408,8 @@ window.__ModuleLoader__.load({
 			            return;
 			        const content = [
 			            profile.baseUrl,
-			            profile.model,
+			            profile.modelIds,
+			            profile.selectedModel,
 			            profile.apiKeyEnv,
 			            profile.timeoutMs,
 			            profile.backend,
@@ -2314,7 +2419,7 @@ window.__ModuleLoader__.load({
 			        ];
 			        // `clearKey` on a row whose name is empty targets a slot that cannot exist,
 			        // so it is not content of its own.
-			        if (content.some((field) => field.trim().length > 0))
+			        if (content.some((field) => textOf(field).trim().length > 0))
 			            rows.push(index + 1);
 			    });
 			    return rows;
@@ -2366,10 +2471,38 @@ window.__ModuleLoader__.load({
 			        errors.push('errMinConfidence');
 			    if (!exports.BACKEND_CHOICES.includes(draft.backend.backend))
 			        errors.push('errBackend');
-			    const timeoutMs = draft.backend.timeoutMs.trim() === '' ? undefined : asNumber(draft.backend.timeoutMs);
-			    if (draft.backend.timeoutMs.trim() !== '' && (timeoutMs === undefined || !Number.isInteger(timeoutMs) || timeoutMs < 100)) {
-			        errors.push('errTimeout');
+			    // Per-row connection fields, which the flat editors used to cover: each row
+			    // now owns its timeout and its model selection, so they are validated where
+			    // they are edited and the message can name the row (g-066).
+			    const badTimeoutRows = [];
+			    const badModelRows = [];
+			    const offListRows = [];
+			    for (const [index, profile] of draft.backend.profiles.entries()) {
+			        const label = profileLabel(profile, index);
+			        if (textOf(profile.timeoutMs).trim() !== '') {
+			            const timeout = asNumber(profile.timeoutMs);
+			            if (timeout === undefined || !Number.isInteger(timeout) || timeout < 100)
+			                badTimeoutRows.push(label);
+			        }
+			        // Every listed id is a model the user is offering to run, so a half-typed
+			        // one is not "almost fine": it would be selectable and would fail at the
+			        // gateway instead of here.
+			        const ids = modelIdsOf(profile);
+			        // An empty field is legal — the backend then applies its own default model —
+			        // so only a field that *names* something but yields no usable id (blank
+			        // lines, commas only) is refused.
+			        if (ids.length === 0 && textOf(profile.modelIds).trim().length > 0)
+			            badModelRows.push(label);
+			        const selection = profile.selectedModel.trim();
+			        if (selection.length > 0 && ids.length > 0 && !ids.includes(selection))
+			            offListRows.push(label);
 			    }
+			    if (badTimeoutRows.length > 0)
+			        errors.push('errTimeout');
+			    if (badModelRows.length > 0)
+			        errors.push('errProfileModel');
+			    if (offListRows.length > 0)
+			        errors.push('errProfileModelSelection');
 			    if (draft.runtime.toolPrefix.trim().length === 0)
 			        errors.push('errToolPrefix');
 			    const pruneThreshold = asNumber(draft.runtime.pruneThreshold);
@@ -2439,7 +2572,12 @@ window.__ModuleLoader__.load({
 			        errors.push('errProfileName');
 			    return {
 			        errors: [...new Set(errors)],
-			        values: unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') },
+			        values: {
+			            ...(unnamed.length === 0 ? {} : { errProfileName: unnamed.join(', ') }),
+			            ...(badTimeoutRows.length === 0 ? {} : { errTimeout: badTimeoutRows.join(', ') }),
+			            ...(badModelRows.length === 0 ? {} : { errProfileModel: badModelRows.join(', ') }),
+			            ...(offListRows.length === 0 ? {} : { errProfileModelSelection: offListRows.join(', ') })
+			        },
 			        ok: errors.length === 0
 			    };
 			}
@@ -2521,23 +2659,16 @@ window.__ModuleLoader__.load({
 			            // deletes every stored key, and the page could not restate them (it never
 			            // received them). Narrow paths only touch what the user actually edited.
 			            const writes = [{ path: ['backend'], value: present(draft.backend.backend) ?? 'auto' }];
-			            const flat = {};
-			            if (present(draft.backend.baseUrl) !== undefined)
-			                flat.baseUrl = draft.backend.baseUrl.trim();
-			            if (present(draft.backend.model) !== undefined)
-			                flat.model = draft.backend.model.trim();
-			            if (present(draft.backend.apiKeyEnv) !== undefined)
-			                flat.apiKeyEnv = draft.backend.apiKeyEnv.trim();
-			            if (asNumber(draft.backend.timeoutMs) !== undefined)
-			                flat.timeoutMs = asNumber(draft.backend.timeoutMs);
+			            // No flat connection fields are written any more (g-066): they are not
+			            // drafted, so there is nothing to state, and leaving them unaddressed is
+			            // what keeps a document that still carries them unchanged on disk.
+			            //
 			            // An empty name is an explicit "no active profile", which must be written
 			            // as an unset rather than left as the previous name.
 			            if (present(draft.backend.active) === undefined)
 			                writes.push({ path: ['systemOne', 'active'], value: undefined });
 			            else
 			                writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });
-			            for (const [key, value] of Object.entries(flat))
-			                writes.push({ path: ['systemOne', key], value });
 			            for (const profile of draft.backend.profiles) {
 			                const name = profile.name.trim();
 			                // A row with no name cannot be addressed by a path, so it is not written
@@ -2554,17 +2685,50 @@ window.__ModuleLoader__.load({
 			                const row = {};
 			                if (present(profile.baseUrl) !== undefined)
 			                    row.baseUrl = profile.baseUrl.trim();
-			                if (present(profile.model) !== undefined)
-			                    row.model = profile.model.trim();
 			                if (present(profile.apiKeyEnv) !== undefined)
 			                    row.apiKeyEnv = profile.apiKeyEnv.trim();
 			                if (asNumber(profile.timeoutMs) !== undefined)
 			                    row.timeoutMs = asNumber(profile.timeoutMs);
 			                if (present(profile.backend) !== undefined)
 			                    row.backend = profile.backend.trim();
-			                // Fields the user blanked are unset, so the row keeps inheriting the flat
-			                // block instead of carrying an empty string that would override it.
-			                for (const field of ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'backend']) {
+			                // The model list (g-066). One id is written in the *legacy* shape
+			                // (`model`) **only** while the row was read in that shape too, so a
+			                // connection authored as `model: x` keeps that spelling for as long as
+			                // the user does not ask for a second model — no silent migration. From
+			                // two ids up, `modelIds` is the only shape that can express the answer.
+			                const modelIds = modelIdsOf(profile);
+			                if (modelIds.length === 0) {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: undefined });
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: undefined });
+			                    if (profile.legacyModelShape)
+			                        writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: undefined });
+			                }
+			                else if (modelIds.length === 1 && profile.legacyModelShape) {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: modelIds[0] });
+			                    // The list form must not linger beside it: both authored at once is
+			                    // refused by resolution, so the row would stop resolving.
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: undefined });
+			                }
+			                else {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'modelIds'], value: modelIds });
+			                    if (profile.legacyModelShape)
+			                        writes.push({ path: ['systemOne', 'profiles', name, 'model'], value: undefined });
+			                }
+			                // The selection is written only when it is not simply "the first id",
+			                // and cleared as soon as it is: a stored `selectedModel` that stays
+			                // behind after the list shrinks would resolve to no model at all.
+			                const selection = textOf(profile.selectedModel);
+			                const first = modelIds[0];
+			                if (selection.length === 0 || selection === first) {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: undefined });
+			                }
+			                else {
+			                    writes.push({ path: ['systemOne', 'profiles', name, 'selectedModel'], value: selection });
+			                }
+			                // Fields the user blanked are unset, so the row states nothing and the
+			                // backend's own environment read applies, instead of carrying an empty
+			                // string that would override it.
+			                for (const field of ['baseUrl', 'apiKeyEnv', 'timeoutMs', 'backend']) {
 			                    if (row[field] === undefined)
 			                        writes.push({ path: ['systemOne', 'profiles', name, field], value: undefined });
 			                }
@@ -2759,7 +2923,20 @@ window.__ModuleLoader__.load({
 			        const after = groupWrites(draft, group);
 			        if (sameValue(before, after))
 			            continue;
+			        // A change lands only where the *path* says something different.
+			        //
+			        // A group is written whole (that is `groupWrites`'s contract), but its
+			        // expansion now names one path per row field, and re-stating every row
+			        // because one of them changed is exactly what made an unrelated save look
+			        // like a rewrite of the connection block (g-066). Comparing the value at the
+			        // same path keeps the group-level rule — a row that *moves* still writes its
+			        // new path, and the old one is retired above — while an untouched row
+			        // contributes nothing at all.
+			        const was = new Map(before.map((write) => [write.path.join('\u0000'), write.value]));
 			        for (const write of after) {
+			            const key = write.path.join('\u0000');
+			            if (was.has(key) && sameValue(was.get(key), write.value))
+			                continue;
 			            ops.push(write.value === undefined ? { op: 'unset', path: write.path } : { op: 'set', path: write.path, value: write.value });
 			        }
 			    }
@@ -3118,6 +3295,182 @@ window.__ModuleLoader__.load({
 			}
 
 		},
+		"rename-secrets": function (module, exports, require) {
+			"use strict";
+			/**
+			 * Keeping a write-only key when a connection is renamed (g-066).
+			 *
+			 * ## The hazard
+			 *
+			 * A profile's stored key lives at `systemOne.profiles.<name>.apiKey`, and its
+			 * name is the user's label for the connection — so renaming a row means writing
+			 * a *different settings path*, not editing one. The key itself never reaches the
+			 * page (it is a `role('secret')` slot, stripped at the wire boundary), so the
+			 * page cannot restate it. Two things follow, and both are proved against the
+			 * Host's own implementation (`dsh-settings` `mutate`):
+			 *
+			 * 1. A rename **does not move** the secret. `mutate` applies the ops to the raw
+			 *    user layer, which still holds the value at the *old* path; the save writes
+			 *    the new path, then unsets the old subtree whole. The key goes with it.
+			 * 2. The page cannot learn, after the fact, that it did. The host reports the
+			 *    **new** path's secret position as `set: false`, so the row renders "no key
+			 *    configured" and the next decision fails with an auth error — a silent loss.
+			 *
+			 * ## What this module decides
+			 *
+			 * For every saved row whose name changed, the old subtree must be removed
+			 * ({@link PanelStore} emits that unset, g-065) and the new one must be written.
+			 * The secret is safe in exactly one case: the user typed a new key for that row
+			 * in the same save. Every other case needs a decision, which is what
+			 * {@link planRenameSecrets} returns:
+			 *
+			 * - **`server-move`** — the server can carry the value across. There is no such
+			 *   API in the settings surface a plugin page is given (a page can only `set`
+			 *   a path to a value it holds, and it never holds the key), so this outcome is
+			 *   reserved for a Host that grows one; see {@link SERVER_SIDE_SECRET_MOVE}.
+			 * - **`reentry`** — the user must retype the key in the renamed row. This is the
+			 *   safe default, and it is what the page enforces: the save is *blocked* until
+			 *   the key is present in the draft, with a message naming every row that needs
+			 *   it.
+			 *
+			 * ## Why not "just don't delete the old path"
+			 *
+			 * Keeping `systemOne.profiles.<old>` alive would keep the secret, but it also
+			 * keeps a *ghost connection*: a row with a base URL and a live key that the page
+			 * cannot show (its value, or even its shape after the name changed) and that the
+			 * user believes they renamed away. g-065 spent a whole goal removing exactly
+			 * that. Losing a key loudly is recoverable in one paste; a hidden live
+			 * credential is not.
+			 *
+			 * @module dsh-reflex/client/rename-secrets
+			 */
+			Object.defineProperty(exports, "__esModule", { value: true });
+			exports.SERVER_SIDE_SECRET_MOVE = void 0;
+			exports.planRenameSecrets = planRenameSecrets;
+			exports.renameRestated = renameRestated;
+			/**
+			 * Whether a Host-side "move this secret to another path" operation exists.
+			 *
+			 * `false` for every Host this plugin currently ships on. The settings surface a
+			 * plugin page is handed (`ConfigForm.mutate`) takes `set`/`unset` path ops whose
+			 * values come from the page, and the page never receives a secret value — so a
+			 * cross-path move cannot be expressed, and pretending otherwise would be the
+			 * silent loss this module exists to prevent. A Host that offers one would make
+			 * this `true` together with a real implementation of the move in
+			 * {@link PanelStore}; the constant exists so the decision is written down in one
+			 * place instead of being implied by its absence.
+			 */
+			exports.SERVER_SIDE_SECRET_MOVE = false;
+			/**
+			 * Plan the write-only keys a save must carry across profile renames.
+			 *
+			 * Rows are matched by **identity**, never by name (g-062): `id` survives a
+			 * rename, so "same id, different name" is a rename and nothing else is.
+			 *
+			 * Three ways a rename can still surprise a user are kept apart, because the fix
+			 * differs:
+			 *
+			 * - `not-restated`: the ordinary case. Nothing carries the old value.
+			 * - `joined-occupied-path`: the new name already belongs to *another saved row*
+			 *   in this save, so the renamed row's `set`s and that row's `set`s land on one
+			 *   path. Which value wins is decided by document order, and the losing row's
+			 *   key is destroyed with no field the user touched — a collision, not a rename.
+			 * - `swap`: two saved rows exchange names. Each old subtree is retired and each
+			 *   new path is written from the *other* row, so `from`/`to` alone cannot say
+			 *   whose key survives. Refused for the same reason, with its own message.
+			 *
+			 * A row whose key the user retyped (`apiKey` non-empty) or explicitly cleared
+			 * (`clearKey`) is not blocked: the draft *states* what the new path holds, so
+			 * nothing is lost silently. A row whose key comes from an **environment
+			 * variable** (`apiKeyFromProfile === false`) is never blocked either: the
+			 * variable is named, not stored, and a rename does not touch it.
+			 *
+			 * @param original - the saved draft the page was seeded with.
+			 * @param draft - the edited draft about to be written.
+			 * @returns the safe restatements and the rows that block the save.
+			 */
+			function planRenameSecrets(original, draft) {
+			    const restated = [];
+			    const blocked = [];
+			    const savedNames = new Map();
+			    for (const row of original.backend.profiles) {
+			        const name = row.name.trim();
+			        if (name.length > 0)
+			            savedNames.set(name, row);
+			    }
+			    // Which *saved* rows still answer for each name in the draft. A name claimed
+			    // by another saved row is the collision this plan refuses.
+			    const nextByName = new Map();
+			    const savedIds = new Set([...savedNames.values()].map((row) => row.id));
+			    for (const row of draft.backend.profiles) {
+			        const name = row.name.trim();
+			        if (name.length === 0)
+			            continue;
+			        nextByName.set(name, [...(nextByName.get(name) ?? []), row]);
+			    }
+			    for (const [oldName, was] of savedNames) {
+			        const now = draft.backend.profiles.find((row) => row.id === was.id);
+			        // A removed row loses its key by design (that is what removal is); g-065
+			        // already retires the subtree in the same save.
+			        if (now === undefined)
+			            continue;
+			        const newName = now.name.trim();
+			        if (newName.length === 0 || newName === oldName)
+			            continue;
+			        // The draft says what the new path holds, so nothing is silent here. Note
+			        // that a clear is *not* a loss: the user asked for exactly that.
+			        if (now.apiKey.trim().length > 0) {
+			            restated.push({ from: oldName, to: newName });
+			            continue;
+			        }
+			        if (now.clearKey)
+			            continue;
+			        // Only a **literal stored in the document** can be lost. `apiKeyPresent`
+			        // alone is not enough: a row that names `JEV_API_KEY` is present too, and its
+			        // key lives in the environment, which a rename does not touch. Blocking that
+			        // row would make renaming any env-backed connection impossible for no
+			        // reason, so the *source* is what decides — `apiKeyFromProfile`, the same
+			        // authoritative fact the row renders its placeholder from.
+			        if (!was.apiKeyFromProfile)
+			            continue;
+			        const claimants = (nextByName.get(newName) ?? []).filter((row) => savedIds.has(row.id) && row.id !== now.id);
+			        if (claimants.length > 0) {
+			            blocked.push({ from: oldName, to: newName, reason: 'joined-occupied-path' });
+			            continue;
+			        }
+			        // A swap: some other saved row moved onto `oldName`. Both directions of the
+			        // exchange would otherwise be described as a plain rename of a row whose key
+			        // is not the one that ends up at the new path.
+			        const swapped = [...savedNames.entries()].some(([otherOld, otherRow]) => {
+			            if (otherOld === oldName)
+			                return false;
+			            const moved = draft.backend.profiles.find((row) => row.id === otherRow.id);
+			            return moved !== undefined && moved.name.trim() === oldName;
+			        });
+			        if (swapped) {
+			            blocked.push({ from: oldName, to: newName, reason: 'swap' });
+			            continue;
+			        }
+			        blocked.push({ from: oldName, to: newName, reason: 'not-restated' });
+			    }
+			    return { restated, blocked, serverMove: exports.SERVER_SIDE_SECRET_MOVE };
+			}
+			/**
+			 * Whether a row's rename is already answered by a retyped key.
+			 *
+			 * The page marks such a row with the same message it shows for any renamed row,
+			 * so the user knows *why* the key field is asking again — and stops asking as
+			 * soon as the field holds a value.
+			 * @param plan - the plan for the save in progress.
+			 * @param row - the draft row.
+			 * @param oldName - the name it was saved under.
+			 * @returns true when this row's key was restated in this save.
+			 */
+			function renameRestated(plan, row, oldName) {
+			    return plan.restated.some((entry) => entry.to === row.name.trim() && entry.from === oldName);
+			}
+
+		},
 		"store": function (module, exports, require) {
 			"use strict";
 			Object.defineProperty(exports, "__esModule", { value: true });
@@ -3145,6 +3498,7 @@ window.__ModuleLoader__.load({
 			 * @module dsh-reflex/client/store
 			 */
 			const panel_1 = require("./panel");
+			const rename_secrets_1 = require("./rename-secrets");
 			/** Every page, in navigation order. */
 			exports.PANEL_TABS = [
 			    'overview',
@@ -3193,7 +3547,9 @@ window.__ModuleLoader__.load({
 			        id,
 			        name: '',
 			        baseUrl: '',
-			        model: '',
+			        modelIds: '',
+			        selectedModel: '',
+			        legacyModelShape: false,
 			        apiKeyEnv: '',
 			        timeoutMs: '',
 			        backend: '',
@@ -3295,7 +3651,6 @@ window.__ModuleLoader__.load({
 			            notice: null,
 			            noticeValues: null,
 			            confirmingClear: false,
-			            flatOpen: false,
 			            delegationWrite: null,
 			            probes: {}
 			        };
@@ -3332,18 +3687,23 @@ window.__ModuleLoader__.load({
 			     * resolved profile and only returns a classification. Each row owns its own
 			     * state slot, so a slow row cannot overwrite the answer a fast row just got.
 			     *
-			     * @param profile - profile name, or `''` to probe the flat block / active profile.
+			     * Only a **saved** profile can be tested: a probe reads the document the Host
+			     * has, so a row that is not saved has nothing to test (g-062). An empty name
+			     * is refused here as well as at the button, because the old empty name meant
+			     * "probe the flat block" — a connection that no longer exists (g-066).
+			     * @param profile - profile name.
 			     * @returns whether a result was recorded.
 			     */
 			    async testSystemOne(profile) {
-			        const key = profile;
+			        const key = profile.trim();
+			        if (key.length === 0)
+			            return false;
 			        this.#set({ probes: { ...this.#state.probes, [key]: { phase: 'testing' } } });
 			        try {
 			            const response = await this.#options.fetch(`${this.#basePath}${exports.SYSTEMONE_TEST_PATH}`, {
 			                method: 'POST',
 			                headers: { 'content-type': 'application/json' },
-			                // An empty name is simply omitted, which the Host reads as "the active one".
-			                body: JSON.stringify(key.length === 0 ? {} : { profile: key })
+			                body: JSON.stringify({ profile: key })
 			            });
 			            const body = (await response.json().catch(() => ({})));
 			            if (this.#disposed)
@@ -3423,15 +3783,6 @@ window.__ModuleLoader__.load({
 			        if (this.#state.tab === tab)
 			            return;
 			        this.#set({ tab });
-			    }
-			    /**
-			     * Expand or collapse the flat compatibility block.
-			     * @param open - the new state of the disclosure.
-			     */
-			    setFlatOpen(open) {
-			        if (this.#state.flatOpen === open)
-			            return;
-			        this.#set({ flatOpen: open });
 			    }
 			    /**
 			     * Edit the draft in place.
@@ -3632,6 +3983,23 @@ window.__ModuleLoader__.load({
 			        const validation = (0, panel_1.validateDraft)(draft);
 			        if (!validation.ok) {
 			            this.#set({ errors: validation.errors, errorValues: validation.values, notice: null, noticeValues: null });
+			            return false;
+			        }
+			        // Write-only keys are the one thing a rename can destroy without a trace
+			        // (g-066): the secret cannot be restated by this page, and the Host retires
+			        // the old subtree in the same save. The save is refused — before any op is
+			        // built — while a renamed row would lose a stored key that the draft does
+			        // not restate, so the user retypes it instead of finding out at the next
+			        // auth failure. `planRenameSecrets` documents each case.
+			        const secrets = (0, rename_secrets_1.planRenameSecrets)(original, draft);
+			        if (secrets.blocked.length > 0) {
+			            const rows = secrets.blocked.map((entry) => `${entry.from} → ${entry.to}`).join(', ');
+			            this.#set({
+			                errors: ["errProfileRenameKey"],
+			                errorValues: { errProfileRenameKey: rows },
+			                notice: null,
+			                noticeValues: null
+			            });
 			            return false;
 			        }
 			        // The raw user layer is passed so a group write keeps the keys this page
@@ -4173,18 +4541,28 @@ window.__ModuleLoader__.load({
 			        onClick: props.onClick
 			    }, props.label);
 			}
-			/** A text input bound to a draft field. */
+			/**
+			 * A text input bound to a draft field.
+			 *
+			 * `multiline` renders a `<textarea>` instead, for a field that holds a *list*:
+			 * the model ids of one connection are one-per-line, and a single-line input
+			 * would hide every entry but the one under the cursor. Both controls route
+			 * their edits through the same `onChange` (the draft field), never through an
+			 * implicit commit: the value is only written to the Host on an explicit save.
+			 */
 			function TextInput(props) {
-			    return (0, react_1.createElement)('input', {
-			        type: 'text',
-			        style: { ...S.input, ...(props.mono === true ? S.mono : {}) },
+			    const shared = {
+			        style: { ...S.input, ...(props.mono === true ? S.mono : {}), ...(props.multiline === true ? { minHeight: '4.5em', resize: 'vertical' } : {}) },
 			        value: props.value,
 			        placeholder: props.placeholder ?? '',
 			        disabled: props.disabled === true,
 			        onChange: (event) => {
 			            props.onChange(event.target.value);
 			        }
-			    });
+			    };
+			    if (props.multiline === true)
+			        return (0, react_1.createElement)('textarea', { ...shared, rows: 3 });
+			    return (0, react_1.createElement)('input', { ...shared, type: 'text' });
 			}
 			/** A select bound to a draft field. */
 			function Select(props) {
@@ -4268,7 +4646,8 @@ window.__ModuleLoader__.load({
 			                    onChange: props.onChange ?? (() => undefined),
 			                    placeholder: props.placeholder ?? guide?.placeholder,
 			                    mono: props.mono === true,
-			                    disabled: props.disabled === true
+			                    disabled: props.disabled === true,
+			                    multiline: props.multiline === true
 			                }));
 			    return (0, react_1.createElement)(Field, {
 			        label,
@@ -4466,6 +4845,92 @@ window.__ModuleLoader__.load({
 			    }));
 			}
 			/**
+			 * Whether renaming this saved row asks for its stored key again.
+			 *
+			 * True exactly when the row's key is a **literal stored in the settings
+			 * document** (`apiKeyFromProfile`), the name it is saved under differs from the
+			 * name it is being saved as, and the draft states no new value for it. That is
+			 * the one combination where the key cannot survive: the Host retires the old
+			 * subtree and cannot move a secret to another path.
+			 *
+			 * Deliberately false for the other two ways a resolved key can exist:
+			 *
+			 * - the key comes from an **environment variable** (`apiKeyFromProfile` false,
+			 *   `apiKeyPresent` true): the variable is named, not re-stored, so a rename
+			 *   changes nothing about it and renaming stays free;
+			 * - the user **retyped** the key in this save (`apiKey` non-empty) or **cleared**
+			 *   it on purpose (`clearKey`): the new path states its own answer.
+			 *
+			 * @param profile - the draft row.
+			 * @param savedName - the name it is saved under (empty for an unsaved row).
+			 * @param draftName - the name it is being saved as.
+			 * @returns whether the row must ask for the key again.
+			 */
+			function renameNeedsKey(profile, savedName, draftName) {
+			    if (savedName.length === 0 || draftName.length === 0 || savedName === draftName)
+			        return false;
+			    if (!profile.apiKeyPresent || !profile.apiKeyFromProfile)
+			        return false;
+			    return profile.apiKey.trim().length === 0 && !profile.clearKey;
+			}
+			/**
+			 * The single model a connection runs, chosen from the ids it lists.
+			 *
+			 * Why a radio group rather than a text field: `selectedModel` must be one of
+			 * `modelIds`, and free text makes "selected a model that does not exist" a state
+			 * a user can type themselves into. Here it cannot be typed — but it can still
+			 * *arise* from a list edit (the selected id was deleted), which is why the group
+			 * also reports a selection that no longer matches and why the save refuses one.
+			 *
+			 * With exactly one listed id the group renders as a plain statement: there is
+			 * nothing to choose, and a single radio button reads as a decision the user has
+			 * to re-confirm.
+			 */
+			function ModelSelection(props) {
+			    const { t, profile, disabled, onEdit } = props;
+			    const ids = (0, panel_1.splitModelIds)(profile.modelIds);
+			    const selection = profile.selectedModel.trim();
+			    // Blank means "the first listed id", which is exactly what the runtime
+			    // resolves for a connection that names no selection at all.
+			    const effective = selection.length > 0 ? selection : (ids[0] ?? '');
+			    const offList = selection.length > 0 && ids.length > 0 && !ids.includes(selection);
+			    if (ids.length === 0)
+			        return null;
+			    // Rendered through `Field` so it carries the same contract as every other
+			    // field of the page: a label, a stable help id, and the `(?)` disclosure.
+			    // It is *rendered as an element*, never invoked directly: `Field` owns a
+			    // `useState` (its `(?)` disclosure), and calling a stateful component as a
+			    // plain function puts that hook into the caller's sequence — the #310 crash
+			    // this page already shipped once. `client-hooks.test.ts` guards it.
+			    return (0, react_1.createElement)(Field, {
+			        label: t('profileSelectedModel'),
+			        path: 'systemOne.profiles.selectedModel',
+			        help: t('helpSelectedModel'),
+			        helpLabel: (0, panel_1.interpolate)(t('helpAbout'), { field: t('profileSelectedModel') }),
+			        children: (0, react_1.createElement)('span', { style: { ...S.row, alignItems: 'center' }, 'data-profile-model-selection': profile.id }, ids.length === 1
+			            ? (0, react_1.createElement)('span', { style: S.mono, 'data-profile-selected-model': ids[0] }, ids[0] ?? '')
+			            : (0, react_1.createElement)('span', { style: { ...S.row, gap: '12px' } }, ...ids.map((id) => (0, react_1.createElement)('label', {
+			                key: id,
+			                style: { ...S.row, gap: '4px', alignItems: 'center', cursor: disabled ? 'default' : 'pointer' },
+			                'data-profile-model-option': id
+			            }, (0, react_1.createElement)('input', {
+			                type: 'radio',
+			                name: `reflex-profile-model-${profile.id}`,
+			                value: id,
+			                checked: id === effective,
+			                disabled,
+			                // Choosing a model is a draft edit like any other: nothing is
+			                // written until the user saves, so an exploratory click cannot
+			                // change what the running transport sends.
+			                onChange: () => onEdit({ selectedModel: id })
+			            }), (0, react_1.createElement)('span', { style: S.mono }, id)))), 
+			        // Why the runtime would send no model at all, spelled out where the fix is.
+			        offList
+			            ? (0, react_1.createElement)('span', { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-model-missing': 'true' }, t('profileModelMissing').replace('{name}', selection))
+			            : null)
+			    });
+			}
+			/**
 			 * One profile row: name, its connection fields, the write-only key input, the
 			 * active switch, the connection test, and the remove action.
 			 *
@@ -4475,14 +4940,14 @@ window.__ModuleLoader__.load({
 			 * not the value — and can only be destroyed through the explicit Clear action.
 			 */
 			function ProfileRow(props) {
-			    const { t, profile, isActive, probe, saved, disabled, store, onEdit } = props;
+			    const { t, profile, isActive, probe, saved, savedName, disabled, store, onEdit } = props;
 			    const name = profile.name.trim();
 			    const named = name.length > 0;
 			    // A row that carries content is one the user means to save, and an unnamed row
 			    // has no settings path, so the page must *say* it is unnamed rather than leave
 			    // a grey placeholder where a name would be (g-064: the row looked filled in
 			    // and the save looked clean, while nothing was written).
-			    const filled = [profile.baseUrl, profile.model, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some((field) => field.trim().length > 0) || profile.clearKey;
+			    const filled = [profile.baseUrl, profile.modelIds, profile.selectedModel, profile.apiKeyEnv, profile.timeoutMs, profile.backend, profile.apiKey].some((field) => field.trim().length > 0) || profile.clearKey;
 			    // The availability matrix (g-062). Activation writes the *draft*, so a named
 			    // row can be activated before it is saved; a probe reads the **saved** document
 			    // on the Host, so an unsaved row has nothing to probe; and an unnamed row can
@@ -4544,22 +5009,31 @@ window.__ModuleLoader__.load({
 			        }
 			    };
 			    return (0, react_1.createElement)('div', { style: S.profileRow, 'data-profile': profile.id, 'data-profile-unnamed': named ? undefined : 'true' }, (0, react_1.createElement)('div', { style: S.profileHead }, 
-			    // The name is edited *here*, not through a grey placeholder: the title is
-			    // the name field of the row (g-064). A named row keeps it as text so a
-			    // stray click cannot rename a row by accident; a new row opens as an input
-			    // whose placeholder is the field it is asking for.
-			    named
-			        ? (0, react_1.createElement)('span', { style: S.profileName }, name)
-			        : (0, react_1.createElement)('input', {
-			            type: 'text',
-			            style: { ...S.input, ...S.profileName, width: '13em' },
-			            'data-profile-name': profile.id,
-			            placeholder: t('profileNamePlaceholder'),
-			            title: t('profileName'),
-			            value: profile.name,
-			            disabled,
-			            onChange: (event) => onEdit({ name: event.target.value })
-			        }), 
+			    // The name is edited **here, always as an input** (g-066).
+			    //
+			    // It used to be a `<span>` once the row was named, and an `<input>` only
+			    // while it was not — so the first typed character renamed the row, swapped
+			    // the control under the caret, and the element that had focus was replaced
+			    // by text: the field looked locked after one keystroke and a *saved* row
+			    // could not be renamed at all. The control now stays an input for every
+			    // row, keyed by the row identity ({@link ProfileRow} is mounted with
+			    // `key: profile.id`), so React re-uses one DOM node for the whole edit and
+			    // nothing steals its focus, selection or caret.
+			    //
+			    // Editing it is still only a **draft** edit: nothing is written, committed
+			    // or activated until the explicit save.
+			    (0, react_1.createElement)('input', {
+			        type: 'text',
+			        style: { ...S.input, ...S.profileName, width: '13em', flex: '0 0 auto' },
+			        'data-profile-name': profile.id,
+			        placeholder: t('profileNamePlaceholder'),
+			        title: t('profileName'),
+			        value: profile.name,
+			        disabled,
+			        // No `key` prop: the node must be the *same* one across renders, which
+			        // is exactly what keeps the caret where the user left it.
+			        onChange: (event) => onEdit({ name: event.target.value })
+			    }), 
 			    // Worded, not just painted: the row says it is unnamed, and why that blocks
 			    // the save, in its own head line.
 			    named ? null : (0, react_1.createElement)('span', { style: S.profileUnnamedTag, 'data-profile-unnamed-tag': 'true' }, t('profileUnnamedTag')), isActive
@@ -4610,6 +5084,17 @@ window.__ModuleLoader__.load({
 			        : null, testBlocked !== undefined && testBlocked !== t('profileTesting')
 			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%' }, 'data-profile-blocked': 'test' }, testBlocked)
 			        : null, 
+			    // A renamed row whose **stored key** would not survive the rename (g-066).
+			    //
+			    // The Host cannot move a secret to another path, and this page never held the
+			    // value, so the save is refused until the user retypes it here. Saying so on
+			    // the row — before the save, not as an auth failure afterwards — is the whole
+			    // "never silently lose a key" promise. A row that names an environment
+			    // variable resolves its key from there, so renaming it stays free: only a
+			    // row whose key really is stored in the document can lose one.
+			    renameNeedsKey(profile, savedName, name)
+			        ? (0, react_1.createElement)('div', { style: { ...S.hint, flexBasis: '100%', color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-rename-key': 'true' }, t('profileRenameKeyNeeded').replace('{name}', savedName))
+			        : null, 
 			    // The filled-in-but-unnamed case, spelled out on the row itself: the save is
 			    // refused for the whole page, so the reason has to be where the fix is.
 			    !named && filled
@@ -4625,12 +5110,15 @@ window.__ModuleLoader__.load({
 			        onChange: (value) => onEdit({ baseUrl: value })
 			    }), GuidedField({
 			        t,
-			        path: 'systemOne.profiles.model',
-			        label: t('labelModel'),
-			        value: profile.model,
+			        path: 'systemOne.profiles.modelIds',
+			        label: t('labelModelIds'),
+			        hint: t('profileModelIdsHint'),
+			        value: profile.modelIds,
 			        mono: true,
+			        multiline: true,
 			        disabled,
-			        onChange: (value) => onEdit({ model: value })
+			        placeholder: 'jev-latest',
+			        onChange: (value) => onEdit({ modelIds: value })
 			    }), GuidedField({
 			        t,
 			        path: 'systemOne.profiles.timeoutMs',
@@ -4646,7 +5134,11 @@ window.__ModuleLoader__.load({
 			        mono: true,
 			        disabled,
 			        onChange: (value) => onEdit({ apiKeyEnv: value })
-			    })), (0, react_1.createElement)('div', { style: S.row }, 
+			    })), 
+			    // The one model in force (g-066). A radio group over the ids the list field
+			    // holds — never a free-text box — so the selection can only name a model
+			    // that exists: the runtime sends this id and the connection test probes it.
+			    ModelSelection({ t, profile, disabled, onEdit }), (0, react_1.createElement)('div', { style: S.row }, 
 			    // Always a placeholder: the stored value is never handed to this page.
 			    (0, react_1.createElement)('input', {
 			        type: 'password',
@@ -4695,35 +5187,40 @@ window.__ModuleLoader__.load({
 			    };
 			    const profiles = draft.backend.profiles;
 			    const activeName = draft.backend.active.trim();
-			    // The flat block's own key readiness, from the snapshot's provenance: say what
-			    // supplied the key ("from the configuration" / "from JEV_API_KEY") or name the
-			    // candidates when none did — never claim a specific variable is empty when the
-			    // chain may still serve the key from another one.
-			    // A blank `env` is passed through as `{name}` so the copy still names the
-			    // variable the configuration points at, instead of rendering an empty slot.
-			    // Four states (g-059): a literal key, the one named variable, the named
-			    // variable that is empty (a lock, not a fallback), or a fallback variable that
-			    // answered because nothing was named. The last two call for different fixes,
-			    // so they never share copy.
-			    const flatKeyState = systemOne?.apiKeyPresent !== true
+			    // Whether anything connects (g-066). The snapshot decides it, never a guess
+			    // about which fields look filled in: `unconfigured` is set by the resolution
+			    // exactly when no active profile resolved, and it also says *why*.
+			    const unconfigured = systemOne?.unconfigured;
+			    // The key readiness of the connection in force, from the snapshot's
+			    // provenance: say what supplied the key ("from the configuration" / "from
+			    // JEV_API_KEY"), or that the variable it names is empty — never echo a value.
+			    const connectionKeyState = systemOne?.apiKeyPresent !== true
 			        ? systemOne?.apiKeyLocked === true
-			            ? t('apiKeyLockedNamed').replace('{name}', systemOne.apiKeyVariable ?? draft.backend.apiKeyEnv ?? '—')
+			            ? t('apiKeyLockedNamed').replace('{name}', systemOne.apiKeyVariable ?? '—')
 			            : t('apiKeyMissing')
 			        : systemOne.apiKeySource === 'profile'
 			            ? t('apiKeyFromProfile')
 			            : systemOne.apiKeySource === 'fallback'
 			                ? t('apiKeyFromFallback').replace('{name}', systemOne.apiKeyVariable ?? '—')
 			                : t('apiKeyFromEnv').replace('{name}', systemOne.apiKeyVariable ?? systemOne.apiKeyEnv ?? '—');
-			    // One line for the collapsed header. It leads with the effective key state,
-			    // because that is the fact a user comes to this page to check; the note about
-			    // which surface to edit is the copy inside the fold.
-			    const flatConfigured = [draft.backend.baseUrl, draft.backend.model, draft.backend.apiKeyEnv, draft.backend.timeoutMs].some((field) => field.trim().length > 0);
-			    const flatSummary = `${t('backendFlatFoldRole')} · ${draft.backend.backend} · ${flatKeyState}${flatConfigured ? '' : profiles.length > 0 && activeName.length > 0 ? ` · ${t('backendFlatFoldedSummary')}` : ''}`;
+			    const unconfiguredCopy = unconfigured === undefined
+			        ? undefined
+			        : unconfigured === 'legacy-config-required'
+			            ? t('unconfiguredLegacy')
+			            : unconfigured === 'no-profiles'
+			                ? t('unconfiguredNoProfiles')
+			                : unconfigured === 'active-profile-missing'
+			                    ? t('unconfiguredActiveMissing').replace('{name}', activeName || '—')
+			                    : t('unconfiguredNoActive');
 			    const activeMissing = systemOne?.activeProfileMissing === true;
 			    // Which rows the Host has actually read: the probe route resolves the *saved*
 			    // document, so this set is what decides whether "测试" can do anything. The
 			    // draft's names are not enough — a name only a draft knows is not on the Host.
 			    const savedNames = new Set((systemOne?.profiles ?? []).map((profile) => profile.name?.trim() ?? '').filter((name) => name.length > 0));
+			    // The saved name of every row, by page identity: what a rename is measured
+			    // against, and the fact the row needs to tell the user its stored key cannot
+			    // follow the name (g-066). Seeded rows keep their identity across re-seeds.
+			    const originalRows = state.original.backend.profiles;
 			    // Rows are addressed by their page identity, never by position: one row's edit
 			    // must never land on whichever row happens to be third after a delete.
 			    const setProfile = (id, patch) => {
@@ -4753,53 +5250,43 @@ window.__ModuleLoader__.load({
 			                isActive: activeName.length > 0 && profile.name.trim() === activeName,
 			                probe: state.probes[profile.name.trim()],
 			                saved: savedNames.has(profile.name.trim()),
+			                savedName: originalRows.find((row) => row.id === profile.id)?.name.trim() ?? '',
 			                disabled,
 			                store,
 			                onEdit: (patch) => setProfile(profile.id, patch)
 			            }))), Button({ label: t('profileAdd'), small: true, disabled, onClick: () => store.addProfile() }))
 			    }), 
-			    // g-058: the flat block is the *compatibility* surface now — profiles above
-			    // are the main editing face. It stays a real fallback of the resolution chain
-			    // ("active profile > flat block > environment"), so it must remain editable,
-			    // but it no longer competes with the profiles card for the same fields.
-			    // Deliberately a plain call: `FoldedCard` holds no state of its own, so no
-			    // hook can be grafted onto this component's sequence. The open flag lives
-			    // here instead — g-059 shipped a crashing page because a *stateful* helper
-			    // was invoked this way and React rejected the shifted hook count (#310).
-			    FoldedCard({
+			    // The *runtime* implementation choice, and — when nothing connects — the
+			    // one place the page says so. The flat compatibility editor that used to sit
+			    // here is gone (g-066): it was a second editor of the same connection fields,
+			    // and its values were a silent fallback the runtime no longer reads.
+			    Card({
 			        title: t('groupBackend'),
-			        summary: flatSummary,
-			        open: state.flatOpen,
-			        onToggle: () => store.setFlatOpen(!state.flatOpen),
-			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('span', { style: S.hint }, t('backendHintFlat')), (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
+			        children: (0, react_1.createElement)('div', { style: S.field }, (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({
 			            t,
 			            path: 'backend',
 			            value: draft.backend.backend,
 			            options: panel_1.BACKEND_CHOICES.map((value) => ({ value, label: value })),
 			            disabled,
-			            onChange: (value) => {
-			                if (value === 'jev') {
-			                    setBackend({
-			                        backend: value,
-			                        baseUrl: draft.backend.baseUrl || 'https://api.typesafe.ai/v1/systemone',
-			                        model: draft.backend.model || 'jev-latest',
-			                        apiKeyEnv: draft.backend.apiKeyEnv || 'JEV_API_KEY'
-			                    });
-			                }
-			                else {
-			                    setBackend({ backend: value });
-			                }
-			            }
-			        }), GuidedField({ t, path: 'systemOne.baseUrl', value: draft.backend.baseUrl, disabled, mono: true, onChange: (value) => setBackend({ baseUrl: value }) }), GuidedField({ t, path: 'systemOne.model', value: draft.backend.model, disabled, mono: true, onChange: (value) => setBackend({ model: value }) }), GuidedField({ t, path: 'systemOne.apiKeyEnv', hint: t('backendHint'), value: draft.backend.apiKeyEnv, disabled, mono: true, onChange: (value) => setBackend({ apiKeyEnv: value }) }), GuidedField({ t, path: 'systemOne.timeoutMs', value: draft.backend.timeoutMs, disabled, onChange: (value) => setBackend({ timeoutMs: value }) })), (0, react_1.createElement)('div', { style: S.row }, (0, react_1.createElement)('span', { style: S.label }, t('backendActive')), (0, react_1.createElement)('span', { style: S.mono }, String(systemOne?.active ?? '—')), 
-			        // Where the key really comes from, read from the snapshot's provenance
-			        // rather than guessed from `apiKeyEnv`.
-			        (0, react_1.createElement)('span', {
+			            // A pure implementation choice now: it names the backend a
+			            // connection uses when the connection states none, and it no longer
+			            // implies any connection settings at all.
+			            hint: t('backendHintRuntime'),
+			            onChange: (value) => setBackend({ backend: value })
+			        })), (0, react_1.createElement)('div', { style: S.row }, (0, react_1.createElement)('span', { style: S.label }, t('backendActive')), (0, react_1.createElement)('span', { style: S.mono }, String(systemOne?.active ?? '—')), (0, react_1.createElement)('span', {
 			            style: {
 			                ...S.hint,
 			                color: token(systemOne?.apiKeyPresent === true ? '--dsw-alias-state-success-primary' : '--dsw-alias-state-warn-primary', 'inherit')
 			            }
-			        }, flatKeyState)))
-			    }), Card({
+			        }, connectionKeyState)))
+			    }), 
+			    // Nothing connects: say which absence it is, what that means for the
+			    // running plugin, and what to do about it — in that order. Rendered from the
+			    // snapshot's own fact, so a document that merely *looks* configured (an old
+			    // flat block, a name that matches no row) cannot read as connected.
+			    unconfiguredCopy === undefined
+			        ? null
+			        : (0, react_1.createElement)('div', { style: { ...S.banner, flexBasis: '100%' }, 'data-unconfigured': unconfigured ?? '' }, (0, react_1.createElement)('strong', null, ` ${t('unconfiguredTitle')} `), (0, react_1.createElement)('span', null, unconfiguredCopy), (0, react_1.createElement)('span', null, ` ${t('unconfiguredEffect')}`)), Card({
 			        title: t('groupRuntime'),
 			        children: (0, react_1.createElement)('div', { style: S.fieldRow }, GuidedField({ t, path: 'toolPrefix', value: draft.runtime.toolPrefix, disabled, mono: true, onChange: (value) => setRuntime({ toolPrefix: value }) }), GuidedField({ t, path: 'pruneThreshold', value: draft.runtime.pruneThreshold, disabled, onChange: (value) => setRuntime({ pruneThreshold: value }) }), GuidedField({ t, path: 'ledgerPath', value: draft.runtime.ledgerPath, disabled, mono: true, onChange: (value) => setRuntime({ ledgerPath: value }) }), GuidedField({ t, path: 'calibrationPath', value: draft.runtime.calibrationPath, disabled, mono: true, onChange: (value) => setRuntime({ calibrationPath: value }) }))
 			    }));

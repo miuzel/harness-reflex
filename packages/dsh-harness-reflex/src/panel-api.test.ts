@@ -39,6 +39,14 @@ import { REFLEX_TOOL_SUFFIXES } from './tools.js';
 /** An API key value that must never appear in any answer. */
 const SECRET = 'sk-panel-must-not-leak-7c21';
 
+/**
+ * The presence fact the caller gathers for the zoned `main` profile.
+ *
+ * In production this comes from {@link profileKeyPresence}, which resolves the
+ * one key chain; here it is stated so the projection test is about projection.
+ */
+const MAIN_KEY_FACTS = { main: { present: true, fromProfile: false, variable: 'REFLEX_TEST_KEY' } };
+
 const AUTHORED: ReflexConfig = {
   backend: 'jev',
   toolPrefix: 'reflex_',
@@ -51,7 +59,14 @@ const AUTHORED: ReflexConfig = {
     models: { 'reflex-pro': [{ provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }] }
   },
   effort: { reasoningEffort: 'reflex', fallback: 'low', minConfidence: 0.3 },
-  systemOne: { baseUrl: 'http://127.0.0.1:8000/v1', model: 'jev-small', apiKeyEnv: 'REFLEX_TEST_KEY', timeoutMs: 2500 }
+  // g-066: the connection is one active profile. The same facts used to be the
+  // flat block's; the flat block no longer connects anything.
+  systemOne: {
+    active: 'main',
+    profiles: {
+      main: { baseUrl: 'http://127.0.0.1:8000/v1', model: 'jev-small', apiKeyEnv: 'REFLEX_TEST_KEY', timeoutMs: 2500 }
+    }
+  }
 };
 
 const SUMMARY: LedgerSummary = {
@@ -215,7 +230,7 @@ function source(panelFacts = facts()): { source: PanelSource; cleared: number[] 
 //#region projection
 
 test('the snapshot carries exactly the projected facts', () => {
-  const snapshot = buildPanelSnapshot(facts(3));
+  const snapshot = buildPanelSnapshot(facts(3, { profileKeys: MAIN_KEY_FACTS }));
 
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.at, 1_709_530_001_000);
@@ -255,20 +270,44 @@ test('the snapshot carries exactly the projected facts', () => {
       basis: ['task looks hard']
     }
   });
-  assert.deepEqual(snapshot.systemOne, {
+  // The block-level fields are the *active profile's*, and the connection is
+  // configured, so no `unconfigured` reason is reported.
+  const { profiles: profileViews, ...systemOneFacts } = snapshot.systemOne;
+  assert.deepEqual(systemOneFacts, {
     backend: 'jev',
     active: 'jev',
     apiKeyPresent: true,
     apiKeyFromProfile: false,
-    // No profiles authored: the list is empty and the active name is absent, which
-    // is exactly the pre-g-057 block plus those two explicit "none" facts.
-    profiles: [],
     activeProfileMissing: false,
+    activeProfile: 'main',
     baseUrl: 'http://127.0.0.1:8000/v1',
     model: 'jev-small',
     apiKeyEnv: 'REFLEX_TEST_KEY',
     timeoutMs: 2500
   });
+  // One row, carrying the selected model — the id the runtime and the probe both
+  // use — and nothing secret.
+  // The row's presence is a *fact the caller gathered* (`profileKeys`, read from
+  // the one key chain), never something the projection infers from the value it
+  // holds — that is why this fixture supplies it explicitly.
+  assert.deepEqual(profileViews, [
+    {
+      name: 'main',
+      active: true,
+      apiKeyPresent: true,
+      apiKeyFromProfile: false,
+      // The variable that supplied the key, as a *name* — the row renders
+      // "from REFLEX_TEST_KEY" from it, and never the value.
+      apiKeyVariable: 'REFLEX_TEST_KEY',
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      model: 'jev-small',
+      modelIds: ['jev-small'],
+      selectedModel: 'jev-small',
+      apiKeyEnv: 'REFLEX_TEST_KEY',
+      timeoutMs: 2500,
+      backend: 'jev'
+    }
+  ]);
   assert.deepEqual(snapshot.interventions, {
     mode: 'observe',
     enabled: true,
@@ -716,17 +755,20 @@ const PROFILE_SECRETS = {
   secondary: 'sk-profile-secondary-88ac17'
 } as const;
 
-/** Authored config carrying two profiles, one of them active. */
+/**
+ * Authored config carrying two profiles, one of them active.
+ *
+ * The flat fields this fixture used to carry beside the profiles are gone with
+ * g-066: they connected nothing any more, and keeping them here would have made
+ * the "inherited field" assertions below pass for the wrong reason. What a
+ * profile does not state is now simply unstated.
+ */
 const MULTI_PROFILE: ReflexConfig = {
   ...AUTHORED,
   systemOne: {
-    baseUrl: 'http://flat.example',
-    model: 'flat-model',
-    apiKeyEnv: 'REFLEX_TEST_KEY',
-    timeoutMs: 4000,
     active: 'primary',
     profiles: {
-      primary: { model: 'primary-model', apiKey: PROFILE_SECRETS.primary },
+      primary: { model: 'primary-model', timeoutMs: 4000, apiKey: PROFILE_SECRETS.primary },
       secondary: { baseUrl: 'http://secondary.example', model: 'secondary-model', apiKey: PROFILE_SECRETS.secondary }
     }
   }
@@ -744,12 +786,17 @@ test('the panel lists every profile with its non-secret fields and the active ma
   assert.equal(primary?.active, true);
   assert.equal(secondary?.active, false);
   assert.equal(primary?.model, 'primary-model');
-  assert.equal(primary?.baseUrl, 'http://flat.example', 'an inherited field is reported as resolved');
+  assert.equal(primary?.baseUrl, undefined, 'a field the profile does not state is not inherited from anything');
   assert.equal(secondary?.baseUrl, 'http://secondary.example');
   assert.equal(primary?.apiKeyPresent, true);
   assert.equal(primary?.apiKeyFromProfile, true);
-  assert.equal(primary?.apiKeyEnv, 'REFLEX_TEST_KEY', 'the inherited variable name is reported, it is not a secret');
-  assert.equal(secondary?.timeoutMs, 4000);
+  assert.equal(primary?.apiKeyEnv, undefined, 'no variable is named, and none is borrowed');
+  assert.equal(secondary?.timeoutMs, undefined, 'the second row does not inherit the first row\'s timeout');
+  // The model list and its selection travel with the row: the page renders the
+  // radio group from `modelIds` and the effective choice from `selectedModel`.
+  assert.deepEqual(primary?.modelIds, ['primary-model']);
+  assert.equal(primary?.selectedModel, 'primary-model');
+  assert.equal(primary?.modelMissing, undefined);
 });
 
 test('no serialized panel answer contains a profile key, in any form', () => {
@@ -814,18 +861,23 @@ test('an active name matching no profile is surfaced, not hidden', () => {
   const view = buildPanelSnapshot(facts(1, { config })).systemOne;
   assert.equal(view.activeProfileMissing, true);
   assert.equal(view.activeProfile, 'prod');
-  assert.equal(view.baseUrl, 'http://flat.example', 'the resolved block is the flat fallback');
+  assert.equal(view.baseUrl, undefined, 'nothing is resolved in place of the missing profile');
+  assert.equal(view.unconfigured, 'active-profile-missing', 'the page is told nothing connects, and why');
   assert.equal(view.profiles.length, 2, 'the authored profiles are still listed, so the user can pick one');
   assert.equal(view.profiles.every((profile) => !profile.active), true, 'none of them is silently promoted');
 });
 
-test('a deployment with no profiles projects an empty list, not an absent field', () => {
-  const view = buildPanelSnapshot(facts(1)).systemOne;
+test('a deployment with no profiles projects an empty list and an unconfigured state', () => {
+  // A config that authors nothing at all — the shape every other fixture avoids
+  // precisely because it no longer connects anything.
+  const view = buildPanelSnapshot(facts(1, { config: resolveConfig({ backend: 'jev', systemOne: {} }) })).systemOne;
   assert.deepEqual(view.profiles, []);
   assert.equal(view.activeProfile, undefined);
   assert.equal(view.activeProfileMissing, false);
-  assert.equal(view.apiKeyPresent, true, 'the pre-g-057 key fact is unchanged');
-  assert.equal(view.apiKeyEnv, 'REFLEX_TEST_KEY');
+  assert.equal(view.unconfigured, 'no-profiles', 'the page must be able to say "not configured"');
+  assert.equal(view.baseUrl, undefined);
+  assert.equal(view.model, undefined);
+  assert.equal(view.apiKeyEnv, undefined);
 });
 
 test('the probe route is registered, refuses the wrong method, and refuses remote peers', async () => {

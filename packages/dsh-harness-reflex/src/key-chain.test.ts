@@ -14,6 +14,7 @@ import {
 import { createBackend } from './bridge.js';
 import { apiKeyFacts, profileKeyPresence } from './panel-mount.js';
 import { buildProbeRequest } from './systemone-probe.js';
+import { UnconfiguredBackend } from './unconfigured-backend.js';
 import { JevDecisionBackend } from './vendor/harness-reflex/backend/jev.js';
 import { SimpleJevDecisionBackend } from './vendor/harness-reflex/backend/simple-jev.js';
 import { createSystemOneBackend } from './vendor/harness-reflex/backend/factory.js';
@@ -156,7 +157,7 @@ test('the JEV_API_KEY-only deployment that started this bug now reads as locked,
   // exports only JEV_API_KEY. g-058 made the panel agree with the backend by
   // letting it report JEV_API_KEY as ready; g-059 instead locks the lookup, so
   // the honest answer is "the variable you named is empty".
-  const systemOne = resolveSystemOneConfig('jev', { apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
+  const systemOne = profileSystemOne({ apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
   const facts = apiKeyFacts(systemOne, only('JEV_API_KEY'));
   assert.equal(facts.apiKeyPresent, false, 'a named-but-empty variable is not a key');
   assert.equal(facts.apiKeyLocked, true);
@@ -177,7 +178,7 @@ test('a blank apiKeyEnv is not a naming, so the fallback still runs', () => {
   // would turn a working deployment into a missing key with no variable to fix.
   // `resolveSystemOneConfig` trims the name away, so the resolver never sees it.
   for (const blank of ['', '   ', '\t ']) {
-    const systemOne = resolveSystemOneConfig('jev', { apiKeyEnv: blank });
+    const systemOne = profileSystemOne({ apiKeyEnv: blank });
     assert.equal(systemOne.apiKeyEnv, undefined, `a blank apiKeyEnv (${JSON.stringify(blank)}) must not survive resolution`);
     assert.deepEqual(
       resolveApiKeyWithSource(systemOne, only('JEV_API_KEY')),
@@ -186,7 +187,7 @@ test('a blank apiKeyEnv is not a naming, so the fallback still runs', () => {
     );
   }
   // A real name locks, even when only a fallback variable is exported.
-  const named = resolveSystemOneConfig('jev', { apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
+  const named = profileSystemOne({ apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
   assert.deepEqual(resolveApiKeyWithSource(named, only('JEV_API_KEY')), {
     missing: 'named',
     variable: 'SYSTEM_ONE_API_KEY'
@@ -255,36 +256,93 @@ test('the probe sends the key the chain resolves, so the test button matches the
   assert.equal(literal.spec.authorization, 'Bearer sk-literal');
 });
 
+/**
+ * Build a config whose connection is one active profile (g-066).
+ *
+ * The flat block used to be the way these tests authored a connection; it no
+ * longer connects anything, so the same facts are stated on a profile — which is
+ * also what a real deployment does now.
+ * @param block - top-level `backend` plus the profile's own connection fields.
+ * @param profile - the active profile's fields.
+ * @returns the resolved config `createBackend` consumes.
+ */
+function profileConfig(
+  block: { backend: string },
+  profile: Record<string, unknown> = {}
+): ReturnType<typeof resolveConfig> {
+  return resolveConfig({ backend: block.backend, systemOne: { active: 'p', profiles: { p: profile } } } as never);
+}
+
+/** Every connection field a test wants on its one profile. */
+const CONNECTION = { baseUrl: 'http://jev.test/v1/systemone' };
+
+/**
+ * Resolve a `systemOne` block whose single profile carries `fields`.
+ *
+ * The flat block used to answer these; g-066 moved every connection field onto
+ * the profile, so the same assertions are made against a profile now — which is
+ * also the only shape that can still connect.
+ * @param fields - the active profile's fields.
+ * @returns the resolved connection block.
+ */
+function profileSystemOne(fields: { apiKeyEnv?: string }): ReturnType<typeof resolveSystemOneConfig> {
+  return resolveSystemOneConfig('jev', { active: 'p', profiles: { p: { ...CONNECTION, ...fields } } });
+}
+
 test('createBackend hands the chain-resolved key to both backends', () => {
-  // No variable is named, so the documented fallback answers and is handed over
-  // explicitly: the transport's key and the panel's "ready" verdict are the same
-  // resolution, so they cannot diverge.
-  const config = resolveConfig({ backend: 'jev', systemOne: {} });
-  const jev = createBackend(config, only('JEV_API_KEY'));
+  // The profile names no variable, so the documented fallback answers and is
+  // handed over explicitly: the transport's key and the panel's "ready" verdict
+  // are the same resolution, so they cannot diverge.
+  const jev = createBackend(profileConfig({ backend: 'jev' }, CONNECTION), only('JEV_API_KEY'));
   assert.ok(jev instanceof JevDecisionBackend);
   assert.equal(privateKey(jev), 'sk-JEV_API_KEY', 'jev must receive the fallback key explicitly');
 
-  const vllmConfig = resolveConfig({ backend: 'vllm', systemOne: { baseUrl: 'http://localhost:8000' } });
+  const vllmConfig = profileConfig({ backend: 'vllm' }, { baseUrl: 'http://localhost:8000' });
   const vllm = createBackend(vllmConfig, only('VLLM_API_KEY'));
   assert.ok(vllm instanceof SimpleJevDecisionBackend);
   assert.equal(privateKey(vllm), 'sk-VLLM_API_KEY', 'vllm must receive the fallback key explicitly');
+});
+
+test('createBackend connects nothing without an active profile, whatever the environment holds', () => {
+  // Criterion 1 of g-066. This is the regression the goal exists for: the
+  // environment below is *exactly* the one that used to make the `auto` factory
+  // build a live Jev backend and start talking to a gateway nobody selected.
+  const env = { JEV_API_KEY: 'sk-only-in-the-environment', SYSTEM_ONE_BASE_URL: 'http://env-gateway' };
+  const documents: Record<string, ReturnType<typeof resolveConfig>> = {
+    'no profiles': resolveConfig({ systemOne: {} }),
+    'profiles but none active': resolveConfig({ systemOne: { profiles: { p: CONNECTION } } }),
+    'active name missing': resolveConfig({ systemOne: { active: 'typo', profiles: { p: CONNECTION } } }),
+    'only the legacy flat fields': resolveConfig({
+      systemOne: { baseUrl: 'http://flat', model: 'm', apiKeyEnv: 'JEV_API_KEY' } as never
+    })
+  };
+  for (const [label, config] of Object.entries(documents)) {
+    const backend = createBackend(config, env);
+    assert.ok(
+      backend instanceof UnconfiguredBackend,
+      `${label}: the plugin must not build a remote transport, got ${backend.name}`
+    );
+    assert.equal(backend.name, 'unconfigured', `${label}: the name must say what is wrong`);
+    assert.notEqual(backend.name, 'mock-heuristic-v1', `${label}: "unconfigured" must not look like a deliberate mock`);
+    assert.equal(backend.health()?.available, false, `${label}: health must report the missing connection`);
+  }
 });
 
 test('createBackend pins the key: a locked lookup hands the backend no key and no second chance', () => {
   // g-059. The named variable is empty while JEV_API_KEY is exported. The chain
   // says "no key", and `apiKeyResolved: true` makes that final — without the flag
   // the backend would read JEV_API_KEY itself and the panel would lie again.
-  const config = resolveConfig({ backend: 'jev', systemOne: { apiKeyEnv: 'SYSTEM_ONE_API_KEY' } });
+  const config = profileConfig({ backend: 'jev' }, { ...CONNECTION, apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
   const jev = createBackend(config, only('JEV_API_KEY'));
   assert.ok(jev instanceof JevDecisionBackend);
   assert.equal(privateKey(jev), '', 'the locked backend holds no key, not the fallback value');
 
   // The logits backend would otherwise invent its `dummy` placeholder; it too is
   // handed the empty resolution verbatim.
-  const vllmConfig = resolveConfig({
-    backend: 'vllm',
-    systemOne: { baseUrl: 'http://localhost:8000', apiKeyEnv: 'SYSTEM_ONE_API_KEY' }
-  });
+  const vllmConfig = profileConfig(
+    { backend: 'vllm' },
+    { baseUrl: 'http://localhost:8000', apiKeyEnv: 'SYSTEM_ONE_API_KEY' }
+  );
   const vllm = createBackend(vllmConfig, only('VLLM_API_KEY'));
   assert.ok(vllm instanceof SimpleJevDecisionBackend);
   assert.equal(privateKey(vllm), '', 'the locked logits backend holds no key, not `dummy`');
@@ -356,9 +414,9 @@ test('a locked lookup sends an unauthenticated request, and the flag defaults to
   process.env.JEV_API_KEY = 'sk-only-in-the-environment';
   const stub = captureFetch(() => ({ answers: {} }));
   try {
-    // (a) The plugin's backend: the block names SYSTEM_ONE_API_KEY (empty), so
+    // (a) The plugin's backend: the profile names SYSTEM_ONE_API_KEY (empty), so
     //     the chain locks and `createBackend` passes no key + `apiKeyResolved`.
-    const config = resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://jev.test/v1/systemone', apiKeyEnv: 'SYSTEM_ONE_API_KEY' } });
+    const config = profileConfig({ backend: 'jev' }, { ...CONNECTION, apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
     const plugged = createBackend(config, { JEV_API_KEY: 'sk-only-in-the-environment' });
     assert.ok(plugged instanceof JevDecisionBackend);
     await makeOneRequest(plugged);
@@ -381,17 +439,14 @@ test('a locked lookup sends an unauthenticated request, and the flag defaults to
 
     // (c) The logits backend: same lock, and no invented `dummy` placeholder.
     stub.calls.length = 0;
-    const vllmConfig = resolveConfig({
-      backend: 'vllm',
-      systemOne: { baseUrl: 'http://vllm.test', apiKeyEnv: 'SYSTEM_ONE_API_KEY' }
-    });
+    const vllmConfig = profileConfig({ backend: 'vllm' }, { baseUrl: 'http://vllm.test', apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
     const vllm = createBackend(vllmConfig, { VLLM_API_KEY: 'sk-vllm-env' });
     await makeOneRequest(vllm);
     assert.equal('Authorization' in stub.calls[0]!.headers, false, 'the locked logits backend must send no key');
 
     // (d) And with no variable named, the fallback key is sent as before.
     stub.calls.length = 0;
-    const unnamed = createBackend(resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://jev.test/v1/systemone' } }), {
+    const unnamed = createBackend(profileConfig({ backend: 'jev' }, CONNECTION), {
       JEV_API_KEY: 'sk-only-in-the-environment'
     });
     await makeOneRequest(unnamed);
@@ -399,10 +454,10 @@ test('a locked lookup sends an unauthenticated request, and the flag defaults to
 
     // (e) A named variable that IS set is sent verbatim.
     stub.calls.length = 0;
-    const named = createBackend(
-      resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://jev.test/v1/systemone', apiKeyEnv: 'MY_KEY' } }),
-      { MY_KEY: 'sk-named', JEV_API_KEY: 'sk-ignored' }
-    );
+    const named = createBackend(profileConfig({ backend: 'jev' }, { ...CONNECTION, apiKeyEnv: 'MY_KEY' }), {
+      MY_KEY: 'sk-named',
+      JEV_API_KEY: 'sk-ignored'
+    });
     await makeOneRequest(named);
     assert.equal(stub.calls[0]!.headers.Authorization, 'Bearer sk-named');
   } finally {
@@ -433,10 +488,7 @@ test('the default `auto` backend honours the lock too, and still picks its provi
     // `backend: 'auto'` + a named-but-empty variable: the provider is still
     // selected from the environment (only JEV_API_KEY is exported, so the Jev
     // branch wins) *and* the request goes out unauthenticated.
-    const config = resolveConfig({
-      backend: 'auto',
-      systemOne: { baseUrl: 'http://jev.test/v1/systemone', apiKeyEnv: 'SYSTEM_ONE_API_KEY' }
-    });
+    const config = profileConfig({ backend: 'auto' }, { ...CONNECTION, apiKeyEnv: 'SYSTEM_ONE_API_KEY' });
     const auto = createBackend(config, { JEV_API_KEY: 'sk-only-in-the-environment' });
     assert.ok(auto instanceof JevDecisionBackend, 'auto must still select the jev provider from the environment');
     await makeOneRequest(auto);
@@ -459,10 +511,10 @@ test('the default `auto` backend honours the lock too, and still picks its provi
 
     // And an `auto` deployment that names a variable which *is* set sends it.
     stub.calls.length = 0;
-    const named = createBackend(
-      resolveConfig({ backend: 'auto', systemOne: { baseUrl: 'http://jev.test/v1/systemone', apiKeyEnv: 'MY_KEY' } }),
-      { MY_KEY: 'sk-named', JEV_API_KEY: 'sk-ignored' }
-    );
+    const named = createBackend(profileConfig({ backend: 'auto' }, { ...CONNECTION, apiKeyEnv: 'MY_KEY' }), {
+      MY_KEY: 'sk-named',
+      JEV_API_KEY: 'sk-ignored'
+    });
     await makeOneRequest(named);
     assert.equal(stub.calls[0]!.headers.Authorization, 'Bearer sk-named');
   } finally {

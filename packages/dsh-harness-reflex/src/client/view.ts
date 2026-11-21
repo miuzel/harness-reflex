@@ -1036,11 +1036,21 @@ function ModelSelection(props: {
   const effective = selection.length > 0 ? selection : (ids[0] ?? '');
   const offList = selection.length > 0 && ids.length > 0 && !ids.includes(selection);
   if (ids.length === 0) return null;
-  return h(
-    'div',
-    { style: { ...S.fieldRow, alignItems: 'center' }, 'data-profile-model-selection': profile.id },
-    h('span', { style: S.label }, t('profileSelectedModel')),
-    ids.length === 1
+  // Rendered through `Field` so it carries the same contract as every other
+  // field of the page: a label, a stable help id, and the `(?)` disclosure.
+  // It is *rendered as an element*, never invoked directly: `Field` owns a
+  // `useState` (its `(?)` disclosure), and calling a stateful component as a
+  // plain function puts that hook into the caller's sequence — the #310 crash
+  // this page already shipped once. `client-hooks.test.ts` guards it.
+  return h(Field, {
+    label: t('profileSelectedModel'),
+    path: 'systemOne.profiles.selectedModel',
+    help: t('helpSelectedModel'),
+    helpLabel: interpolate(t('helpAbout'), { field: t('profileSelectedModel') }),
+    children: h(
+      'span',
+      { style: { ...S.row, alignItems: 'center' }, 'data-profile-model-selection': profile.id },
+      ids.length === 1
       ? h('span', { style: S.mono, 'data-profile-selected-model': ids[0] }, ids[0] ?? '')
       : h(
           'span',
@@ -1068,15 +1078,16 @@ function ModelSelection(props: {
             )
           )
         ),
-    // Why the runtime would send no model at all, spelled out where the fix is.
-    offList
-      ? h(
-          'span',
-          { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-model-missing': 'true' },
-          t('profileModelMissing').replace('{name}', selection)
-        )
-      : null
-  );
+      // Why the runtime would send no model at all, spelled out where the fix is.
+      offList
+        ? h(
+            'span',
+            { style: { ...S.hint, color: token('--dsw-alias-state-warn-primary', '#fbbf24') }, 'data-profile-model-missing': 'true' },
+            t('profileModelMissing').replace('{name}', selection)
+          )
+        : null
+    )
+  });
 }
 
 /**

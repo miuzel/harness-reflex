@@ -162,9 +162,14 @@ test('a backend/systemOne save swaps the transport, resets health, and never reb
   let failing = false;
   process.env.REFLEX_LIVE_KEY_OLD = 'old-key';
   process.env.REFLEX_LIVE_KEY_NEW = 'new-key';
+  // g-066: a connection is one active profile, so the save that swaps the
+  // transport swaps that profile's fields (and the `active` name is unchanged).
   const authored: ReflexConfig = {
     backend: 'jev',
-    systemOne: { baseUrl: 'http://old.gateway', model: 'old-model', apiKeyEnv: 'REFLEX_LIVE_KEY_OLD' },
+    systemOne: {
+      active: 'gw',
+      profiles: { gw: { baseUrl: 'http://old.gateway', model: 'old-model', apiKeyEnv: 'REFLEX_LIVE_KEY_OLD' } }
+    },
     routing: { enabled: false }
   };
   const host = await bootLoader(authored);
@@ -198,10 +203,10 @@ test('a backend/systemOne save swaps the transport, resets health, and never reb
     const newConfig: ReflexConfig = {
       backend: 'jev',
       systemOne: {
-        baseUrl: 'http://new.gateway',
-        model: 'new-model',
-        apiKeyEnv: 'REFLEX_LIVE_KEY_NEW',
-        timeoutMs: 1234
+        active: 'gw',
+        profiles: {
+          gw: { baseUrl: 'http://new.gateway', model: 'new-model', apiKeyEnv: 'REFLEX_LIVE_KEY_NEW', timeoutMs: 1234 }
+        }
       },
       routing: { enabled: false }
     };
@@ -221,12 +226,16 @@ test('a backend/systemOne save swaps the transport, resets health, and never reb
     assert.equal(runtime.backendRebuilds, 2, 'a same-value save does not rebuild the backend');
 
     // timeoutMs alone shapes the transport: it rebuilds once and then stays put.
-    host.commit({
+    // The field belongs to the profile it configures (g-066), so that is where
+    // the save puts it — a top-level `systemOne.timeoutMs` is not declared by the
+    // schema any more and would be dropped without changing anything.
+    const withTimeout = (ms: number): ReflexConfig => ({
       ...newConfig,
-      systemOne: { ...newConfig.systemOne!, timeoutMs: 4321 }
+      systemOne: { ...newConfig.systemOne!, profiles: { gw: { ...newConfig.systemOne!.profiles!.gw, timeoutMs: ms } } }
     });
+    host.commit(withTimeout(4321));
     assert.equal(runtime.backendRebuilds, 3);
-    host.commit({ ...newConfig, systemOne: { ...newConfig.systemOne!, timeoutMs: 4321 } });
+    host.commit(withTimeout(4321));
     assert.equal(runtime.backendRebuilds, 3);
     assert.equal(runtime.effectiveConfig.systemOne.timeoutMs, 4321);
 

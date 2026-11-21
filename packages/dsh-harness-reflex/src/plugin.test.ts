@@ -276,28 +276,49 @@ test('an explicit ledgerPath is honoured by the activation', async () => {
 });
 
 test('the System One connection block fills defaults and refuses unusable values', () => {
-  assert.deepEqual(resolveSystemOneConfig(undefined, undefined), { backend: 'auto' });
+  // g-066: with nothing activated there is no connection to fill in — the block
+  // resolves to no fields at all and names the reason.
+  assert.deepEqual(resolveSystemOneConfig(undefined, undefined), { backend: 'auto', unconfigured: 'no-profiles' });
   assert.deepEqual(
-    resolveSystemOneConfig('vllm', { baseUrl: ' http://127.0.0.1:8000/v1 ', model: 'jev-small', apiKeyEnv: 'REFLEX_KEY', timeoutMs: 2500 }),
-    { backend: 'vllm', baseUrl: 'http://127.0.0.1:8000/v1', model: 'jev-small', apiKeyEnv: 'REFLEX_KEY', timeoutMs: 2500 },
+    resolveSystemOneConfig('vllm', {
+      active: 'p',
+      profiles: { p: { baseUrl: ' http://127.0.0.1:8000/v1 ', model: 'jev-small', apiKeyEnv: 'REFLEX_KEY', timeoutMs: 2500 } }
+    }),
+    {
+      backend: 'vllm',
+      active: 'p',
+      profiles: { p: { baseUrl: 'http://127.0.0.1:8000/v1', modelIds: ['jev-small'], apiKeyEnv: 'REFLEX_KEY', timeoutMs: 2500 } },
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      model: 'jev-small',
+      apiKeyEnv: 'REFLEX_KEY',
+      timeoutMs: 2500
+    },
     'authored text is trimmed, not trusted'
   );
   // An empty string is "unset", not "the empty base url".
-  assert.deepEqual(resolveSystemOneConfig('mock', { baseUrl: '   ', model: '' }), { backend: 'mock' });
-  for (const timeoutMs of [0, -1, 1.5, Number.NaN]) {
-    assert.throws(() => resolveSystemOneConfig('auto', { timeoutMs }), /timeoutMs must be a positive integer/);
+  assert.deepEqual(
+    resolveSystemOneConfig('mock', { active: 'p', profiles: { p: { baseUrl: '   ', model: '' } } }),
+    { backend: 'mock', active: 'p', profiles: { p: {} } },
+    'a blank field stays absent so the backend decides'
+  );
+  assert.throws(
+    () => resolveSystemOneConfig('auto', { profiles: { p: { timeoutMs: 0 } } }),
+    /timeoutMs must be a positive integer/
+  );
+  for (const timeoutMs of [-1, 1.5, Number.NaN]) {
+    assert.throws(() => resolveSystemOneConfig('auto', { profiles: { p: { timeoutMs } } }), /timeoutMs must be a positive integer/);
   }
   assert.throws(() => resolveSystemOneConfig('telepathy' as 'auto', undefined), /backend must be one of/);
 });
 
 test('an api key is read from the environment by name and never from the document', () => {
-  const config = resolveSystemOneConfig('vllm', { apiKeyEnv: 'REFLEX_TEST_KEY' });
+  const config = resolveSystemOneConfig('vllm', { active: 'p', profiles: { p: { apiKeyEnv: 'REFLEX_TEST_KEY' } } });
   assert.equal(resolveApiKey(config, { REFLEX_TEST_KEY: 'sk-live-1234' }), 'sk-live-1234');
   assert.equal(resolveApiKey(config, { REFLEX_TEST_KEY: '' }), undefined, 'an empty variable is not a key');
   assert.equal(resolveApiKey(config, {}), undefined);
   assert.equal(resolveApiKey({}, { REFLEX_TEST_KEY: 'sk-live-1234' }), undefined, 'no name, no lookup');
   // The resolved block carries the variable *name*: a settings document written by
   // the panel can never round-trip a credential back to a client.
-  assert.deepEqual(config, { backend: 'vllm', apiKeyEnv: 'REFLEX_TEST_KEY' });
+  assert.equal(config.apiKeyEnv, 'REFLEX_TEST_KEY');
   assert.equal(JSON.stringify(resolveConfig({ backend: 'vllm', systemOne: { apiKeyEnv: 'REFLEX_TEST_KEY' } })).includes('sk-live'), false);
 });

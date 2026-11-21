@@ -61,7 +61,13 @@ function health(overrides: Record<string, unknown> = {}): {
 /** Facts sufficient for a panel snapshot, with the health block under test. */
 function facts(systemOneHealth: ReturnType<typeof health> | undefined) {
   return {
-    config: resolveConfig({ backend: 'jev' }),
+    // A configured connection: the snapshot under test is about health, and an
+    // unconfigured one would report its own (correct, but distracting)
+    // "nothing connects" facts instead.
+    config: resolveConfig({
+      backend: 'jev',
+      systemOne: { active: 'main', profiles: { main: { baseUrl: 'http://gw', model: 'm' } } }
+    }),
     backendName: 'system-one-jev',
     pools: [],
     routingActive: false,
@@ -87,7 +93,13 @@ test('the panel snapshot carries backend health and omits it for an in-process b
 
 test('a degraded backend is readable through the runtime and the panel after a real failure', async () => {
   const runtime = createReflexRuntime(
-    resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } })
+    resolveConfig({
+      backend: 'jev',
+      systemOne: {
+        active: 'main',
+        profiles: { main: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } }
+      }
+    })
   );
   const restore = stubFetch(() => ({ error: new TypeError('fetch failed') }));
   try {
@@ -111,7 +123,13 @@ test('a degraded backend is readable through the runtime and the panel after a r
 
 test('a single success clears the degradation in the snapshot', async () => {
   const runtime = createReflexRuntime(
-    resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } })
+    resolveConfig({
+      backend: 'jev',
+      systemOne: {
+        active: 'main',
+        profiles: { main: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } }
+      }
+    })
   );
   let failing = true;
   const restore = stubFetch(() =>
@@ -155,7 +173,13 @@ test('/reflex-ledger prints a bilingual health line while degraded and drops it 
 test('the degraded notice never reaches model-facing payloads or request messages', async () => {
   const raw = incidentFixture();
   const runtime = createReflexRuntime(
-    resolveConfig({ backend: 'jev', systemOne: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } })
+    resolveConfig({
+      backend: 'jev',
+      systemOne: {
+        active: 'main',
+        profiles: { main: { baseUrl: 'http://127.0.0.1:9/v1', apiKeyEnv: 'REFLEX_HEALTH_TEST_KEY' } }
+      }
+    })
   );
   const restore = stubFetch(() => ({ error: new TypeError('fetch failed') }));
   try {
