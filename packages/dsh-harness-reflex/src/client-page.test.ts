@@ -3091,6 +3091,22 @@ async function typeEveryCharacter(mounted: Mounted, rowId: string, text: string)
   return mounted.runtime.flush();
 }
 
+/**
+ * Assert the name control is genuinely editable.
+ *
+ * `fire()` drives a handler directly, so it would happily "type" into a field the
+ * browser would refuse to accept — a `readOnly` (or `disabled`) name field passes
+ * a value-only assertion and is the exact regression this suite exists for. The
+ * mutation control caught that gap, hence this explicit check.
+ * @param input - the rendered name control.
+ */
+function assertEditableName(input: Element): void {
+  assert.equal(input.type, 'input', 'the name control must be an <input>');
+  assert.notEqual(input.props.readOnly, true, 'the name field is read-only: typing would be refused');
+  assert.notEqual(input.props.disabled, true, 'the name field is disabled: typing would be refused');
+  assert.equal(typeof input.props.onChange, 'function', 'the name field accepts no edits');
+}
+
 /** The name input of one row, by page identity. */
 function nameInputOf(tree: unknown, rowId: string): Element | undefined {
   return elements(tree).find((element) => element.props['data-profile-name'] === rowId);
@@ -3113,6 +3129,7 @@ test('typing an unsaved row name one character at a time keeps the field editabl
   const input = nameInputOf(tree, id);
   assert.ok(input !== undefined, 'the name field stopped being editable after the first character');
   assert.equal(input.props.value, 'newapi', 'a character was dropped');
+  assertEditableName(input);
   // The row is no longer marked unnamed: it now has the name it was typed.
   const row = profileRows(tree).find((candidate) => String(candidate.props['data-profile']) === id);
   assert.ok(row !== undefined);
@@ -3139,6 +3156,7 @@ test('renaming a saved row one character at a time works, and only a save commit
   const input = nameInputOf(tree, id);
   assert.ok(input !== undefined, 'a saved row has no editable name field');
   assert.equal(input.props.value, 'primary2', 'the saved row name was not fully typed');
+  assertEditableName(input);
   assert.deepEqual(mutations, [], 'typing rebuilt or wrote the document');
   // The activation followed the row while it was being typed (g-065), and is
   // still a draft: the marker is on the row, nothing is written until save.

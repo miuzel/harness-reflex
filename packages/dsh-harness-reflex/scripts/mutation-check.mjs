@@ -30,6 +30,17 @@ import { fileURLToPath } from 'node:url';
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workDir = path.resolve(packageDir, '..', '..', 'tmp', 'reflex-mutation');
 const srcDir = path.join(packageDir, 'src');
+/**
+ * The repository root this package sits in.
+ *
+ * The scratch copy carries its own copies of the two guides, so `guide.test.ts`
+ * — which walks *up* from its build looking for `USER_GUIDE.md` and
+ * `docs/USER_GUIDE.en.md` — finds the copy's documents rather than this
+ * checkout's. Without them it resolves against the checkout, and the copy's
+ * freshly generated guide artifact is compared with documents it was never built
+ * from: a baseline red that has nothing to do with any injected fault.
+ */
+const repoRoot = path.resolve(packageDir, '..', '..');
 const testGlob = path.posix.join('dist', '**', '*.test.js');
 /**
  * How many tests one run executed; 0 means the glob matched nothing.
@@ -53,6 +64,16 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * what the goal changed. The replacements assert the new contract, so the net is
  * +9 rather than a silent loss.
  *
+ * g-066 moved the pass count 695 → 728. The goal removed the flat connection
+ * fallback, so its own tests were *rewritten* rather than kept (the old ones
+ * pinned the behaviour being deleted: "a profile inherits every flat field",
+ * "connectionTarget merges a profile over the flat block", the compatibility
+ * fold's four page tests). Nothing was dropped without a replacement asserting
+ * the new contract, and 33 tests were added: the rename-secret plan (15, one per
+ * way a rename can reach a stored key), the model list and its selection (9),
+ * the "nothing connects" states (4), the keystroke-level name editing (3) and the
+ * wire-level no-request check (1).
+ *
  * g-064 moved the pass count 681 → 684: it added 6 tests (the filled-in unnamed
  * row being refused, the blank row not blocking the save, the named save's narrow
  * paths, the validator's own row numbers, and a page case for the visible marker
@@ -62,7 +83,7 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * No test was deleted: the two survivors assert the row is still never written
  * *and* is now refused with the row number.
  */
-const EXPECTED_TESTS = 692;
+const EXPECTED_TESTS = 728;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
@@ -341,8 +362,8 @@ const MUTATIONS = [
     name: 'system-one-timeout-unchecked',
     area: 'System 1 connection parameters are validated',
     file: 'src/config.ts',
-    from: '  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {',
-    to: '  if (false) {'
+    from: '    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {',
+    to: '    if (false) {'
   },
   // Cache affinity and session stickiness (g-006): the facts the decision is
   // told, the policy it is given, the gate that keeps a warm session put, and
@@ -945,11 +966,15 @@ const MUTATIONS = [
   {
     // The active profile is the whole point of the feature: resolving the flat
     // block over it would silently ignore the user's selection.
-    name: 'active-profile-loses-to-the-flat-block',
-    area: 'the active profile wins over the flat connection block',
+    // g-066: the flat block is gone, so the property is now "the active profile is
+    // the only source". Resolving the *inactive* one instead is the same class of
+    // fault the old anchor covered — the running connection answering to a row the
+    // user did not activate.
+    name: 'inactive-profile-serves-the-runtime',
+    area: 'the active profile is the only connection',
     file: 'src/config.ts',
-    from: '  const baseUrl = optionalText(activeProfile?.baseUrl) ?? optionalText(authored?.baseUrl);',
-    to: '  const baseUrl = optionalText(authored?.baseUrl) ?? optionalText(activeProfile?.baseUrl);'
+    from: '  const activeProfile = active === undefined ? undefined : profiles[active];',
+    to: '  const activeProfile = active === undefined ? undefined : (Object.values(profiles).find((entry) => entry !== profiles[active]) ?? profiles[active]);'
   },
   {
     // A mistyped active name must be reported, not quietly resolved away.
@@ -992,11 +1017,14 @@ const MUTATIONS = [
   {
     // A whole-group write deletes every stored secret the page never received;
     // this is the exact fault the narrow-path write exists to prevent.
+    // g-066: there is no `flat` object any more, so the group write it used to
+    // guard against is expressed with the row it would replace: one `set` on the
+    // whole `systemOne` subtree deletes every stored secret it does not restate.
     name: 'panel-writes-the-whole-system-one-group',
     area: 'the page writes the connection block on narrow paths only',
     file: 'src/client/panel.ts',
-    from: "      for (const [key, value] of Object.entries(flat)) writes.push({ path: ['systemOne', key], value });",
-    to: "      writes.push({ path: ['systemOne'], value: flat });"
+    from: "      else writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });",
+    to: "      else writes.push({ path: ['systemOne'], value: { active: draft.backend.active.trim() } });"
   },
   {
     // Empty input means "leave the stored key alone": treating it as a write
@@ -1149,15 +1177,10 @@ const MUTATIONS = [
     from: '  const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));',
     to: '  const apiKey = undefined;'
   },
-  {
-    // The flat block is the compatibility surface now. Opening it by default
-    // would put the two editors of the same fields back side by side.
-    name: 'flat-block-fold-opens-by-default',
-    area: 'the flat connection block starts collapsed',
-    file: 'src/client/view.ts',
-    from: "    { style: S.card, 'data-reflex-folded': open ? 'open' : 'closed' },",
-    to: "    { style: S.card, 'data-reflex-folded': 'open' },"
-  },
+  // g-066 removed the flat connection block (and its fold) outright. The fault this
+  // entry guarded — "the compatibility fold starts open" — has no code left to
+  // inject into, so it is retired rather than re-pointed; the fence it served is
+  // now `flat-editor-comes-back`, which asserts the whole surface stays absent.
   {
     // g-063 B: the earlier turns are what makes a short prompt decidable. Dropping
     // them from the composed input is the "grade the few characters alone"
@@ -1186,6 +1209,99 @@ const MUTATIONS = [
     file: 'src/routing.ts',
     from: '    remembered.decided.turn === input.turn &&\n    // A config-only save',
     to: '    remembered.decided.turn === input.turn &&\n    task === undefined &&\n    // A config-only save'
+  },
+  // ── g-066: one connection, its model list, and the write-only key ──────────
+  // Each fault restores a behaviour the goal removes, so "the suite stayed green"
+  // is exactly the regression the user reported.
+  {
+    // The flat block is the fallback the goal deletes: letting it answer again
+    // makes a document with no active profile connect to an address nobody
+    // selected.
+    name: 'unconfigured-falls-back-to-a-flat-field',
+    area: 'nothing connects without an active profile',
+    file: 'src/config.ts',
+    from: "    return { ...authoredShape, unconfigured };",
+    to: "    return { ...authoredShape, unconfigured, ...(optionalText(authored?.baseUrl) === undefined ? {} : { baseUrl: optionalText(authored?.baseUrl) }) };"
+  },
+  {
+    // `createBackend` is the last gate before the wire: skipping it means the
+    // vendored factory picks a provider from the environment and starts calling.
+    name: 'unconfigured-connects-through-the-factory',
+    area: 'an unconfigured activation makes no external request',
+    file: 'src/bridge.ts',
+    from: "  if (config.systemOne.unconfigured !== undefined) {\n    return new UnconfiguredBackend(config.systemOne.unconfigured);\n  }",
+    to: '  void config.systemOne.unconfigured;'
+  },
+  {
+    // A broken selection must resolve to *no* model. Falling back to the first
+    // id is the "runs a model I did not pick" behaviour.
+    name: 'invalid-selection-runs-the-first-model',
+    area: 'a selection outside the list resolves to no model',
+    file: 'src/config.ts',
+    from: '  return modelIds.includes(chosen) ? { model: chosen } : { missing: true };',
+    to: '  return modelIds.includes(chosen) || modelIds.length === 0 ? { model: chosen } : { model: modelIds[0] };'
+  },
+  {
+    // The probe must test the *selected* model. Probing the first one reports on
+    // a request the runtime never sends.
+    name: 'probe-tests-another-model',
+    area: 'the connection test probes the selected model',
+    file: 'src/config.ts',
+    from: '  const selected = modelForProfile(profile, profile.modelIds ?? []);',
+    to: '  const selected = { model: (profile.modelIds ?? [])[0], missing: false };'
+  },
+  {
+    // The rename guard is the only thing standing between a rename and a lost
+    // credential: without it the save succeeds and the key is gone.
+    name: 'rename-drops-the-secret-guard',
+    area: 'a rename never loses a stored key silently',
+    file: 'src/client/rename-secrets.ts',
+    from: "    if (!was.apiKeyFromProfile) continue;",
+    to: '    continue;'
+  },
+  {
+    // Blocking an env-backed rename makes every environment-variable deployment
+    // unable to rename its connection — the guard must stay narrow.
+    name: 'rename-blocks-every-row',
+    area: 'renaming an env-backed connection still saves',
+    file: 'src/client/rename-secrets.ts',
+    from: "    if (!was.apiKeyFromProfile) continue;",
+    to: '    void was.apiKeyFromProfile;'
+  },
+  {
+    // The name must stay an editable input for a *named* row: rendering text once
+    // the row is named is the reported "locked after one character" bug.
+    name: 'named-row-name-is-not-editable',
+    area: 'a saved row can be renamed',
+    file: 'src/client/view.ts',
+    // The name field stops accepting edits — the visible symptom of the bug: the
+    // control still renders, the caret still lands in it, and typing does nothing.
+    from: "        'data-profile-name': profile.id,",
+    to: "        'data-profile-name': profile.id,\n        readOnly: true,"
+  },
+  {
+    // The compatibility editor is gone; re-rendering it is the two-editors problem
+    // the goal removes (and the second one writes nothing the runtime reads).
+    name: 'flat-editor-comes-back',
+    area: 'the flat connection editor is gone',
+    file: 'src/client/view.ts',
+    // The flat values are read back *and rendered*: the runtime card regains them
+    // as visible fields, which is the two-editors problem the goal removes. A
+    // draft-only mutation would be unobservable — this one reaches the screen.
+    from: "        { style: S.field },\n        h(\n          'div',\n          { style: S.fieldRow },\n          GuidedField({\n            t,\n            path: 'backend',",
+    to: "        { style: S.field },\n        h('div', { 'data-reflex-path': 'systemOne.baseUrl' }, 'flat again'),\n        h(\n          'div',\n          { style: S.fieldRow },\n          GuidedField({\n            t,\n            path: 'backend',"
+  },
+  {
+    // The page must not write the flat fields back: a save that addresses them
+    // would rewrite (or delete) a document it no longer reads.
+    name: 'save-writes-a-flat-field',
+    area: 'a save never writes the flat connection fields',
+    file: 'src/client/panel.ts',
+    // `groupWrites` runs for both the baseline and the draft, so a fault inside it
+    // cancels out and the per-path filter drops it. The save pipeline is where a
+    // stray write becomes real: an extra flat path reaching the Host.
+    from: "  for (const group of DRAFT_GROUPS) {\n    const before = groupWrites(original, group);",
+    to: "  ops.push({ op: 'set', path: ['systemOne', 'baseUrl'], value: 'http://flat' });\n  for (const group of DRAFT_GROUPS) {\n    const before = groupWrites(original, group);"
   }
 ];
 
@@ -1253,6 +1369,11 @@ function resetSources() {
   cpSync(path.join(packageDir, 'tsconfig.client.json'), path.join(workDir, 'tsconfig.client.json'));
   cpSync(path.join(packageDir, 'README.md'), path.join(workDir, 'README.md'));
   cpSync(path.join(packageDir, 'client.js'), path.join(workDir, 'client.js'));
+  // The guides travel with the copy: the embedded guide and its provenance check
+  // must describe *this* copy's documents (see `repoRoot`).
+  cpSync(path.join(repoRoot, 'USER_GUIDE.md'), path.join(workDir, 'USER_GUIDE.md'));
+  cpSync(path.join(repoRoot, 'docs', 'USER_GUIDE.en.md'), path.join(workDir, 'docs', 'USER_GUIDE.en.md'));
+  cpSync(path.join(repoRoot, 'scripts', 'embed-user-guide.mjs'), path.join(workDir, 'scripts', 'embed-user-guide.mjs'));
 }
 
 /**
@@ -1262,6 +1383,11 @@ function resetSources() {
  * @returns true when every stage succeeded.
  */
 function build() {
+  // Regenerate the embedded guide from the copy's own documents first, exactly as
+  // `npm run build:all` does in a checkout. The script resolves its root from its
+  // own location, so the copy carries its own `scripts/embed-user-guide.mjs` — run
+  // from here it writes the copy's `guide.generated.ts`, never this checkout's.
+  if (!run(process.execPath, [path.join('scripts', 'embed-user-guide.mjs')]).ok) return false;
   if (!run('npx', ['tsc', '-p', 'tsconfig.json']).ok) return false;
   if (!run('npx', ['tsc', '-p', 'tsconfig.client.json']).ok) return false;
   return run(process.execPath, [path.join('dist', 'client-bundle.js'), '.']).ok;

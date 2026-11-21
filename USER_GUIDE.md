@@ -132,15 +132,33 @@ export SYSTEM_ONE_BACKEND=simple-jev     # 省略也能判定：检测到 VLLM_B
 | `SYSTEM_ONE_MODEL` | `jev-latest` | `Qwen/Qwen2.5-7B-Instruct` |
 | `SYSTEM_ONE_API_KEY` | **无**（空串，请求会被服务端拒绝） | `dummy`（本地服务通常不校验） |
 
-插件配置项（可在设置面板「System 1 后端」页编辑，或写进 DSH 插件配置）：
+**连接只来自「当前激活的连接配置」**（面板「System 1 后端」页的「连接配置（可多套）」）。
+没有激活项时插件就是**未配置**状态：面板明确显示未配置，插件不发任何外部请求，
+判定改走本地确定性启发式。激活名写错时也不会被悄悄换成别的连接。
+
+每一套连接配置的字段（写进 DSH 插件配置时位于 `systemOne.profiles.<名字>`）：
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `backend` | `auto` | `auto` 按环境变量判定，也可强制 `mock` / `vllm` / `jev`（`vllm` 即 logits 读出，环境变量侧名 `simple-jev`） |
-| `baseUrl` | 省略 | System 1 服务地址；省略时用后端默认值 |
-| `model` | 省略 | 服务端模型 ID；省略时用后端默认值（`jev-latest` / `Qwen/Qwen2.5-7B-Instruct`） |
-| `apiKeyEnv` | 省略 | **只记录环境变量名**，密钥本身不进入设置文档；省略时由后端各自从环境变量兜底（`SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`） |
-| `timeoutMs` | 省略 | 单次判定超时；省略时用**后端默认值 `jev` 10000 ms / `simple-jev` 8000 ms**，不是统一值；超时按 `System 1 不可用` 走降级路径 |
+| `baseUrl` | 省略 | System 1 服务地址；省略时由后端按环境变量/默认值决定 |
+| `modelIds` | 省略 | 这套连接可用的**模型 ID 列表**（可多个）。`model` 是单模型写法，等同于只含一项的列表 |
+| `selectedModel` | 列表第一项 | **唯一选定的模型**：运行时发送它，「测试」按钮探活也用它；必须是 `modelIds` 里的一项，否则视为无效选择（不发模型，面板会指明） |
+| `apiKey` | 省略 | 密钥本身；**只写不读**——保存后不回显，页面只显示「已保存」。**改名不会带着它走**：改名后需要重新填写（见下） |
+| `apiKeyEnv` | 省略 | **只记录环境变量名**；省略时不点名，由后端按 `SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY` 兜底；点名即锁定，不回落 |
+| `timeoutMs` | 省略 | 单次判定超时；省略时用**后端默认值 `jev` 10000 ms / `simple-jev` 8000 ms**，不是统一值 |
+| `backend` | 省略 | 这套连接使用的后端实现；省略时用顶层 `backend` |
+
+顶层的 `backend` 只是「连接未指定实现时用哪个」（`auto` 按环境变量判定，也可强制
+`mock` / `vllm` / `jev`），它本身不构成连接。显式 `backend: mock` 仍然有效：那是
+主动选择本地实现，不需要连接配置。
+
+**改名与只写密钥.** 连接的「名字」就是它在设置文档里的路径，所以改名等于换一个
+保存路径，Host 无法把已保存的密钥搬到新名字下。面板因此会**阻止保存**并点名该行，
+要求重新填写 API Key（来源是环境变量的连接不受影响，改名照常保存）。同时改两个
+名字互换、或改到一个已被别的已保存配置占用的名字，也会被拦下并说明原因。
+
+`systemOne` 顶层同名的 `baseUrl` / `model` / `apiKeyEnv` / `timeoutMs` 不参与连接：
+它们不构成一套连接配置。文件里若还留着这些字段，面板既不读取也不改写它们。
 
 校准曲线（可选）：用 `calibrate` 引擎基于历史标注集拟合 ECE/PAVA 曲线，再用
 `calibrationPath` 指向该 JSON，运行时会自动修正过度自信的原始概率。
@@ -383,13 +401,13 @@ record?.digest;  // 与决策记录里的 digest 一致
 | 推理强度 | 策略（不干预 / Reflex 自适应）、兜底档、最小置信度、**自适应推理强度开关** |
 | 自动干预 | 三态模式（`off`/`observe`/`active`）、四大能力覆盖、每回合干预次数上限、每回合判定上限、每会话判定上限、重复阈值、失败阈值、最小置信度、判定窗口大小、剪枝下限比例；并列出当前生效的模式与能力（只读） |
 | 工具开关 | 5 个能力逐项启停（默认 4 开、`route` 关）；每项写明**做什么 / agent 何时该调用 / 是否建议暴露**，并有「应用推荐组合」按钮；页尾列出当前已注册的工具名（只读，跟随 `toolPrefix`），并提示账本改用 `/reflex-ledger` |
-| System 1 后端 | 后端实现、Base URL、模型 ID、API Key 环境变量名、超时；以及工具名前缀、裁剪阈值、账本 JSONL 路径、校准曲线路径 |
+| System 1 后端 | 连接配置（可多套：Base URL、模型列表与单选、API Key 只写、环境变量名、超时）、后端实现；以及工具名前缀、裁剪阈值、账本 JSONL 路径、校准曲线路径 |
 | 决策账本 | 实时指标、最近决策表、落盘路径、清空（需二次确认） |
 | **使用说明** | **本手册的只读视图，跟随 DSH 界面语言中英切换** |
 
-- 页面是**整组写回**：改一个字段会让该配置组整体过一次 Host 校验后保存（System 1
-  后端页覆盖 `backend`、`systemOne`、`toolPrefix`、`ledgerPath`、`pruneThreshold`、
-  `calibrationPath` 六条配置路径，保存时逐条整值写入）；
+- 页面保存前会过一次 Host 校验：改一个字段只写该字段所在的路径（整组写回的组除外，
+  见下）；System 1 后端页覆盖连接配置行、`systemOne.active`、`backend` 与四个运行时
+  字段，保存时按路径只写改动项；
 - Host 文档只读时页面自动进入只读模式，写操作按钮禁用；
 - 面板路由 `/dsh-reflex/api/*`（`panel` / `health` / `ledger/clear`）只接受 loopback 客户端，清除账本必须显式确认。
 
@@ -408,12 +426,14 @@ record?.digest;  // 与决策记录里的 digest 一致
   逐字节一致，默认配置下配置内容零变化（默认已经是 4 开 1 关）。
 - **推理强度开关：总是显式写入**。`effort.enabled` 随该组写下当前值，避免出现
   「面板显示已启用、配置里其实是省略」的歧义。
-- **System 1 后端：逐条 schema 路径整值写入**。Host 的设置文档按**配置路径**寻址，
-  而该页覆盖的是 `backend`（标量）、`systemOne`（连接块）以及 `toolPrefix`、
-  `ledgerPath`、`pruneThreshold`、`calibrationPath` 四个顶层字段：保存时这几条路径
-  各自整值写入（只写发生变化的那一组），**页面名不会被当成配置键**——`runtime`
-  并不是 `Config` 的字段，按页面名写入会被 Host 直接拒绝，整次保存随之失败。留空的
-  `ledgerPath`/`calibrationPath` 以「取消设置」写入，效果等于沿用下层配置而不是写空串。
+- **System 1 后端：逐条路径只写改动项**。Host 的设置文档按**配置路径**寻址，而该页
+  覆盖的是 `backend`（标量）、连接配置行（`systemOne.profiles.<名字>.<字段>`）、
+  `systemOne.active` 以及 `toolPrefix`、`ledgerPath`、`pruneThreshold`、
+  `calibrationPath` 四个顶层字段：保存时只写**取值真的变了**的路径，没动过的行与
+  字段一个字都不写（改名/删除的行另按 g-065 的规则整棵子树 `unset`）。**页面名不会
+  被当成配置键**——`runtime` 并不是 `Config` 的字段，按页面名写入会被 Host 直接拒绝，
+  整次保存随之失败。留空的 `ledgerPath`/`calibrationPath` 以「取消设置」写入，效果
+  等于沿用下层配置而不是写空串。
 
 非法值（未知工具后缀、非布尔值、越界预算、非法三态取值）由 Host 侧同一个
 `resolveConfig` 校验器拒绝并给出字段级错误文案，面板不会部分生效——要么整组通过，

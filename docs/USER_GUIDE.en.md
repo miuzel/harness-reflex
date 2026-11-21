@@ -143,15 +143,40 @@ The other two variables default per backend, so “default mock” says nothing 
 | `SYSTEM_ONE_MODEL` | `jev-latest` | `Qwen/Qwen2.5-7B-Instruct` |
 | `SYSTEM_ONE_API_KEY` | **none** (empty; the service rejects the request) | `dummy` (local servers usually ignore it) |
 
-Plugin options (editable on the “System 1 backend” page, or in the DSH plugin config):
+**A connection comes only from the active connection profile** ("Connections" on the
+System 1 backend page). With none active the plugin is **unconfigured**: the panel says
+so, the plugin makes no external request, and decisions fall back to the local
+deterministic heuristics. A mistyped active name is reported and connects nothing — it is
+never silently swapped for another connection.
+
+Each connection profile states its own fields (under `systemOne.profiles.<name>` in the
+DSH plugin config):
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `backend` | `auto` | `auto` derives from the environment; may be pinned to `mock` / `vllm` / `jev` (`vllm` is the logits read-out; the env name is `simple-jev`) |
-| `baseUrl` | unset | System 1 endpoint; unset uses the backend default |
-| `model` | unset | Server-side model id; unset uses the backend default (`jev-latest` / `Qwen/Qwen2.5-7B-Instruct`) |
-| `apiKeyEnv` | unset | Stores the **variable name only**; the secret never enters the settings document. Unset falls back to the backend's own chain (`SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`) |
-| `timeoutMs` | unset | Per-decision timeout; unset uses the **backend default — 10000 ms for `jev`, 8000 ms for `simple-jev`**, not one shared value; a timeout follows the “System 1 unavailable” degradation path |
+| `baseUrl` | unset | System 1 endpoint; unset lets the backend use its environment/default |
+| `modelIds` | unset | The **list of model ids** this connection may ask for. `model` is the single-model spelling, identical to a one-entry list |
+| `selectedModel` | first listed id | The **one model in force**: the runtime sends it and the Test button probes it. It must be one of `modelIds`; a selection outside the list runs no model, and the panel says why |
+| `apiKey` | unset | The secret itself, **write-only**: it is stored on save and never shown again. A **rename does not carry it** — retype it after renaming (see below) |
+| `apiKeyEnv` | unset | Stores the **variable name only**. Unset names nothing and the backend falls back to `SYSTEM_ONE_API_KEY` → `JEV_API_KEY` → `VLLM_API_KEY` → `OPENAI_API_KEY`; naming a variable locks onto it, with no fallback |
+| `timeoutMs` | unset | Per-decision timeout; unset uses the **backend default — 10000 ms for `jev`, 8000 ms for `simple-jev`**, not one shared value |
+| `backend` | unset | Backend implementation for this connection; unset uses the top-level `backend` |
+
+The top-level `backend` only decides *which implementation a connection uses when it
+states none* (`auto` derives from the environment; `mock` / `vllm` / `jev` may be pinned).
+It is not a connection by itself. An explicit `backend: mock` still works: that is a
+deliberate choice of the in-process implementation, and needs no profile.
+
+**Renames and write-only keys.** A connection's name *is* its settings path, so renaming
+it means writing a different path — and the Host cannot move a stored secret across paths.
+The panel therefore **blocks the save** and names the row, asking you to retype the API
+key (connections whose key comes from an environment variable are unaffected and rename
+normally). Swapping two names, or renaming onto a name another saved profile already
+holds, is refused the same way, with its own explanation.
+
+The same-named `baseUrl` / `model` / `apiKeyEnv` / `timeoutMs` keys at the top of
+`systemOne` do not take part in the connection: they are not a connection profile. If a
+document still holds them, the panel neither reads nor rewrites them.
 
 Calibration (optional): fit a PAVA/ECE curve with the `calibrate` engine over a
 labelled sample, then point `calibrationPath` at that JSON and the runtime will
@@ -453,14 +478,14 @@ The plugin declares its browser half through `dsh.client` and registers into the
 | Reasoning effort | Policy (never intervene / Reflex adaptive), fallback level, minimum confidence, **adaptive-effort switch** |
 | Interventions | Three-state mode (`off`/`observe`/`active`), the four capability overrides, per-turn intervention budget, per-turn judgment budget, per-session judgment budget, repeat threshold, failure threshold, minimum confidence, judgment window size, prune floor ratio; plus the currently effective mode and capabilities (read-only) |
 | Tools | A per-capability switch for each of the five capabilities (four on, `route` off by default), each one stating **what it does / when the agent should call it / whether it is advised to expose it**, plus an "Apply recommended set" button; the currently registered tool names are listed at the end (read-only, follows `toolPrefix`), with a line pointing the ledger at `/reflex-ledger` |
-| System 1 backend | Implementation, base URL, model id, API-key variable name, timeout; plus the tool-name prefix, prune threshold, ledger JSONL path and calibration-curve path |
+| System 1 backend | Connection profiles (any number: base URL, model list with one selection, write-only API key, key variable name, timeout), the backend implementation; plus the tool-name prefix, prune threshold, ledger JSONL path and calibration-curve path |
 | Decision ledger | Live metrics, recent-decision table, JSONL sink, clear (confirmed twice) |
 | **Guide** | **A read-only view of this manual, following the DSH interface language** |
 
-- Saving is **whole-group**: editing one field validates and writes the entire
-  configuration group on every configuration path it covers (the System 1
-  backend page spans `backend`, `systemOne`, `toolPrefix`, `ledgerPath`,
-  `pruneThreshold` and `calibrationPath`).
+- Saving validates through the Host and writes **only the paths whose value
+  changed** (whole-group pages still write their group whole — see below). The
+  System 1 backend page spans the connection rows, `systemOne.active`, `backend`
+  and the four runtime fields.
 - When the Host settings document is read-only the page becomes read-only and
   every write control is disabled.
 - Panel routes under `/dsh-reflex/api/*` (`panel` / `health` / `ledger/clear`) accept loopback clients only, and
@@ -488,12 +513,13 @@ much they write:
 - **The reasoning-effort switch is always written explicitly.** `effort.enabled`
   is saved with the group's current value, so there is no "the panel shows it
   enabled but the configuration actually omits it" ambiguity.
-- **System 1 backend: one whole value per schema path.** The Host settings
+- **System 1 backend: only the paths that changed.** The Host settings
   document is addressed by **configuration path**, and this page covers
-  `backend` (a scalar), `systemOne` (the connection block), and the four
-  top-level fields `toolPrefix`, `ledgerPath`, `pruneThreshold` and
-  `calibrationPath`: saving writes each of those paths in full (only for the
-  group that changed), and a **page name is never used as a configuration key** —
+  `backend` (a scalar), the connection rows (`systemOne.profiles.<name>.<field>`),
+  `systemOne.active`, and the four top-level fields `toolPrefix`, `ledgerPath`,
+  `pruneThreshold` and `calibrationPath`: saving writes the paths whose value
+  actually changed and leaves untouched rows and fields alone (a renamed or
+  removed row retires its whole old subtree). A **page name is never used as a configuration key** —
   `runtime` is not a field of `Config`, so writing under that name is refused by
   the Host outright and the whole save fails with it. A blank `ledgerPath` or
   `calibrationPath` is written as "unset", which keeps the layer below instead of

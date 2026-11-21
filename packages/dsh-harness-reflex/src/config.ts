@@ -1045,10 +1045,11 @@ export function resolveSystemOneConfig(
   const modelIds = activeProfile.modelIds ?? [];
   const selectedModel = modelForProfile(activeProfile, modelIds);
   const modelSelectionBroken = selectedModel?.missing === true;
+  // The timeout is already validated per profile (`resolveProfileEntry` runs on
+  // every entry, the active one included), so this is a read, not a re-check: a
+  // second copy of the predicate here would be a check nothing can reach, and
+  // the mutation control proved it — disabling *this* line left every test green.
   const timeoutMs = activeProfile.timeoutMs;
-  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
-    throw new Error(`systemOne.timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
-  }
   return {
     ...authoredShape,
     backend: activeProfile.backend ?? selected,
@@ -1136,11 +1137,9 @@ function resolveSystemOneProfiles(
       throw new Error(`systemOne.profiles["${name}"].backend must be one of auto, mock, jev, vllm (got "${profileBackend}")`);
     }
     const timeoutMs = entry.timeoutMs;
-    // Per-profile timeout, validated on the same rule the active profile's own
-    // timeout is re-checked with in `resolveSystemOneConfig`. Kept as one
-    // predicate so there is a single "timeout validated" site per shape.
-    const badProfileTimeout = timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0);
-    if (badProfileTimeout) {
+    // The one place a timeout is validated: every profile goes through here, so
+    // the active profile is covered without a second check of its own.
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
       throw new Error(`systemOne.profiles["${name}"].timeoutMs must be a positive integer (got "${String(timeoutMs)}")`);
     }
     const baseUrl = optionalText(entry.baseUrl);
