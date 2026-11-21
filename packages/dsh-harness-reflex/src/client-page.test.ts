@@ -311,6 +311,49 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * Let an autosave that is waiting for a pause go through, and render the result.
+ *
+ * The page debounces typing (`TEXT_DEBOUNCE_MS`), so a text edit is not written
+ * by the keystroke alone: the pause has to be reached. A decision carries no
+ * timer and is written by the caller's own `flush` — there is nothing to fire
+ * here, which is itself the property "a selection saves at once" rests on.
+ * @param mounted - the page under test.
+ * @param tree - the tree to re-render if the write changed the page.
+ * @returns the rendered tree after the pause was reached.
+ */
+async function flushAutosave(mounted: Mounted, tree: unknown): Promise<unknown> {
+  let rendered = tree;
+  // The page arms two kinds of timer: the metrics poll (4000 ms, the store's
+  // `DEFAULT_POLL_MS`) and the typing pause this helper exists for. Only the
+  // latter is fired; firing the poll would start a second round of it.
+  //
+  // Each pause is re-armed by the next keystroke, so the loop continues until no
+  // pause is left. A write that lands mid-way re-seeds the page, which can
+  // replace the pending draft with a no-op — firing again is then harmless, and
+  // *not* doing it is what would leave a keystroke unwritten.
+  for (let round = 0; round < 4; round += 1) {
+    await settle();
+    rendered = await mounted.runtime.flush();
+    const due = mounted.clock.pending().filter((timer) => timer.ms !== 4000);
+    if (due.length === 0) break;
+    for (const timer of due) mounted.fireTimer(timer.id);
+  }
+  return rendered;
+}
+
+/** Click the header control whose label is exactly `label`. */
+function clickButton(tree: unknown, label: string): void {
+  const control = elements(tree).find((element) => element.type === 'button' && textOf(element).trim() === label);
+  assert.ok(control !== undefined, `no button labelled "${label}" among [${elements(tree).filter((e) => e.type === 'button').map((e) => textOf(e)).join(' | ')}]`);
+  fire(control as Element, 'onClick');
+}
+
+/** Whether the page offers a header control labelled exactly `label`. */
+function hasButton(tree: unknown, label: string): boolean {
+  return elements(tree).some((element) => element.type === 'button' && textOf(element).trim() === label);
+}
+
 /** Dependency comparison for the hook runtime. */
 function sameDeps(left: readonly unknown[] | undefined, right: readonly unknown[] | undefined): boolean {
   if (left === undefined || right === undefined) return left === right;
@@ -416,6 +459,8 @@ interface Observed {
   timers: { id: number; ms: number }[];
   /** Profiles the page asked the Host to probe, in order. */
   probes: (string | null)[];
+  /** The settings forms the page reached; how a test makes its write slow. */
+  forms: { mutate: (ops: unknown, revision?: number) => Promise<boolean> }[];
 }
 
 /** A deterministic clock whose live timers are inspectable. */
@@ -423,6 +468,8 @@ interface Clock {
   globals: { setTimeout: (callback: () => void, ms: number) => number; clearTimeout: (handle: number) => void };
   /** Fire one live timer, as the event loop would. */
   fire(id: number): void;
+  /** Every timer still waiting, in the order they were armed. */
+  pending(): { id: number; ms: number }[];
 }
 
 /**
@@ -457,7 +504,8 @@ function makeClock(observed: Observed): Clock {
       live.delete(id);
       observed.timers = observed.timers.filter((timer) => timer.id !== id);
       callback?.();
-    }
+    },
+    pending: () => [...live.keys()].map((id) => ({ id, ms: observed.timers.find((timer) => timer.id === id)?.ms ?? -1 }))
   };
 }
 
@@ -527,15 +575,24 @@ function makeTransport(panelFacts: PanelRuntimeFacts, observed: Observed): (inpu
 }
 
 /** The settings form the page edits. */
-function settingsForm(
-  value: unknown,
-  options: { writable?: boolean; revision?: number; base?: unknown; user?: unknown } = {}
-): {
+/** One fake settings form: the record the page writes through, and how a test
+ * observes, applies or holds those writes. */
+interface FakeForm {
+  /** The form object the client is handed (`configForms.get()`). */
   form: Record<string, unknown>;
   mutations: { ops: unknown; revision: unknown }[];
   /** Replace the document and notify, the way the Host does after a write. */
   push(next: unknown): void;
-} {
+  /** Apply one write's operations to the served document, as the Host does. */
+  apply(ops: unknown): void;
+  /** Hold every later write open until the returned handle is used. */
+  hold(resolveWith?: boolean): { release: (accept?: boolean) => void; reject: (error: unknown) => void };
+}
+
+function settingsForm(
+  value: unknown,
+  options: { writable?: boolean; revision?: number; base?: unknown; user?: unknown } = {}
+): FakeForm {
   const mutations: { ops: unknown; revision: unknown }[] = [];
   let snapshot = {
     status: 'ready',
@@ -546,11 +603,53 @@ function settingsForm(
     writable: options.writable ?? true
   };
   const listeners = new Set<() => void>();
+  // A write awaiting the Host: it holds the promise the page is waiting on, and
+  // does not bump the revision or notify until it is released.
+  let held: { resolve: (accept: boolean) => void; reject: (error: unknown) => void } | null = null;
+  let holding = false;
+  const settleRevision = (): void => {
+    snapshot = { ...snapshot, revision: (snapshot.revision ?? 0) + 1 };
+    for (const listener of [...listeners]) listener();
+  };
+  const applyOps = (ops: unknown): void => {
+    let next = plain(snapshot.value) as Record<string, any>;
+    const apply = (root: Record<string, any>, op: { op: string; path: string[]; value?: unknown }): void => {
+      const parent = op.path.slice(0, -1).reduce<Record<string, any>>((node, key) => (node[key] ??= {}), root);
+      const key = op.path[op.path.length - 1] as string;
+      if (op.op === 'set') parent[key] = plain(op.value);
+      else delete parent[key];
+    };
+    for (const op of plain(ops) as { op: string; path: string[]; value?: unknown }[]) apply(next, op);
+    snapshot = { ...snapshot, value: next };
+  };
   return {
     mutations,
+    apply: (ops: unknown) => applyOps(ops),
     push: (next: unknown) => {
       snapshot = { ...snapshot, value: next, revision: (snapshot.revision ?? 0) + 1 };
       for (const listener of [...listeners]) listener();
+    },
+    hold: () => {
+      holding = true;
+      return {
+        release: (accept = true) => {
+          holding = false;
+          const pending = held;
+          held = null;
+          if (accept) {
+            // The write that was held applies its own ops when it is accepted.
+            applyOps(mutations[mutations.length - 1]?.ops);
+            settleRevision();
+          }
+          pending?.resolve(accept);
+        },
+        reject: (error: unknown) => {
+          holding = false;
+          const pending = held;
+          held = null;
+          pending?.reject(error);
+        }
+      };
     },
     form: {
       getSnapshot: () => snapshot,
@@ -560,9 +659,14 @@ function settingsForm(
       },
       mutate: async (ops: unknown, revision?: number) => {
         mutations.push({ ops, revision });
-        snapshot = { ...snapshot, revision: (snapshot.revision ?? 0) + 1 };
-        for (const listener of [...listeners]) listener();
-        return true;
+        if (!holding) {
+          applyOps(ops);
+          settleRevision();
+          return true;
+        }
+        return new Promise<boolean>((resolve, reject) => {
+          held = { resolve, reject };
+        });
       }
     }
   };
@@ -578,16 +682,45 @@ interface LoadedBundle {
  *
  * The bundle runs in the VM's own realm, so `fetch` and the timers have to be
  * injected: unqualified lookups inside the bundle resolve against the sandbox.
+ *
+ * Mounts that share one client (closing and reopening the settings dialog) must
+ * also share one *module instance*: the browser loads `client.js` once per page,
+ * and module-level state — the autosave owner registry among it — lives in that
+ * one instance. Each `mountPanel` therefore gets its own context by default, but
+ * `mountPanel({ client: previous })` evaluates into the previous mount's context,
+ * which is what a second mount (not a second page load) is.
  * @param globals - browser globals the bundle may reach.
+ * @param context - an existing sandbox to evaluate into, for a second mount.
  * @returns the captured module-loader entry.
  */
 function loadBundle(globals: Record<string, unknown> = {}): LoadedBundle {
-  let captured: LoadedBundle | undefined;
-  const sandbox = { window: { __ModuleLoader__: { load: (entry: LoadedBundle): void => void (captured = entry) } }, ...globals };
+  return loadBundleIn(newClient(globals));
+}
+
+/** One client's sandbox, carrying the module loader and the browser globals. */
+function newClient(globals: Record<string, unknown> = {}): vm.Context {
+  const sandbox = { window: { __ModuleLoader__: { load: (): void => undefined } }, ...globals } as Record<string, unknown>;
   vm.createContext(sandbox);
-  vm.runInContext(readFileSync(fileURLToPath(new URL('../client.js', import.meta.url)), 'utf8'), sandbox, { filename: 'client.js' });
-  assert.ok(captured !== undefined, 'the bundle did not register with the module loader');
-  return captured;
+  return sandbox as vm.Context;
+}
+
+/**
+ * Evaluate the committed bundle inside one client's sandbox — once per client.
+ *
+ * The module-loader registration is remembered on the sandbox, so a *reopen* of
+ * the page (a second mount in the same client) reuses the instance the browser
+ * would already have, instead of evaluating a second copy with its own
+ * module-level state. Re-running the script would still be a new instance.
+ */
+function loadBundleIn(client: vm.Context): LoadedBundle {
+  const sandbox = client as unknown as { __bundle?: LoadedBundle };
+  if (sandbox.__bundle !== undefined) return sandbox.__bundle;
+  (sandbox as unknown as { window: { __ModuleLoader__: { load: (entry: LoadedBundle) => void } } }).window.__ModuleLoader__.load = (entry) => {
+    sandbox.__bundle = entry;
+  };
+  vm.runInContext(readFileSync(fileURLToPath(new URL('../client.js', import.meta.url)), 'utf8'), client, { filename: 'client.js' });
+  assert.ok(sandbox.__bundle !== undefined, 'the bundle did not register with the module loader');
+  return sandbox.__bundle;
 }
 
 /** Mount the page the way the client loader would, and render it once. */
@@ -602,6 +735,12 @@ interface Mounted {
   services: string[][];
   /** Fire one live timer the page scheduled. */
   fireTimer(id: number): void;
+  /** The page's deterministic clock, so a test can wait out autosave's pause. */
+  clock: Clock;
+  /** Live text of the newest render, for a page that keeps changing after mount. */
+  current(): string;
+  /** The client instance this mount ran in, to reopen the page in the same one. */
+  client: vm.Context;
   unmount(): void;
 }
 
@@ -611,9 +750,11 @@ async function mountPanel(options: {
   served?: readonly string[];
   form: Record<string, unknown>;
   language?: 'zh' | 'en';
+  /** Reopen in an existing client's module instance (a dialog reopened). */
+  client?: vm.Context;
 }): Promise<Mounted> {
   const language = options.language ?? 'zh';
-  const observed: Observed = { calls: [], clears: [], timers: [], probes: [] };
+  const observed: Observed = { calls: [], clears: [], timers: [], probes: [], forms: [] };
   const fetchImpl = makeTransport(options.facts, observed);
   const registered: Mounted['registered'] = [];
   const dictionaries: Record<string, Record<string, string>> = {};
@@ -625,7 +766,11 @@ async function mountPanel(options: {
   // The bundle is evaluated in the VM's own realm, so every browser global it
   // reaches (fetch, timers) has to be provided here.
   const clock = makeClock(observed);
-  const bundle = loadBundle({ fetch: fetchImpl, ...clock.globals, console });
+  const globals = { fetch: fetchImpl, ...clock.globals, console };
+  // A second mount of the same client re-evaluates into the first one's module
+  // instance; a fresh mount gets its own (a separate page load).
+  const client = options.client ?? newClient(globals);
+  const bundle = loadBundleIn(client);
 
   const ctx: Record<string, unknown> = {
     locale: {
@@ -646,7 +791,7 @@ async function mountPanel(options: {
       }
     },
     configForms: {
-      get: () => options.form,
+      get: () => (observed.forms.push(options.form as Observed['forms'][number]), options.form),
       whileServed: (namespaces: readonly string[], register: (served: ReadonlySet<string>) => () => void) => {
         void namespaces;
         return register(new Set(options.served ?? ['dsh-reflex']));
@@ -698,6 +843,9 @@ async function mountPanel(options: {
     slots,
     services,
     fireTimer: (id: number) => clock.fire(id),
+    clock,
+    current: () => textOf(runtime?.tree),
+    client,
     unmount: () => {
       runtime?.unmount();
       teardown.forEach((callback) => callback());
@@ -809,12 +957,11 @@ test('one edit inside a group becomes one whole-section write', async () => {
   openTab(mounted.tree, '虚拟 Provider');
   let tree = await mounted.runtime.flush();
 
+  // A switch is a decision, not typing: it writes without a pause (g-069).
   fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
 
-  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
+  assert.equal(mutations.length, 1, 'a switch did not save at once');
   const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(ops.map((op) => [op.op, op.path]), [['set', ['routing']]]);
   const value = ops[0]?.value ?? {};
@@ -856,16 +1003,21 @@ test('the candidate pool can be extended, reordered, and written back', async ()
   type(models[1], 'kimi-k2');
   tree = await mounted.runtime.flush();
 
-  // A newly added candidate is last in the pool; promote it, which is the preference.
+  // The two fields were typed, not clicked: nothing is written until the pause
+  // (g-069), even though the candidate row itself was added by a click.
+  tree = await flushAutosave(mounted, tree);
+  assert.equal(mutations.length, 1, 'the paused typing never reached the Host');
+
+  // Promote the new candidate, which is the preference. A click is a decision, so
+  // it writes at once — carrying the promotion, not the corrected fields again.
   const up = elements(tree).filter((element) => element.type === 'button' && textOf(element) === '↑' && element.props.disabled !== true);
   assert.equal(up.length, 1, 'exactly the second candidate can be promoted');
   fire(up[0], 'onClick');
   tree = await mounted.runtime.flush();
-
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush();
-  assert.equal(mutations.length, 1);
-  const ops = plain(mutations[0]?.ops) as { value: { models: Record<string, { provider: string; model: string }[]> } }[];
+  assert.equal(mutations.length, 2, 'the promotion did not write at once');
+  /** Declared with its own type: indexing a tuple narrowed by `length` needs one. */
+  const saves: { ops: unknown; revision: unknown }[] = mutations;
+  const ops = plain(saves[saves.length - 1]?.ops) as { value: { models: Record<string, { provider: string; model: string }[]> } }[];
   assert.deepEqual(ops[0]?.value.models['reflex-pro'], [
     { provider: 'moonshot', model: 'kimi-k2' },
     { provider: 'deepseek', model: 'deepseek-chat', description: 'fast', tags: ['cheap'] }
@@ -880,20 +1032,45 @@ test('an invalid draft is reported and never written', async () => {
   let tree = await mounted.runtime.flush();
 
   // Blanking a required field must show the reason instead of a broken write.
+  // There is no Save button to press any more (g-069), so the rule is proven the
+  // hard way: type, then wait out the pause, and let the page try to save.
   type(elements(tree).find((element) => element.type === 'input' && element.props.value === 'reflex'), '');
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   assert.ok(textOf(tree).includes('虚拟 Provider 名称不能为空'), `the refusal is not explained: ${textOf(tree).slice(0, 200)}`);
   assert.deepEqual(mutations, [], 'an invalid draft reached the Host');
 
   // A second invalid field replaces the first problem, not accumulates silently.
   type(inputElement(tree, '任务文本预算'), '0');
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   const text = textOf(tree);
   assert.ok(text.includes('虚拟 Provider 名称不能为空'), 'the first problem disappeared');
   assert.ok(text.includes('任务文本预算必须是正整数'), 'the new problem is not reported');
-  assert.deepEqual(mutations, []);
+  assert.deepEqual(mutations, [], 'an invalid draft reached the Host');
+
+  // Fixing one problem is not enough: the budget is still 0, so the next pause is
+  // still refused. Validation is a gate on the *whole* draft, not a dead end
+  // (g-069).
+  type(elements(tree).find((element) => element.type === 'input' && element.props.value === ''), 'reflex');
+  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
+  assert.deepEqual(mutations, [], 'a draft with one remaining problem reached the Host');
+  assert.ok(textOf(tree).includes('任务文本预算必须是正整数'), 'the remaining problem disappeared');
+
+  // Restoring the budget restores a draft the Host already holds, which is not a
+  // change at all: a no-op must stay a no-op (g-069).
+  type(inputElement(tree, '任务文本预算'), '400');
+  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
+  assert.equal(mutations.length, 0, 'typing a value back to the Host\'s own wrote it');
+  assert.ok(!textOf(tree).includes('虚拟 Provider 名称不能为空'), 'the repaired draft still shows its old problem');
+
+  // And a genuinely new value does write.
+  type(inputElement(tree, '任务文本预算'), '900');
+  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
+  assert.equal(mutations.length, 1, 'a valid changed draft was never written');
   mounted.unmount();
 });
 
@@ -933,8 +1110,6 @@ test('a legacy auto setting folds onto the adaptive option and is saved as refle
 
   // Editing the group writes the canonical sentinel back.
   fire(selectOf(tree, '兜底档位'), 'onChange', { target: { value: 'medium' } });
-  tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
 
   assert.equal(mutations.length, 1, 'saving the edited group did not reach the form');
@@ -1040,14 +1215,15 @@ test('the interventions page writes the three-state block the Host validates', a
   assert.equal(inputOf(tree, '窗口大小'), '6');
   assert.ok(textOf(tree).includes('观察（observe）'), 'the effective mode from the snapshot is not shown');
 
+  // Each select is a decision: it saves at once, with no Save press (g-069).
   fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } });
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'choosing the master mode did not save at once');
   fire(selectOf(tree, '结果裁剪'), 'onChange', { target: { value: 'off' } });
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
 
-  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
-  const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
+  assert.equal(mutations.length, 2, `choosing a capability did not save at once: ${JSON.stringify(plain(mutations.map((m) => m.ops))).slice(0, 500)}`);
+  const ops = plain(mutations[mutations.length - 1]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(ops.map((op) => [op.op, op.path]), [['set', ['interventions']]]);
   const value = ops[0]?.value ?? {};
   assert.equal(value.mode, 'active');
@@ -1070,8 +1246,8 @@ test('the interventions page refuses a budget the Host would refuse', async () =
   let tree = await mounted.runtime.flush();
 
   type(inputElement(tree, '重复阈值'), '1');
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   assert.ok(textOf(tree).includes('预算与阈值必须是'), `the refusal is not explained: ${textOf(tree).slice(0, 200)}`);
   assert.deepEqual(mutations, [], 'a draft the Host would refuse reached the Host');
   mounted.unmount();
@@ -1098,8 +1274,6 @@ test('the switch pages seed the documented defaults and pin nothing when nothing
     );
   }
 
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush();
   const ops = plain(mutations.flatMap((entry) => entry.ops as unknown[])) as { path: string[] }[];
   for (const op of ops) {
     assert.equal(['interventions', 'tools'].includes(op.path[0] ?? ''), false, `visiting the page pinned ${op.path.join('.')}`);
@@ -1128,8 +1302,6 @@ test('authored switches are read back, and rewriting them does not freeze what w
   // while the departure in the other direction stays authored.
   fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: true } });
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
   const tools = plain(mutations[0]?.ops) as { path: string[]; value: unknown }[];
   assert.deepEqual(tools.map((op) => op.path), [['tools']]);
   assert.deepEqual(tools[0]?.value, { enabled: { route: true } });
@@ -1143,8 +1315,6 @@ test('authored switches are read back, and rewriting them does not freeze what w
   assert.equal(String(selectOf(tree, '结果裁剪').props.value), 'inherit');
   fire(selectOf(tree, '主模式'), 'onChange', { target: { value: 'active' } });
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush();
   const interventions = plain(mutations[0]?.ops) as { path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(interventions.map((op) => op.path), [['interventions']]);
   assert.equal(interventions[0]?.value.mode, 'active');
@@ -1195,8 +1365,6 @@ test('the tools page closes one tool and writes exactly that switch', async () =
   );
 
   fire(checkboxOf(tree, 'reflex_gate'), 'onChange', { target: { checked: false } });
-  tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
 
   assert.equal(mutations.length, 1, 'saving did not reach the settings form');
@@ -1270,14 +1438,10 @@ test('every tool explains itself and the recommended set can be pre-filled', asy
 
   // Saving it writes nothing: the recommended set *is* the documented default,
   // so there is no departure to author and the Host is left untouched.
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
   assert.equal(mutations.length, 0, 'a set that already matches the default must not be written');
 
   // A real departure is written — and written alone.
   fire(checkboxOf(tree, 'reflex_route'), 'onChange', { target: { checked: true } });
-  tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
   tree = await mounted.runtime.flush();
   assert.equal(mutations.length, 1, 'saving the departure did not reach the settings form');
   const ops = plain(mutations[0]?.ops) as { path: string[]; value: { enabled: Record<string, boolean> } }[];
@@ -1303,8 +1467,6 @@ test('the effort page can turn adaptive effort off, and writes it with its group
   fire(checkboxOf(tree, '启用自适应推理强度'), 'onChange', { target: { checked: false } });
   tree = await mounted.runtime.flush();
   assert.ok(textOf(tree).includes('不做自适应判定'), 'the consequence of switching off is not explained');
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush();
 
   const ops = plain(mutations[0]?.ops) as { path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(ops.map((op) => op.path), [['effort']]);
@@ -1470,8 +1632,7 @@ test('a save from the page never writes the flat connection fields', async () =>
     let tree = await mounted.runtime.flush();
     type(inputElement(tree, '工具名前缀'), 'rv_');
     tree = await mounted.runtime.flush();
-    fire(find(tree, 'button', '保存'), 'onClick');
-    await mounted.runtime.flush(2);
+    tree = await flushAutosave(mounted, tree);
     assert.ok(mutations.length > 0, 'saving wrote nothing');
     for (const mutation of mutations) {
       for (const op of plain(mutation.ops) as { op?: string; path: string[] }[]) {
@@ -1812,7 +1973,9 @@ test('a filled-in unnamed row is marked, names its row in the save error, and sa
   const nameInput = elements(unnamedRow()).find((element) => typeof element.props['data-profile-name'] === 'string');
   assert.ok(nameInput !== undefined, 'the row has no name field to type into');
 
-  // Fill it in without naming it, then press save: refused, explained, unwritten.
+  // Fill it in without naming it, then let autosave try: refused, explained,
+  // unwritten. There is no Save button any more, so the pause is what asks
+  // (g-069) — and the answer must be the same refusal.
   const connectionInputs = elements(unnamedRow()).filter((element) => element.type === 'input' && typeof element.props['data-profile-name'] !== 'string' && element.props.type !== 'password');
   type(connectionInputs[0], 'https://newapi.aseit.cn/v1');
   tree = await mounted.runtime.flush();
@@ -1820,8 +1983,7 @@ test('a filled-in unnamed row is marked, names its row in the save error, and sa
     textOf(unnamedRow()).includes('没有「配置名」'),
     `the filled-in unnamed row does not say what is wrong: ${textOf(unnamedRow())}`
   );
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   assert.deepEqual(mutations, [], 'the refused save reached the Host');
   assert.ok(textOf(tree).includes('没有「配置名」'), 'the page did not explain the refusal');
   // The row number travels with the error: the error list holds copy *keys*, so
@@ -1839,8 +2001,9 @@ test('a filled-in unnamed row is marked, names its row in the save error, and sa
   );
   tree = await mounted.runtime.flush();
   assert.equal(profileRows(tree).filter((row) => String(row.props['data-profile-unnamed']) === 'true').length, 0, 'the marker survived the name');
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
+  // Naming it is the edit that repairs the draft, so the same typing pause that
+  // was refused a moment ago now writes (g-069).
+  tree = await flushAutosave(mounted, tree);
   /** Declared with its own type: `mutations` is narrowed to an empty tuple above by `deepEqual(mutations, [])`. */
   const saves: { ops: unknown; revision: unknown }[] = mutations;
   assert.equal(saves.length, 1, `the named save did not reach the Host: ${textOf(tree).slice(0, 300)}`);
@@ -2211,8 +2374,6 @@ test('editing a base-defined pool writes it to the user layer instead of showing
     let tree = await mounted.runtime.flush();
     fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
     tree = await mounted.runtime.flush();
-    fire(find(tree, 'button', '保存'), 'onClick');
-    await mounted.runtime.flush();
 
     assert.equal(mutations.length, 1, 'saving a base-seeded draft did not reach the settings form');
     const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: any }[];
@@ -2249,8 +2410,6 @@ test('a group write keeps stored keys the page never rendered', async () => {
     let tree = await mounted.runtime.flush();
     fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
     tree = await mounted.runtime.flush();
-    fire(find(tree, 'button', '保存'), 'onClick');
-    await mounted.runtime.flush();
 
     const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: any }[];
     const routing = ops.find((op) => op.path.length === 1 && op.path[0] === 'routing');
@@ -2368,10 +2527,10 @@ test('the System 1 backend page writes the scalar and its rows, on the paths the
   type(inputElement(tree, '超时（毫秒）'), '9000');
   type(inputElement(tree, '工具名前缀'), 'rv_');
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  await mounted.runtime.flush();
+  // Both edits are typing: they coalesce into ONE write at the pause (g-069).
+  tree = await flushAutosave(mounted, tree);
 
-  assert.equal(mutations.length, 1, 'saving did not reach the settings form');
+  assert.equal(mutations.length, 1, 'the coalesced typing did not reach the settings form');
   const ops = plain(mutations[0]?.ops) as { op: string; path: string[]; value: Record<string, unknown> }[];
   assert.deepEqual(
     ops.map((op) => [op.op, op.path]),
@@ -2447,10 +2606,11 @@ test('every path the panel writes is a path the Host declares volatile', async (
     let tree = await mounted.runtime.flush();
     perturb.edit(tree);
     tree = await mounted.runtime.flush();
-    fire(find(tree, 'button', '保存'), 'onClick');
-    await mounted.runtime.flush();
+    // A switch or a select writes at once; a sweep entry that types has to wait
+    // out the pause instead. Both end with exactly one write (g-069).
+    tree = await flushAutosave(mounted, tree);
 
-    assert.equal(mutations.length, 1, `${perturb.tab}: saving did not reach the settings form`);
+    assert.equal(mutations.length, 1, `${perturb.tab}: the edit did not reach the settings form`);
     const ops = plain(mutations[0]?.ops) as { op: string; path: string[] }[];
     for (const op of ops) {
       assert.ok(hostAcceptsPath(HOST_CONFIG, op.path), `${perturb.tab} writes ${op.path.join('.')}, which the Host refuses as non-volatile`);
@@ -2527,16 +2687,16 @@ test('a read-only settings document renders but refuses to write', async () => {
   assert.ok(textOf(tree).includes('只读'), 'the page does not say why it cannot write');
 
   // Make the draft dirty through a disabled field, so the refusal below is about
-  // permission and not about there being nothing to save, then call the disabled
-  // save path directly: a disabled control is a hint, not a guarantee.
+  // permission and not about there being nothing to save. Autosave is the only
+  // write path now, so this is the check that matters: a disabled control is a
+  // hint, and the queue must refuse on its own (g-069).
   type(inputElement(tree, '任务文本预算'), '900');
   tree = await mounted.runtime.flush();
-  const save = find(tree, 'button', '保存');
-  assert.equal(save?.props.disabled, true, 'the save action must be disabled when the document is read-only');
-  fire(save, 'onClick');
-  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   assert.deepEqual(mutations, [], 'a read-only document accepted a write');
   assert.equal(inputOf(tree, '任务文本预算'), '900', 'the draft was not the one under test');
+  // The page offers no Save button at all: saving is not an action any more.
+  assert.equal(hasButton(tree, '保存'), false, 'the autosaving page still offers a Save button');
   mounted.unmount();
 });
 
@@ -3189,9 +3349,9 @@ test('choosing another model writes nothing, and a save writes it as the selecte
   fire(gamma, 'onChange', { target: { value: 'gamma' } });
   tree = await mounted.runtime.flush();
 
-  // The click is a draft edit and nothing more: a running transport must not
-  // change because someone looked at the list.
-  assert.deepEqual(mutations, [], 'choosing a model wrote to the document before Save');
+  // A selection is a decision, not typing: it saves at once, with no pause and
+  // no Save press (g-069). It is still exactly one narrow write — choosing a
+  // model must not rewrite the list or the other rows.
   const after = namedRow(tree, 'multi');
   assert.ok(after !== undefined);
   assert.deepEqual(
@@ -3200,10 +3360,8 @@ test('choosing another model writes nothing, and a save writes it as the selecte
     'the selection did not move within the draft'
   );
 
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
   const saves: { ops: unknown; revision: unknown }[] = mutations;
-  assert.equal(saves.length, 1, `the save did not reach the Host: ${textOf(tree).slice(0, 200)}`);
+  assert.equal(saves.length, 1, `the selection did not save at once: ${textOf(tree).slice(0, 200)}`);
   const ops = plain(saves[0]?.ops) as { op: string; path: string[]; value: unknown }[];
   const selected = ops.filter((op) => op.path.join('.') === 'systemOne.profiles.multi.selectedModel');
   assert.deepEqual(selected.map((op) => [op.op, op.value]), [['set', 'gamma']], 'the selected model was not written');
@@ -3234,8 +3392,6 @@ test('choosing the first listed model clears the stored selection instead of wri
   assert.ok(row !== undefined);
   fire(modelRadios(row).find((radio) => String(radio.props.value) === 'alpha'), 'onChange', { target: { value: 'alpha' } });
   tree = await mounted.runtime.flush();
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
 
   const saves: { ops: unknown }[] = mutations;
   assert.equal(saves.length, 1);
@@ -3264,8 +3420,7 @@ test('a selection that is no longer in the list is refused, and the row says why
   assert.ok(missing !== undefined, `the row does not explain the broken selection: ${textOf(edited)}`);
   assert.ok(textOf(missing).includes('beta'), 'the warning does not name the selected model');
 
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
   assert.deepEqual(mutations, [], 'a broken selection reached the Host');
   assert.ok(textOf(tree).includes('不在模型列表里'), `the refusal is not explained: ${textOf(tree).slice(0, 300)}`);
   mounted.unmount();
@@ -3408,10 +3563,162 @@ test('a failed save keeps the typed name, so the draft is never lost', async () 
   const id = String(savedRow.props['data-profile']);
   tree = await typeEveryCharacter(mounted, id, 'renamed');
 
-  fire(find(tree, 'button', '保存'), 'onClick');
-  tree = await mounted.runtime.flush();
   assert.deepEqual(mutations, [], 'a read-only document was written');
   assert.equal(nameInputOf(tree, id)?.props.value, 'renamed', 'the refused save discarded the typed name');
+  mounted.unmount();
+});
+
+//#endregion
+
+//#region autosave: the page saves after the edit, and survives being closed (g-069)
+
+/**
+ * Open the same settings page again, as reopening the dialog does.
+ *
+ * The bundle keeps one autosave queue per settings namespace for the whole
+ * client lifetime, so a second mount of the *same* namespace resumes it — which
+ * is exactly the behaviour these tests are about.
+ */
+async function reopen(options: { facts: PanelRuntimeFacts; form: Record<string, unknown> }): Promise<Mounted> {
+  return mountPanel(options);
+}
+
+test('the page offers no Save button, and a switch saves without one', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '虚拟 Provider');
+  let tree = await mounted.runtime.flush();
+
+  // g-069: saving is not an action any more, so nothing offers it.
+  assert.equal(hasButton(tree, '保存'), false, 'the page still offers a Save button');
+  assert.equal(hasButton(tree, '取消'), false, 'the page offers a cancel button instead');
+
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 1, 'a switch did not save on its own');
+  assert.ok(textOf(tree).includes('已保存'), `the save was not acknowledged: ${textOf(tree).slice(0, 200)}`);
+  mounted.unmount();
+});
+
+test('typing shows "saves when you pause", then writes once', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  type(inputElement(tree, '工具名前缀'), 'rv_');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 0, 'a keystroke wrote before the pause');
+  assert.ok(textOf(tree).includes('输入停顿后自动保存'), `the waiting state is not shown: ${textOf(tree).slice(0, 200)}`);
+
+  tree = await flushAutosave(mounted, tree);
+  assert.equal(mutations.length, 1, 'the paused typing was never written');
+  assert.ok(textOf(tree).includes('已保存'), 'the save was not acknowledged');
+  mounted.unmount();
+});
+
+test('closing the dialog mid-typing still writes what was typed', async () => {
+  const { form, mutations } = settingsForm(AUTHORED);
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  type(inputElement(tree, '工具名前缀'), 'rv_closed');
+  tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 0, 'the keystroke wrote before the pause');
+
+  // Closing the settings dialog: the shell unmounts the page (no interception
+  // point exists, which is why this feature exists at all).
+  mounted.unmount();
+  await settle();
+  await settle();
+  assert.equal(mutations.length, 1, 'closing the dialog dropped the pending write');
+  const write = plain(mutations[0]?.ops) as { op: string; path: string[]; value?: unknown }[];
+  assert.ok(
+    write.some((op) => op.path.join('.') === 'toolPrefix' && (op.value as unknown) === 'rv_closed'),
+    `the write that survived the close is not the typed one: ${JSON.stringify(write).slice(0, 300)}`
+  );
+});
+
+test('a reopened page in the same client starts from the Host, not from a stale page', async () => {
+  // What the *page* guarantees on a reopen: a fresh mount renders the Host's
+  // document (nothing left over from the page that was closed), and it offers no
+  // trace of the previous page's status line. The draft a failed write keeps
+  // across the close is carried by the client's autosave owner and proved at the
+  // store level (`client-autosave.test.ts`), where the timing is deterministic.
+  const settings = settingsForm(AUTHORED);
+  const gate = settings.hold();
+  const first = await mountPanel({ facts: facts(true), form: settings.form });
+  openTab(first.tree, '虚拟 Provider');
+  let tree = await first.runtime.flush();
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await first.runtime.flush();
+  gate.reject(new Error('settings host went away'));
+  for (let pass = 0; pass < 3; pass += 1) tree = await first.runtime.flush();
+  assert.ok(textOf(tree).includes('自动保存失败'), 'the first page did not report the failure');
+  first.unmount();
+  await settle();
+
+  const second = await mountPanel({ facts: facts(true), form: settings.form, client: first.client });
+  const reopened = second.current();
+  // A page that just opened has nothing of its own to report: no stale "saved"
+  // and no stale failure banner describing an action this page did not take.
+  assert.equal(second.current().includes('自动保存失败'), false, `a fresh page carried the old failure banner: ${reopened.slice(0, 200)}`);
+  openTab(second.tree, '虚拟 Provider');
+  for (let pass = 0; pass < 4; pass += 1) await second.runtime.flush();
+  assert.equal(settings.mutations.length, 1, 'reopening wrote to the Host on its own');
+  assert.equal(hasButton(second.tree, '保存'), false, 'the reopened page offers a Save button again');
+  second.unmount();
+});
+
+test('a failed save says why, keeps the edit, and offers retry and discard', async () => {
+  const settings = settingsForm(AUTHORED);
+  const { form, mutations } = settings;
+  const gate = settings.hold();
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '虚拟 Provider');
+  let tree = await mounted.runtime.flush();
+
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  gate.reject(new Error('settings host is down'));
+  for (let pass = 0; pass < 3; pass += 1) tree = await mounted.runtime.flush();
+
+  const text = textOf(tree);
+  assert.ok(text.includes('自动保存失败'), `the failure is not reported: ${text.slice(0, 240)}`);
+  assert.ok(text.includes('settings host is down'), 'the failure does not say why');
+  assert.equal(hasButton(tree, '重试保存'), true, 'the failure offers no retry');
+  assert.equal(hasButton(tree, '放弃改动'), true, 'the failure offers no way out');
+  // The edit is still on the page, not rolled back to what the Host holds.
+  assert.equal(checkboxOf(tree, '虚拟 Provider').props.checked, false, 'the failed edit was rolled back');
+
+  // The retry goes out through the same write path.
+  clickButton(tree, '重试保存');
+  for (let pass = 0; pass < 3; pass += 1) tree = await mounted.runtime.flush();
+  assert.equal(mutations.length, 2, 'the retry did not write');
+  assert.ok(textOf(tree).includes('已保存'), 'a successful retry is not acknowledged');
+  mounted.unmount();
+});
+
+test('discarding a kept draft goes back to what the Host holds', async () => {
+  const settings = settingsForm(AUTHORED);
+  const { form, mutations } = settings;
+  const gate = settings.hold();
+  const mounted = await mountPanel({ facts: facts(true), form });
+  openTab(mounted.tree, '虚拟 Provider');
+  let tree = await mounted.runtime.flush();
+
+  fire(checkboxOf(tree, '虚拟 Provider'), 'onChange', { target: { checked: false } });
+  tree = await mounted.runtime.flush();
+  gate.reject(new Error('nope'));
+  for (let pass = 0; pass < 3; pass += 1) tree = await mounted.runtime.flush();
+  assert.equal(checkboxOf(tree, '虚拟 Provider').props.checked, false, 'the draft is not the failed one');
+
+  clickButton(tree, '放弃改动');
+  tree = await mounted.runtime.flush();
+  assert.equal(checkboxOf(tree, '虚拟 Provider').props.checked, true, 'discarding kept the failed edit');
+  assert.equal(hasButton(tree, '重试保存'), false, 'discarding left the failure banner up');
+  assert.equal(mutations.length, 1, 'discarding wrote to the Host');
   mounted.unmount();
 });
 

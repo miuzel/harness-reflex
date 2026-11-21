@@ -362,6 +362,11 @@ export const zh = {
   clean: '已与 Host 一致',
   confirmRejected: 'Host 拒绝了本次写入',
   refreshFailed: '刷新失败',
+  autosavePending: '输入停顿后自动保存',
+  autosaveFailed: '自动保存失败，改动已保留',
+  autosaveRetry: '重试保存',
+  autosaveDiscard: '放弃改动',
+  discardedDraft: '已放弃未保存的改动',
 
   errVirtualProvider: '虚拟 Provider 名称不能为空',
   errMaxTaskChars: '任务文本预算必须是正整数',
@@ -805,6 +810,11 @@ export const en: Record<keyof typeof zh, string> = {
   dirty: 'Unsaved changes',
   clean: 'In step with the Host',
   confirmRejected: 'The Host refused this write',
+  autosavePending: 'Saves when you pause typing',
+  autosaveFailed: 'Autosave failed, your edits are kept',
+  autosaveRetry: 'Retry save',
+  autosaveDiscard: 'Discard edits',
+  discardedDraft: 'Discarded the unsaved edits',
   refreshFailed: 'Refresh failed',
 
   errVirtualProvider: 'The virtual provider name cannot be empty',

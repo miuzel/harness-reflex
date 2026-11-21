@@ -38,7 +38,8 @@ import {
   type ProfileDraft,
   type ToolAdvice
 } from './panel';
-import { PanelStore, PANEL_TABS, type FormSnapshotLike, type PanelState, type PanelTab, type ProbeState } from './store';
+import { PanelStore, PANEL_TABS, acquireAutosave, type FormSnapshotLike, type PanelState, type PanelTab, type ProbeState } from './store';
+import type { AutosaveMode } from './autosave';
 import { renderMarkdown } from './markdown';
 import { guideFor, templateGuideFor } from './field-guide';
 
@@ -564,6 +565,12 @@ function Field(props: {
  * drift between the page and the guide table. Dynamic families (tool switches,
  * intervention capabilities) supply their own label and help text and use the
  * wildcard row for the rest.
+ *
+ * Two edit signals, because the two control families differ in kind (g-069): a
+ * `select` or a checkbox is a decision and saves at once, while a text box emits
+ * one change per keystroke and is debounced. That is why `text` exists rather
+ * than the caller passing a mode: a text field is written one character at a
+ * time, so it can only be a series of edits to coalesce.
  */
 function GuidedField(props: {
   t: Translate;
@@ -572,7 +579,10 @@ function GuidedField(props: {
   help?: string;
   hint?: string;
   value?: string;
+  /** A decision (a select): its change saves at once. */
   onChange?: (value: string) => void;
+  /** Typing (a text box): its changes are coalesced until the user pauses. */
+  onText?: (value: string) => void;
   options?: readonly { value: string; label: string }[];
   placeholder?: string;
   mono?: boolean;
@@ -603,7 +613,7 @@ function GuidedField(props: {
           })
         : TextInput({
             value: props.value ?? '',
-            onChange: props.onChange ?? (() => undefined),
+            onChange: props.onText ?? props.onChange ?? (() => undefined),
             placeholder: props.placeholder ?? guide?.placeholder,
             mono: props.mono === true,
             disabled: props.disabled === true,
@@ -675,6 +685,32 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
         });
   const statusTitle =
     status === undefined ? '' : status.lines.map((line) => interpolate(t(line.key), line.values ?? {})).join('\n');
+  // Autosave has no Save press to press (g-069): the page states what the queue
+  // is doing — waiting for a pause, saving, saved — and, when a write failed,
+  // why, with the retry and the discard that go with a kept draft.
+  const autosave = state.autosave;
+  const autosaveLine =
+    autosave.phase === 'failed'
+      ? h(
+          'span',
+          { style: { ...S.errors, 'data-autosave': 'failed' } },
+          h('span', null, `${t('autosaveFailed')}: ${autosave.reason ?? '—'}`),
+          Button({ label: t('autosaveRetry'), small: true, disabled: !canWrite, onClick: () => void store.retryAutosave() }),
+          Button({ label: t('autosaveDiscard'), small: true, kind: 'danger', disabled: !canWrite, onClick: () => store.discardRetained() })
+        )
+      : autosave.phase === 'idle'
+        ? null
+        : h(
+            'span',
+            { style: S.hint, 'data-autosave': autosave.phase },
+            t(
+              autosave.phase === 'pending'
+                ? 'autosavePending'
+                : autosave.phase === 'saving'
+                  ? 'saving'
+                  : 'saved'
+            )
+          );
   return h(
     'header',
     { style: S.header },
@@ -709,9 +745,8 @@ function Header(props: { t: Translate; state: PanelState; store: PanelStore }): 
       'div',
       { style: S.actions },
       Button({ label: t('refresh'), onClick: () => void store.refresh() }),
-      Button({ label: t('save'), kind: 'primary', disabled: !canWrite || state.saving, onClick: () => void store.save() }),
       Button({ label: t('reset'), disabled: !canWrite, onClick: () => store.reset() }),
-      state.saving ? h('span', { style: S.hint }, t('saving')) : null,
+      autosaveLine,
       state.notice === null ? null : h('span', { style: S.notice }, interpolate(t(state.notice), state.noticeValues ?? {}))
     )
   );
@@ -778,19 +813,26 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
   const { t, state, store } = props;
   const draft = state.draft;
   const disabled = !state.writable;
-  const setRouting = (patch: Partial<PanelDraft['routing']>): void => {
-    store.edit((current) => ({ ...current, routing: { ...current.routing, ...patch } }));
+  const setRouting = (patch: Partial<PanelDraft['routing']>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit((current) => ({ ...current, routing: { ...current.routing, ...patch } }), mode);
   };
-  const setPoolModel = (index: number, model: string): void => {
-    store.editPools((pools) => pools.map((pool, position) => (position === index ? { ...pool, model } : pool)));
+  const setPoolModel = (index: number, model: string, mode: AutosaveMode = 'immediate'): void => {
+    store.editPools((pools) => pools.map((pool, position) => (position === index ? { ...pool, model } : pool)), mode);
   };
-  const setEntry = (index: number, entry: number, patch: Partial<PanelDraft['routing']['pools'][number]['entries'][number]>): void => {
-    store.editPools((pools) =>
-      pools.map((pool, position) =>
-        position === index
-          ? { ...pool, entries: pool.entries.map((candidate, at) => (at === entry ? { ...candidate, ...patch } : candidate)) }
-          : pool
-      )
+  const setEntry = (
+    index: number,
+    entry: number,
+    patch: Partial<PanelDraft['routing']['pools'][number]['entries'][number]>,
+    mode: AutosaveMode = 'immediate'
+  ): void => {
+    store.editPools(
+      (pools) =>
+        pools.map((pool, position) =>
+          position === index
+            ? { ...pool, entries: pool.entries.map((candidate, at) => (at === entry ? { ...candidate, ...patch } : candidate)) }
+            : pool
+        ),
+      mode
     );
   };
   return h(
@@ -809,9 +851,9 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
         h(
           'div',
           { style: S.fieldRow },
-          GuidedField({ t, path: 'routing.virtualProvider', value: draft.routing.virtualProvider, disabled, mono: true, onChange: (value) => setRouting({ virtualProvider: value }) }),
-          GuidedField({ t, path: 'routing.fallback', value: draft.routing.fallback, disabled, mono: true, onChange: (value) => setRouting({ fallback: value }) }),
-          GuidedField({ t, path: 'routing.maxTaskChars', value: draft.routing.maxTaskChars, disabled, onChange: (value) => setRouting({ maxTaskChars: value }) })
+          GuidedField({ t, path: 'routing.virtualProvider', value: draft.routing.virtualProvider, disabled, mono: true, onText: (value) => setRouting({ virtualProvider: value }, 'text') }),
+          GuidedField({ t, path: 'routing.fallback', value: draft.routing.fallback, disabled, mono: true, onText: (value) => setRouting({ fallback: value }, 'text') }),
+          GuidedField({ t, path: 'routing.maxTaskChars', value: draft.routing.maxTaskChars, disabled, onText: (value) => setRouting({ maxTaskChars: value }, 'text') })
         )
       )
     }),
@@ -829,7 +871,7 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
               'div',
               { style: S.row },
               h('span', { style: S.label }, t('poolModelId')),
-              TextInput({ value: pool.model, disabled, mono: true, placeholder: 'reflex-pro', onChange: (value) => setPoolModel(index, value) }),
+              TextInput({ value: pool.model, disabled, mono: true, placeholder: 'reflex-pro', onChange: (value) => setPoolModel(index, value, 'text') }),
               Button({ label: t('poolAddEntry'), small: true, disabled, onClick: () => store.addCandidate(index) }),
               Button({ label: t('poolRemoveModel'), small: true, kind: 'danger', disabled, onClick: () => store.removePool(index) })
             ),
@@ -861,7 +903,7 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
                         h('option', { value: '' }, `-- ${t('poolEntryProvider')} --`),
                         ...catalog.map((g: any) => h('option', { key: g.id, value: g.id }, g.name || g.id))
                       )
-                    : TextInput({ value: entry.provider, disabled, mono: true, placeholder: t('poolEntryProvider'), onChange: (value) => setEntry(index, at, { provider: value }) }),
+                    : TextInput({ value: entry.provider, disabled, mono: true, placeholder: t('poolEntryProvider'), onChange: (value) => setEntry(index, at, { provider: value }, 'text') }),
                   availableModels.length > 0
                     ? h(
                         'select',
@@ -874,7 +916,7 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
                         h('option', { value: '' }, `-- ${t('poolEntryModel')} --`),
                         ...availableModels.map((m: any) => h('option', { key: m.id, value: m.id }, m.name || m.id))
                       )
-                    : TextInput({ value: entry.model, disabled, mono: true, placeholder: t('poolEntryModel'), onChange: (value) => setEntry(index, at, { model: value }) }),
+                    : TextInput({ value: entry.model, disabled, mono: true, placeholder: t('poolEntryModel'), onChange: (value) => setEntry(index, at, { model: value }, 'text') }),
                   h(
                     'div',
                     { style: { display: 'flex', gap: '4px', flex: '0 0 auto', marginLeft: 'auto' } },
@@ -887,8 +929,8 @@ function RoutingTab(props: { t: Translate; state: PanelState; store: PanelStore 
                 h(
                   'div',
                   { style: S.candidateRow2 },
-                  h('div', { style: { flex: '1.8 1 200px' } }, TextInput({ value: entry.description, disabled, placeholder: t('poolEntryDescription'), onChange: (value) => setEntry(index, at, { description: value }) })),
-                  h('div', { style: { flex: '1.2 1 140px' } }, TextInput({ value: entry.tags, disabled, placeholder: t('poolEntryTags'), onChange: (value) => setEntry(index, at, { tags: value }) }))
+                  h('div', { style: { flex: '1.8 1 200px' } }, TextInput({ value: entry.description, disabled, placeholder: t('poolEntryDescription'), onChange: (value) => setEntry(index, at, { description: value }, 'text') })),
+                  h('div', { style: { flex: '1.2 1 140px' } }, TextInput({ value: entry.tags, disabled, placeholder: t('poolEntryTags'), onChange: (value) => setEntry(index, at, { tags: value }, 'text') }))
                 )
               );
             })
@@ -905,8 +947,8 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
   const { t, state, store } = props;
   const draft = state.draft;
   const disabled = !state.writable;
-  const setEffort = (patch: Partial<PanelDraft['effort']>): void => {
-    store.edit((current) => ({ ...current, effort: { ...current.effort, ...patch } }));
+  const setEffort = (patch: Partial<PanelDraft['effort']>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit((current) => ({ ...current, effort: { ...current.effort, ...patch } }), mode);
   };
   const latest = state.snapshot?.effort?.latest ?? null;
   return h(
@@ -948,7 +990,7 @@ function EffortTab(props: { t: Translate; state: PanelState; store: PanelStore }
             path: 'effort.minConfidence',
             value: draft.effort.minConfidence,
             disabled,
-            onChange: (value) => setEffort({ minConfidence: value })
+            onText: (value) => setEffort({ minConfidence: value }, 'text')
           })
         )
       )
@@ -1026,7 +1068,7 @@ function ModelSelection(props: {
   t: Translate;
   profile: ProfileDraft;
   disabled: boolean;
-  onEdit: (patch: Partial<ProfileDraft>) => void;
+  onEdit: (patch: Partial<ProfileDraft>, mode?: AutosaveMode) => void;
 }): ReactNode {
   const { t, profile, disabled, onEdit } = props;
   const ids = splitModelIds(profile.modelIds);
@@ -1123,7 +1165,7 @@ function ProfileRow(props: {
   savedName: string;
   disabled: boolean;
   store: PanelStore;
-  onEdit: (patch: Partial<ProfileDraft>) => void;
+  onEdit: (patch: Partial<ProfileDraft>, mode?: AutosaveMode) => void;
 }): ReactNode {
   const { t, profile, isActive, probe, saved, savedName, disabled, store, onEdit } = props;
   const name = profile.name.trim();
@@ -1227,7 +1269,7 @@ function ProfileRow(props: {
         disabled,
         // No `key` prop: the node must be the *same* one across renders, which
         // is exactly what keeps the caret where the user left it.
-        onChange: (event: { target: { value: string } }) => onEdit({ name: event.target.value })
+        onChange: (event: { target: { value: string } }) => onEdit({ name: event.target.value }, 'text')
       }),
       // Worded, not just painted: the row says it is unnamed, and why that blocks
       // the save, in its own head line.
@@ -1326,7 +1368,7 @@ function ProfileRow(props: {
         mono: true,
         disabled,
         placeholder: 'http://127.0.0.1:8000/v1',
-        onChange: (value) => onEdit({ baseUrl: value })
+        onText: (value) => onEdit({ baseUrl: value }, 'text')
       }),
       GuidedField({
         t,
@@ -1338,7 +1380,7 @@ function ProfileRow(props: {
         multiline: true,
         disabled,
         placeholder: 'jev-latest',
-        onChange: (value) => onEdit({ modelIds: value })
+        onText: (value) => onEdit({ modelIds: value }, 'text')
       }),
       GuidedField({
         t,
@@ -1346,7 +1388,7 @@ function ProfileRow(props: {
         label: t('labelTimeoutMs'),
         value: profile.timeoutMs,
         disabled,
-        onChange: (value) => onEdit({ timeoutMs: value })
+        onText: (value) => onEdit({ timeoutMs: value }, 'text')
       }),
       GuidedField({
         t,
@@ -1355,7 +1397,7 @@ function ProfileRow(props: {
         value: profile.apiKeyEnv,
         mono: true,
         disabled,
-        onChange: (value) => onEdit({ apiKeyEnv: value })
+        onText: (value) => onEdit({ apiKeyEnv: value }, 'text')
       })
     ),
     // The one model in force (g-066). A radio group over the ids the list field
@@ -1381,7 +1423,7 @@ function ProfileRow(props: {
         style: { ...S.input, flex: '1 1 220px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
         onInput: (event: { target?: { value?: unknown } }) => {
           const value = typeof event.target?.value === 'string' ? event.target.value : '';
-          onEdit({ apiKey: value });
+          onEdit({ apiKey: value }, 'text');
         }
       }),
       h('span', { style: S.hint }, keyState),
@@ -1414,11 +1456,11 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   const draft = state.draft;
   const disabled = !state.writable;
   const systemOne = state.snapshot?.systemOne;
-  const setBackend = (patch: Partial<PanelDraft['backend']>): void => {
-    store.edit((current) => ({ ...current, backend: { ...current.backend, ...patch } }));
+  const setBackend = (patch: Partial<PanelDraft['backend']>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit((current) => ({ ...current, backend: { ...current.backend, ...patch } }), mode);
   };
-  const setRuntime = (patch: Partial<PanelDraft['runtime']>): void => {
-    store.edit((current) => ({ ...current, runtime: { ...current.runtime, ...patch } }));
+  const setRuntime = (patch: Partial<PanelDraft['runtime']>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit((current) => ({ ...current, runtime: { ...current.runtime, ...patch } }), mode);
   };
   const profiles = draft.backend.profiles;
   const activeName = draft.backend.active.trim();
@@ -1472,14 +1514,17 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
   const originalRows = state.original.backend.profiles;
   // Rows are addressed by their page identity, never by position: one row's edit
   // must never land on whichever row happens to be third after a delete.
-  const setProfile = (id: string, patch: Partial<ProfileDraft>): void => {
-    store.edit((current) => ({
-      ...current,
-      backend: {
-        ...current.backend,
-        profiles: current.backend.profiles.map((row) => (row.id === id ? { ...row, ...patch } : row))
-      }
-    }));
+  const setProfile = (id: string, patch: Partial<ProfileDraft>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit(
+      (current) => ({
+        ...current,
+        backend: {
+          ...current.backend,
+          profiles: current.backend.profiles.map((row) => (row.id === id ? { ...row, ...patch } : row))
+        }
+      }),
+      mode
+    );
   };
   return h(
     'div',
@@ -1517,7 +1562,7 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
                   savedName: originalRows.find((row) => row.id === profile.id)?.name.trim() ?? '',
                   disabled,
                   store,
-                  onEdit: (patch: Partial<ProfileDraft>) => setProfile(profile.id, patch)
+                  onEdit: (patch: Partial<ProfileDraft>, mode?: AutosaveMode) => setProfile(profile.id, patch, mode)
                 })
               )
             ),
@@ -1588,10 +1633,10 @@ function BackendTab(props: { t: Translate; state: PanelState; store: PanelStore 
       children: h(
         'div',
         { style: S.fieldRow },
-        GuidedField({ t, path: 'toolPrefix', value: draft.runtime.toolPrefix, disabled, mono: true, onChange: (value) => setRuntime({ toolPrefix: value }) }),
-        GuidedField({ t, path: 'pruneThreshold', value: draft.runtime.pruneThreshold, disabled, onChange: (value) => setRuntime({ pruneThreshold: value }) }),
-        GuidedField({ t, path: 'ledgerPath', value: draft.runtime.ledgerPath, disabled, mono: true, onChange: (value) => setRuntime({ ledgerPath: value }) }),
-        GuidedField({ t, path: 'calibrationPath', value: draft.runtime.calibrationPath, disabled, mono: true, onChange: (value) => setRuntime({ calibrationPath: value }) })
+        GuidedField({ t, path: 'toolPrefix', value: draft.runtime.toolPrefix, disabled, mono: true, onText: (value) => setRuntime({ toolPrefix: value }, 'text') }),
+        GuidedField({ t, path: 'pruneThreshold', value: draft.runtime.pruneThreshold, disabled, onText: (value) => setRuntime({ pruneThreshold: value }, 'text') }),
+        GuidedField({ t, path: 'ledgerPath', value: draft.runtime.ledgerPath, disabled, mono: true, onText: (value) => setRuntime({ ledgerPath: value }, 'text') }),
+        GuidedField({ t, path: 'calibrationPath', value: draft.runtime.calibrationPath, disabled, mono: true, onText: (value) => setRuntime({ calibrationPath: value }, 'text') })
       )
     })
   );
@@ -1730,8 +1775,8 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
   const { t, state, store } = props;
   const draft = state.draft;
   const disabled = !state.writable;
-  const setInterventions = (patch: Partial<PanelDraft['interventions']>): void => {
-    store.edit((current) => ({ ...current, interventions: { ...current.interventions, ...patch } }));
+  const setInterventions = (patch: Partial<PanelDraft['interventions']>, mode: AutosaveMode = 'immediate'): void => {
+    store.edit((current) => ({ ...current, interventions: { ...current.interventions, ...patch } }), mode);
   };
   const setCapability = (capability: string, value: string): void => {
     store.edit((current) => ({
@@ -1746,7 +1791,7 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
       path: `interventions.${String(key)}`,
       value: String(draft.interventions[key] ?? ''),
       disabled,
-      onChange: (value) => setInterventions({ [key]: value } as Partial<PanelDraft['interventions']>)
+      onText: (value) => setInterventions({ [key]: value } as Partial<PanelDraft['interventions']>, 'text')
     });
   return h(
     'div',
@@ -1804,7 +1849,7 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
             path: 'interventions.pruneJudgeMinChars',
             value: draft.interventions.pruneJudgeMinChars,
             disabled,
-            onChange: (value) => setInterventions({ pruneJudgeMinChars: value })
+            onText: (value) => setInterventions({ pruneJudgeMinChars: value }, 'text')
           }),
           budgetField('claimMinConfidence'),
           budgetField('closingEvidenceChars'),
@@ -1813,7 +1858,7 @@ function InterventionsTab(props: { t: Translate; state: PanelState; store: Panel
             path: 'interventions.intent',
             value: draft.interventions.intent,
             disabled,
-            onChange: (value) => setInterventions({ intent: value })
+            onText: (value) => setInterventions({ intent: value }, 'text')
           })
         )
       )
@@ -1976,8 +2021,12 @@ function DelegationCard(props: { t: Translate; state: PanelState; store: PanelSt
   // consent was never saved.
   const onToggle = (next: boolean): void => {
     void (async () => {
-      store.edit((current) => ({ ...current, delegation: { enabled: next } }));
-      const saved = await store.save();
+      store.edit((current) => ({ ...current, delegation: { enabled: next } }), 'immediate');
+      // The autosaving page has already queued the write this edit needs; a
+      // second `save()` here would write the same consent twice (g-069). The
+      // host switch still follows the *recorded* consent, so it waits for that
+      // queue to settle instead of racing it.
+      const saved = store.autosave ? await store.whenSaved() : await store.save();
       if (saved && next) await store.enableDelegation();
     })();
   };
@@ -2137,7 +2186,15 @@ export function createPanelComponent(ctx: any, t: Translate): (props: PanelProps
       };
     }, [props.ns]);
     if (storeRef.current === null) {
-      storeRef.current = new PanelStore({ form, fetch: (input, init) => fetch(input, init) });
+      storeRef.current = new PanelStore({
+        form,
+        fetch: (input, init) => fetch(input, init),
+        // The page saves after each edit (g-069) and shares its queue with every
+        // later mount of the same namespace: closing the dialog unmounts this
+        // component, and a write left pending then still has to land.
+        autosave: 'autosave',
+        autosaveOwner: acquireAutosave(props.ns)
+      });
     }
     const store = storeRef.current;
     useEffect(() => {

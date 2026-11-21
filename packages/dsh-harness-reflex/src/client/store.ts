@@ -38,6 +38,7 @@ import {
   type ProfileDraft,
   type SettingsOp
 } from './panel';
+import { Autosave, type AutosaveEntry, type AutosaveMode, type AutosaveOptions, type RetainedDraft } from './autosave';
 import { planRenameSecrets } from './rename-secrets';
 
 /** Pages of the panel. */
@@ -112,6 +113,77 @@ export interface PanelStoreOptions {
   /** Timer seams; `setTimer` receives the delay in milliseconds. */
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /**
+   * Whether this page saves its draft after each edit (g-069).
+   *
+   * `'autosave'` when the page owns the write and `'explicit'` when it draws a
+   * Save button. The default is `'explicit'`: a naked store that starts writing
+   * on its own would be a surprise for every existing test and embed, while the
+   * page the user actually sees opts in.
+   */
+  autosave?: 'autosave' | 'explicit';
+  /**
+   * The client-lifetime owner this store's queue lives in, shared with every
+   * previous mount of the same page (see {@link acquireAutosave}). When absent,
+   * the store keeps a queue to itself that dies with it.
+   */
+  autosaveOwner?: AutosaveOwner;
+}
+
+/**
+ * What one page keeps after it is unmounted.
+ *
+ * Deliberately two plain values, not the page and not the DOM: a draft the Host
+ * never received, and the revision it must be applied to — plus a subscriber list
+ * so an open page hears about the queue it shares (see {@link AutosaveOwner}).
+ */
+export interface AutosaveOwner {
+  /** The draft a failed write left behind, or `null` once none is unsaved. */
+  retained: RetainedDraft<PanelDraft> | null;
+  /** Last revision the shared queue observed; the reopen fences against it. */
+  revision: number | undefined;
+  /**
+   * Live queues for this client, so a page created after the previous one was
+   * closed shares the queue its returned draft belongs to.
+   */
+  queue?: Autosave<PanelDraft> | null;
+  /** Pages currently showing this client's queue (normally zero or one). */
+  pages?: ReadonlySet<PanelStore>;
+}
+
+/** Per-client owners, keyed by settings namespace (`dsh-reflex`, `reflex`, …). */
+export const autosaveOwners = new Map<string, AutosaveOwner>();
+
+/**
+ * Fetch the client-lifetime autosave owner of one settings namespace.
+ *
+ * Closing the settings dialog unmounts the page; a queue owned by the component
+ * would die in that teardown, taking a debounce that had not fired yet — which is
+ * the exact loss g-069 sets out to prevent. Keyed by the namespace the page
+ * edits, so two different settings sections never share a queue (and a test that
+ * wants a virgin client can call {@link forgetAutosave}).
+ * @param namespace - the settings namespace the page edits.
+ * @returns the owner, created on first use.
+ */
+export function acquireAutosave(namespace: string): AutosaveOwner {
+  const existing = autosaveOwners.get(namespace);
+  if (existing !== undefined) return existing;
+  const owner: AutosaveOwner = { retained: null, revision: undefined };
+  autosaveOwners.set(namespace, owner);
+  return owner;
+}
+
+/**
+ * Drop one namespace's owner, ending that client lifetime.
+ *
+ * Used by tests and by an embed that tears its client down; a reload of a real
+ * browser drops the whole module, so this is also what a reload amounts to.
+ * @param namespace - the settings namespace to forget.
+ */
+export function forgetAutosave(namespace: string): void {
+  const owner = autosaveOwners.get(namespace);
+  owner?.queue?.forceDispose();
+  autosaveOwners.delete(namespace);
 }
 
 /** Everything the page renders from. */
@@ -142,6 +214,14 @@ export interface PanelState {
   /** Copy key of the last outcome, if any. */
   notice: string | null;
   noticeValues: Record<string, string> | null;
+  /**
+   * Autosave's own status line (g-069), drawn beside the header.
+   *
+   * Distinct from {@link notice}, which names a *user action* ("Host refused
+   * this write"). This one describes the queue: what it is doing now, and — in
+   * `failed` — why it stopped, so the page can offer the retry.
+   */
+  autosave: AutosaveState;
   /** Whether the next clear request is the confirming one. */
   confirmingClear: boolean;
   /** Outcome of the last host-patch write, as the host reported it. */
@@ -165,6 +245,16 @@ export interface ProbeState {
   result?: ProbeResultLike;
   /** Why the request itself failed (a non-2xx panel answer). */
   error?: string;
+}
+
+/** What the autosave queue is doing, as the page renders it. */
+export interface AutosaveState {
+  /** `idle` = in step; `pending` = waiting for a pause; `saving` = awaiting the Host. */
+  phase: 'idle' | 'pending' | 'saving' | 'saved' | 'failed';
+  /** Why the last write failed, when `phase` is `failed`. */
+  reason: string | null;
+  /** Whether a draft a failed write must not lose is being shown. */
+  retained: boolean;
 }
 
 /** The classification one probe answered, as the page renders it. */
@@ -302,6 +392,20 @@ export class PanelStore {
   readonly #setTimer: (callback: () => void, ms: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   readonly #listeners = new Set<() => void>();
+  /** Whether this page saves after each edit instead of on a Save press. */
+  readonly #autosaveMode: boolean;
+  /** The client-lifetime holder of the queue and the retained draft. */
+  readonly #owner: AutosaveOwner;
+  /** The write queue, created on first use and shared across mounts. */
+  #queue: Autosave<PanelDraft> | null = null;
+  /** Revision a queued write is fenced by, set only while it runs. */
+  #revisionForWrite: number | undefined;
+  /**
+   * The page's draft when a queued write started, if it was newer than the draft
+   * that write carried. Re-applied after every re-seed the write triggers, so a
+   * slow answer can never land over typing that came after it (g-069).
+   */
+  #newerDraft: PanelDraft | null = null;
   #state: PanelState;
   #timer: unknown;
   #disposed = false;
@@ -316,6 +420,8 @@ export class PanelStore {
     this.#now = options.now ?? (() => Date.now());
     this.#setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.#autosaveMode = options.autosave === 'autosave';
+    this.#owner = options.autosaveOwner ?? { retained: null, revision: undefined };
     const form = options.form.getSnapshot();
     const seeded = draftFromForm(form);
     // The initial validation runs through `validateDraft` rather than a literal
@@ -323,6 +429,13 @@ export class PanelStore {
     // tests evaluate this module inside a VM, where `deepEqual(errors, [])` then
     // fails on the prototype rather than the (empty) content.
     const initial = validateDraft(seeded);
+    // A draft a failed write left behind is adopted before the first render, so
+    // reopening the dialog shows the edit the Host never received rather than
+    // overwriting it with the last value the Host accepted (g-069). It is only
+    // adopted while it still describes something the Host does not hold.
+    const retained = this.#owner.retained !== null && this.#differsFrom(seeded, this.#owner.retained.draft) ? this.#owner.retained : null;
+    const draft = retained === null ? seeded : retained.draft;
+    const draftValidation = retained === null ? initial : validateDraft(draft);
     this.#state = {
       tab: 'overview',
       phase: 'idle',
@@ -333,12 +446,13 @@ export class PanelStore {
       writable: form.writable,
       revision: form.revision,
       original: seeded,
-      draft: seeded,
-      errors: initial.errors,
-      errorValues: initial.values,
+      draft,
+      errors: draftValidation.errors,
+      errorValues: draftValidation.values,
       saving: false,
-      notice: null,
+      notice: retained === null ? null : 'autosaveFailed',
       noticeValues: null,
+      autosave: retained === null ? { phase: 'idle', reason: null, retained: false } : { phase: 'failed', reason: retained.reason, retained: true },
       confirmingClear: false,
       delegationWrite: null,
       probes: {}
@@ -369,9 +483,154 @@ export class PanelStore {
       this.#adoptForm();
     });
     void this.refresh();
+    // The queue is bound to *this* page here, not in the constructor: a page
+    // mounted while its client still owns a queue (the dialog was closed and
+    // reopened before a write settled) takes that queue over, so the write's
+    // outcome lands in the page the user is watching (g-069).
+    this.#queueForClient();
+    if (this.#autosaveMode) {
+      const pages = new Set(this.#owner.pages ?? []);
+      pages.add(this);
+      this.#owner.pages = pages;
+    }
   }
 
-  /** Stop polling and release the form subscription. */
+  /**
+   * Report one settlement of the client's queue.
+   *
+   * The queue's own channel (see `QueueListener`): a write started before this
+   * page existed still has to show up in the status line the user is looking at.
+   * @param accepted - whether the Host took the write.
+   * @param reason - why it did not, when it did not.
+   */
+  settle(accepted: boolean, reason: string | null): void {
+    this.adoptSettlement(accepted, reason);
+  }
+
+  /** Whether this page saves after each edit instead of on a Save press. */
+  get autosave(): boolean {
+    return this.#autosaveMode;
+  }
+
+  /**
+   * Settle whatever the autosave queue is carrying, and report whether the page
+   * ended in step with the Host.
+   *
+   * The one thing the page still needs to await: an edit that must be *recorded*
+   * before a follow-up action runs (ticking delegation writes the consent, then
+   * the host patch). On a page without autosave there is nothing queued, so this
+   * is `true` and the caller does its own `save()`.
+   * @returns whether nothing is left unsaved.
+   */
+  async whenSaved(): Promise<boolean> {
+    if (!this.#autosaveMode) return true;
+    const queue = this.#queueForClient();
+    await queue.drained();
+    return queue.failure === null && !this.#differsFrom(this.#state.original, this.#state.draft);
+  }
+
+  /**
+   * The client's autosave owner, so the page layer can reuse it too.
+   * @returns the owner shared by every mount of this settings namespace.
+   */
+  get autosaveOwner(): AutosaveOwner {
+    return this.#owner;
+  }
+
+  /**
+   * The write queue of this page (created on first use).
+   *
+   * Created lazily because most callers never autosave — the explicit-save page
+   * and every embed that drives the store directly. When the client already owns
+   * a live queue, that one is adopted and rebound to this page
+   * ({@link Autosave.rebind}).
+   * @returns the queue.
+   */
+  #queueForClient(): Autosave<PanelDraft> {
+    const options: AutosaveOptions<PanelDraft> = {
+      write: (entry) => this.#writeDraft(entry),
+      changed: (base, draft) => this.#differsFrom(base, draft),
+      original: () => this.#state.original,
+      // What the Host now holds, in the page's own comparable shape: the write
+      // re-seeded `original` from it, so that is the baseline later keystrokes are
+      // measured against. (The queue must not reuse `original` behind the write's
+      // back — see `Autosave`'s `#lastWritten`.)
+      rebase: () => this.#seededFromHost(),
+      listeners: () => [...(this.#owner.pages ?? [])],
+      reason: () => this.#state.error,
+      retain: (draft, reason) => this.#retainDraft(draft, reason),
+      ...(this.#options.setTimer === undefined ? {} : { setTimer: this.#options.setTimer }),
+      ...(this.#options.clearTimer === undefined ? {} : { clearTimer: this.#options.clearTimer })
+    };
+    const shared = this.#owner.queue;
+    if (this.#queue !== null) return this.#queue;
+    if (shared !== null && shared !== undefined) {
+      shared.rebind(options);
+      this.#queue = shared;
+    } else {
+      this.#queue = new Autosave<PanelDraft>(options);
+      this.#owner.queue = this.#queue;
+      // A new queue has no write of its own to remember: the Host's document, as
+      // this page seeded it, is what it measures "already saved" against until a
+      // write replaces it. (Only on creation — re-stating it on every access would
+      // erase what a write already established.)
+      this.#queue.baseline(this.#state.original);
+    }
+    return this.#queue;
+  }
+
+  /**
+   * Whether two drafts describe different settings.
+   *
+   * The panel's own group comparison — the same measure the dirty badge uses —
+   * so "the page shows unsaved changes" and "there is something to write" can
+   * never disagree.
+   * @param base - the draft to compare against.
+   * @param draft - the candidate.
+   * @returns whether they differ.
+   */
+  #differsFrom(base: PanelDraft, draft: PanelDraft): boolean {
+    return dirtyGroups(base, draft).length > 0;
+  }
+
+  /**
+   * File (or forget) a draft that must survive its page.
+   * @param draft - the failed draft, or `null` to forget it.
+   * @param reason - why the write failed, when a draft is filed.
+   */
+  /**
+   * Reflect a write the client's shared queue finished for a *previous* page.
+   *
+   * The queue outlives its page, so a write started before the dialog closed can
+   * land after it was reopened. The status line belongs to the page the user is
+   * looking at, which cannot see the old page's promise — this is its channel.
+   * @param accepted - whether the Host took the write.
+   * @param reason - why it did not, when it did not.
+   */
+  adoptSettlement(accepted: boolean, reason: string | null): void {
+    if (this.#disposed) return;
+    this.#set({
+      autosave: accepted
+        ? { phase: 'saved', reason: null, retained: false }
+        : { phase: 'failed', reason: reason ?? 'unknown error', retained: true }
+    });
+  }
+
+  #retainDraft(draft: PanelDraft | null, reason?: string): void {
+    const why = reason ?? 'unknown error';
+    this.#owner.retained = draft === null ? null : { draft, reason: why };
+    // Live pages of this client follow the owner: the queue outlives the page
+    // that created it, so a failure settled after a dialog was closed and
+    // reopened must still reach the open page's status line.
+    const current = this.#state.autosave;
+    this.#set({
+      autosave:
+        draft === null
+          ? { phase: current.phase === 'failed' ? 'idle' : current.phase, reason: null, retained: false }
+          : { phase: 'failed', reason: why, retained: true }
+    });
+  }
+
   /**
    * Probe one profile's connection from the Host and record the answer.
    *
@@ -415,6 +674,15 @@ export class PanelStore {
     }
   }
 
+  /**
+   * Stop this page, keeping the client's queue alive for the next one.
+   *
+   * The polling timer and the form subscription belong to this mount and go
+   * with it. The queue does not: {@link Autosave.dispose} cancels a debounce into
+   * an immediate write and lets the write in flight settle, so closing the
+   * settings dialog neither loses a pending change nor strands the draft behind
+   * a running write (g-069).
+   */
   dispose(): void {
     this.#disposed = true;
     if (this.#timer !== undefined) {
@@ -423,6 +691,13 @@ export class PanelStore {
     }
     this.#formUnsubscribe?.();
     this.#formUnsubscribe = undefined;
+    this.#owner.revision = this.#state.revision;
+    if (this.#owner.pages !== undefined) {
+      const pages = new Set(this.#owner.pages);
+      pages.delete(this);
+      this.#owner.pages = pages;
+    }
+    this.#queue?.dispose();
   }
 
   /**
@@ -440,14 +715,7 @@ export class PanelStore {
       const dirty = dirtyGroups(this.#state.original, this.#state.draft).length > 0;
       if (!dirty) {
         const enhanced = draftFromSnapshot(body, this.#state.draft);
-        this.#set({
-          phase: 'ready',
-          snapshot: body,
-          fetchedAt: this.#now(),
-          original: enhanced,
-          draft: enhanced,
-          error: null
-        });
+        this.#foldReseed(enhanced, { phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
       } else {
         this.#set({ phase: 'ready', snapshot: body, fetchedAt: this.#now(), error: null });
       }
@@ -477,12 +745,206 @@ export class PanelStore {
    * name a missing profile (`activeProfileMissing`) even though the row the user
    * activated is right there under its new name. The row's identity is what ties
    * the two together, exactly as it does in {@link removeProfile}.
+   *
+   * On an autosaving page the edit also *queues the write* (g-069): typing is
+   * debounced, a selection or a toggle is written at once. The queue itself
+   * decides whether the draft is valid and different enough to be worth a
+   * request, so no caller has to remember to ask.
    * @param mutate - receives the current draft; returns the next one.
+   * @param mode - `immediate` for a decision (the default: a click), `text` for
+   *   a keystroke.
    */
-  edit(mutate: (draft: PanelDraft) => PanelDraft): void {
+  edit(mutate: (draft: PanelDraft) => PanelDraft, mode: AutosaveMode = 'immediate'): void {
     const draft = this.#followRenamedActivation(this.#state.draft, mutate(this.#state.draft));
     const { errors, values } = validateDraft(draft);
     this.#set({ draft, errors, errorValues: values, notice: null, noticeValues: null });
+    this.#autosave(draft, errors, mode);
+  }
+
+  /**
+   * Hand one edited draft to the client's queue.
+   *
+   * Only on an autosaving page: the explicit-save page writes nothing until its
+   * button is pressed, and an embed that never opted in must not start writing
+   * because someone called `edit`.
+   * @param draft - the draft to save.
+   * @param errors - its validation problems (an invalid draft waits).
+   * @param mode - how the edit is spaced.
+   */
+  #autosave(draft: PanelDraft, errors: readonly string[], mode: AutosaveMode): void {
+    if (!this.#autosaveMode) return;
+    const entry: AutosaveEntry<PanelDraft> = {
+      draft,
+      errors,
+      writable: this.#state.writable,
+      revision: this.#state.revision
+    };
+    const queue = this.#queueForClient();
+    // What the page holds at the moment of the edit is the newest draft there is;
+    // if a write is already running, that running write will re-seed over it, so
+    // it is recorded here and re-applied after every re-seed (g-069).
+    if (queue.busy && this.#newerDraft === null) this.#newerDraft = draft;
+    this.#set({ autosave: { phase: mode === 'text' ? 'pending' : 'saving', reason: null, retained: queue.failure !== null } });
+    void queue.submit(entry, mode).then((accepted) => this.#settleAutosave(accepted));
+  }
+
+  /**
+   * Reflect the queue's outcome in the status line.
+   * @param accepted - whether the write the queue attempted was taken.
+   */
+  #settleAutosave(accepted: boolean): void {
+    if (accepted) {
+      this.#set({ autosave: { phase: 'saved', reason: null, retained: false } });
+      return;
+    }
+    const failure = this.#queue?.failure ?? null;
+    if (failure !== null) {
+      this.#set({ autosave: { phase: 'failed', reason: failure, retained: true } });
+      return;
+    }
+    // Nothing was attempted (an invalid or unchanged draft): in step if there is
+    // nothing to write, still waiting if the draft has to be fixed first.
+    const unchanged = !this.#differsFrom(this.#state.original, this.#state.draft);
+    this.#set({ autosave: { phase: unchanged ? 'idle' : 'pending', reason: null, retained: this.#state.autosave.retained } });
+  }
+
+  /**
+   * Write a draft the Host never received — the page's retry (g-069).
+   *
+   * Re-uses the exact write path of an edit: validation, the secret rule and the
+   * revision fence all run again, so a retry is never a bypass.
+   * @returns whether the Host accepted the retry.
+   */
+  async retryAutosave(): Promise<boolean> {
+    const { draft, errors } = this.#state;
+    const entry: AutosaveEntry<PanelDraft> = { draft, errors, writable: this.#state.writable, revision: this.#state.revision };
+    const queue = this.#queueForClient();
+    this.#set({ autosave: { phase: 'saving', reason: null, retained: true } });
+    const accepted = await queue.retry(entry);
+    this.#settleAutosave(accepted);
+    return accepted;
+  }
+
+  /**
+   * Discard the draft a failed write left behind.
+   *
+   * The escape hatch that keeps "keep a retryable draft" from becoming a trap: a
+   * draft the Host keeps refusing (a row whose stored key a rename would drop,
+   * say) can be dropped deliberately, which re-seeds the page from the Host.
+   */
+  discardRetained(): void {
+    this.#owner.retained = null;
+    this.reset();
+    this.#set({ autosave: { phase: 'idle', reason: null, retained: false }, notice: 'discardedDraft' });
+  }
+
+  /**
+   * The write behind one queued draft.
+   *
+   * {@link save} is the page's only write path — validation, the rename-secret
+   * rule, the diff and the revision fence — so autosave reuses it rather than
+   * growing a second one. Two things are specific to a queued write:
+   *
+   * - It is fenced by **the revision the draft was read at**, not by whatever
+   *   revision the page has reached while the draft waited. The state's
+   *   `revision` follows the Host on every re-seed, so using it would let a slow
+   *   draft apply on top of a newer read.
+   * - A page that was closed while the draft waited still writes it; only the
+   *   rendering is gone (`#disposed`), and `save` reports without re-rendering.
+   * @param entry - the draft to write.
+   * @returns whether the Host now holds it.
+   */
+  async #writeDraft(entry: AutosaveEntry<PanelDraft>): Promise<boolean> {
+    // The *entry's* draft is written, not whatever the page holds now: a queued
+    // draft and the live one diverge the moment the user types again, and writing
+    // the live one would either lose the queued edit or write a newer draft under
+    // an older revision's fence (g-069). The live page catches up through the
+    // ordinary re-seed when the write lands.
+    const live = this.#state.draft;
+    // At write time the page's draft either *is* what this write carries (nothing
+    // newer is pending) or is the newer draft to protect — see `#autosave`, which
+    // records it at the moment the edit is queued, before any answer can move the
+    // page. Recomputing it here would mistake the baseline of a chained write for
+    // a newer edit (it is by definition older than the pending one).
+    this.#revisionForWrite = entry.revision;
+    this.#set({ draft: entry.draft, errors: [...entry.errors] });
+    // The page held a *newer* draft than the one just written when the user kept
+    // typing while the write ran. `save` re-seeds `draft` from the Host's answer
+    // (`refresh` may do it once more after the write), which is older than that
+    // edit — so the edit is put back on top instead of the older answer landing
+    // over it (g-069). It is restored whether the write was accepted or not: a
+    // refusal must not silently roll the page back either.
+    const restore = (): void => {
+      if (this.#disposed || this.#newerDraft === null) return;
+      const validation = validateDraft(this.#newerDraft);
+      this.#set({ draft: this.#newerDraft, errors: validation.errors, errorValues: validation.values });
+    };
+    try {
+      return await this.save();
+    } finally {
+      this.#revisionForWrite = undefined;
+      restore();
+      // `save` starts a live-metric read on success; that read re-seeds the draft
+      // when nothing is dirty, so the restore is repeated after it settles — and
+      // only then is the newer draft released.
+      void Promise.resolve()
+        .then(() => this.#readSettled)
+        .then(restore, restore)
+        .then(() => {
+          // Released only when nothing is queued behind this drain: a chained
+          // write is measured against the same newer draft.
+          if (!this.#queue?.queued) this.#newerDraft = null;
+        });
+    }
+  }
+
+  /** Resolves once the read `save` started has been folded into the state. */
+  #readSettled: Promise<void> = Promise.resolve();
+
+  /**
+   * Fold one re-seed into the state, keeping a draft newer than the running write.
+   *
+   * Every re-seed path goes through here (the write's own, the live-metric read's,
+   * the form's notification) so that one rule holds everywhere: an answer that
+   * arrived while the user kept typing must not replace what they typed (g-069).
+   * @param seeded - the draft the Host's document seeds.
+   * @param extra - any additional state the caller is setting with the re-seed.
+   */
+  #foldReseed(seeded: PanelDraft, extra: Partial<PanelState> = {}): void {
+    // A draft adopted from a failed write is an unsaved edit that outranks every
+    // answer until it is written or discarded (g-069).
+    const newer = this.#newerDraft ?? this.#owner.retained?.draft ?? null;
+    if (newer !== null && this.#differsFrom(seeded, newer)) {
+      const validation = validateDraft(newer);
+      this.#set({ ...extra, original: seeded, draft: newer, errors: validation.errors, errorValues: validation.values });
+      return;
+    }
+    this.#set({ ...extra, original: seeded, draft: seeded });
+  }
+
+  /**
+   * The Host's document as a draft, in this page's comparable shape.
+   *
+   * The same seeding the write path applies after a write (`draftFromFormKeepingRows`
+   * over this page's rows), computed without mutating the state: it is what the
+   * queue records as "what the Host now holds" once its write landed.
+   * @returns the seeded draft.
+   */
+  #seededFromHost(): PanelDraft {
+    return draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
+  }
+
+  /**
+   * Re-seed `original` and `draft` from the Host, keeping this page's own rows.
+   *
+   * The single re-seed the write path uses: `draftFromFormKeepingRows` carries the
+   * rows by identity so an unsaved row is not wiped and a row marker stays put,
+   * and setting both halves means "the page is in step with the Host", which is
+   * what the queue and the dirty badge measure.
+   */
+  #reseedFromHost(): void {
+    if (this.#disposed) return;
+    this.#foldReseed(draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles));
   }
 
   /**
@@ -514,8 +976,11 @@ export class PanelStore {
    * Edit the routing draft's model pools.
    * @param mutate - receives the current pools; returns the next ones.
    */
-  editPools(mutate: (pools: PanelDraft['routing']['pools']) => PanelDraft['routing']['pools']): void {
-    this.edit((draft) => ({ ...draft, routing: { ...draft.routing, pools: mutate(draft.routing.pools) } }));
+  editPools(
+    mutate: (pools: PanelDraft['routing']['pools']) => PanelDraft['routing']['pools'],
+    mode: AutosaveMode = 'immediate'
+  ): void {
+    this.edit((draft) => ({ ...draft, routing: { ...draft.routing, pools: mutate(draft.routing.pools) } }), mode);
   }
 
   /** Append an empty virtual model. */
@@ -645,7 +1110,18 @@ export class PanelStore {
     // row's page identity survives it: the Host answers for the same saved rows,
     // so the markers it drives would otherwise be renumbered under the pointer.
     const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
-    this.#set({ draft: seeded, original: seeded, errors: [], errorValues: {}, notice: null, noticeValues: null });
+    // A pending autosave would otherwise write the draft the user just threw
+    // away (g-069): the queue is emptied first, so "discard" means discarded.
+    this.#queue?.cancel();
+    this.#set({
+      draft: seeded,
+      original: seeded,
+      errors: [],
+      errorValues: {},
+      notice: null,
+      noticeValues: null,
+      ...(this.#autosaveMode ? { autosave: { phase: 'idle' as const, reason: null, retained: false } } : {})
+    });
   }
 
   /**
@@ -663,10 +1139,10 @@ export class PanelStore {
    * @returns whether the Host accepted the write.
    */
   async save(): Promise<boolean> {
-    const { draft, original, revision } = this.#state;
+    const { draft, original } = this.#state;
     // The button is disabled for a read-only document; refusing here as well keeps
-    // every other caller of `save()` (a keyboard shortcut, a future auto-save)
-    // from writing a document the Host said it will not accept.
+    // every other caller of `save()` (a keyboard shortcut, auto-save) from
+    // writing a document the Host said it will not accept.
     if (!this.#state.writable) return false;
     const validation = validateDraft(draft);
     if (!validation.ok) {
@@ -706,31 +1182,34 @@ export class PanelStore {
         this.#set({ errors: ['errProfileName'], errorValues: { errProfileName: unnamed.join(', ') }, notice: null, noticeValues: null });
         return false;
       }
-      // A *blank* unnamed row is allowed by the rule and by the page, but it is
-      // still a draft the Host does not hold: reporting "clean" left the page's
-      // dirty badge on forever (the early return never re-seeds `original`).
-      // It survives this re-seed by identity — `draftFromFormKeepingRows` keeps
-      // the page's own rows — so it is still there to be named.
-      const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
-      this.#set({ errors: [], errorValues: {}, original: seeded, draft: seeded, notice: 'clean', noticeValues: null });
+      // Nothing needs writing, which is the state the save was asking for. The
+      // autosaving page is not told "saved" for it (g-069: a no-op must not look
+      // like a write); the explicit button keeps its existing confirmation. The
+      // re-seed keeps a *blank* unnamed row by identity, so it is still there to
+      // be named after a clean save.
+      this.#reseedFromHost();
+      this.#set({ errors: [], errorValues: {}, notice: this.#autosaveMode ? null : 'clean', noticeValues: null });
       return true;
     }
     this.#set({ saving: true, errors: [], errorValues: {}, notice: null, noticeValues: null });
     try {
-      const accepted = await this.#options.form.mutate(ops, revision);
-      if (this.#disposed) return accepted;
+      const accepted = await this.#options.form.mutate(ops, this.#revisionForWrite);
       if (!accepted) {
-        this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
+        if (!this.#disposed) this.#set({ saving: false, notice: 'confirmRejected', noticeValues: null });
         return false;
       }
-      const seeded = draftFromFormKeepingRows(this.#options.form.getSnapshot(), this.#state.draft.backend.profiles);
-      this.#set({ saving: false, original: seeded, draft: seeded, notice: 'saved', noticeValues: null });
-      void this.refresh();
+      this.#reseedFromHost();
+      this.#set({ saving: false, notice: this.#autosaveMode ? null : 'saved', noticeValues: null });
+      this.#readSettled = this.refresh().catch(() => undefined);
       return true;
     } catch (error) {
-      if (this.#disposed) return false;
-      this.#set({ saving: false, error: messageOf(error), notice: null, noticeValues: null });
+      if (!this.#disposed) this.#set({ saving: false, error: messageOf(error), notice: null, noticeValues: null });
+      // Rethrown so the caller learns *why*: the autosave queue keeps the draft
+      // and the reason; the page's button only needs `false`.
+      if (this.#autosaveMode) throw error;
       return false;
+    } finally {
+      this.#revisionForWrite = undefined;
     }
   }
 
