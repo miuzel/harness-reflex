@@ -22,12 +22,87 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 import z from '@deepseek-ai/schemastery';
 
 import { Config, FACTORY_PROFILE_NAME, plainConfig, resolveConfig, type ReflexConfig } from './config.js';
-import { EMPTY_DRAFT, diffDraft, type PanelDraft, type ProfileDraft } from './client/panel.js';
+
+//#region the built page
+
+/**
+ * The built client modules, evaluated in a sandbox.
+ *
+ * The page is a *browser* module: the Host `tsconfig` excludes `src/client`, and
+ * the release check refuses a `dist/client/` directory (that is why the browser
+ * half ships as the single `client.js` bundle). Importing the TypeScript module
+ * directly would make `tsc` emit exactly that forbidden directory, so the
+ * committed built form is loaded the same way the page's own tests load it.
+ */
+interface PanelModule {
+  EMPTY_DRAFT: Record<string, any>;
+  diffDraft(original: unknown, draft: unknown, user?: unknown): { op: string; path: string[]; value?: unknown }[];
+  draftFromConfig(value: unknown): any;
+}
+
+/** Evaluate one built CommonJS client module and return its exports. */
+function loadClientModule(name: string): Record<string, any> {
+  const file = fileURLToPath(new URL(`../dist-client/${name}.js`, import.meta.url));
+  const module = { exports: {} as Record<string, any> };
+  const sandbox = {
+    module,
+    exports: module.exports,
+    require: (spec: string) => {
+      const local = /^\.\/([a-z-]+)$/.exec(spec);
+      if (local === null) throw new Error(`unexpected require "${spec}"`);
+      return loadClientModule(local[1] as string);
+    },
+    console,
+    Buffer,
+    setTimeout,
+    clearTimeout,
+    __dirname: '/',
+    __filename: file
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(readFileSync(file, 'utf8'), sandbox, { filename: `${name}.js` });
+  return module.exports;
+}
+
+const panel = loadClientModule('panel') as PanelModule;
+const EMPTY_DRAFT = panel.EMPTY_DRAFT as PanelDraft;
+const diffDraft = panel.diffDraft as (original: PanelDraft, draft: PanelDraft) => SettingsOp[];
+
+/** Editable draft of one connection profile (see `panel.ts`). */
+interface ProfileDraft {
+  id: string;
+  name: string;
+  baseUrl: string;
+  modelIds: string;
+  selectedModel: string;
+  legacyModelShape: boolean;
+  apiKeyEnv: string;
+  timeoutMs: string;
+  backend: string;
+  apiKey: string;
+  apiKeyPresent: boolean;
+  apiKeyFromProfile: boolean;
+  apiKeyVariable: string;
+  apiKeySource: string;
+  apiKeyLocked: boolean;
+  clearKey: boolean;
+}
+
+/** Editable draft of the whole page. */
+interface PanelDraft {
+  backend: { backend: string; active: string; storedActive?: string; profiles: ProfileDraft[] };
+  [group: string]: any;
+}
+
+//#endregion
 
 //#region a faithful reproduction of the Host write path
 
@@ -212,8 +287,13 @@ test('saving an unrelated field on a fresh document does not author the factory 
   const fresh = draftFor([factoryRow()], FACTORY_PROFILE_NAME, FACTORY_PROFILE_NAME);
   const edited = { ...fresh, runtime: { ...fresh.runtime, toolPrefix: 'rv_' } };
   const ops = diffDraft(fresh, edited);
+  // Cross-realm: the operations were built in the sandbox, so each `path` is an
+  // array from *that* realm. `join` is called on the array itself (never a
+  // prototype copied across), which is why the comparison is on the joined
+  // string rather than on the array.
+  const connectionOps = ops.filter((op) => String(op.path[0]) === 'systemOne');
   assert.deepEqual(
-    ops.filter((op) => op.path.join('.').startsWith('systemOne')),
+    JSON.parse(JSON.stringify(connectionOps)),
     [],
     `an unrelated save must not author the connection block: ${JSON.stringify(ops)}`
   );
@@ -301,7 +381,11 @@ test('a fresh document that never saves the connection block is not re-stated', 
   const fresh = draftFor([factoryRow()], FACTORY_PROFILE_NAME, FACTORY_PROFILE_NAME);
   const edited = { ...fresh, effort: { ...fresh.effort, fallback: 'high' } };
   const ops = diffDraft(fresh, edited);
-  assert.deepEqual(ops.filter((op) => op.path.join('.').startsWith('systemOne')), [], JSON.stringify(ops));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ops.filter((op) => String(op.path[0]) === 'systemOne'))),
+    [],
+    JSON.stringify(ops)
+  );
   // The projection itself is a description of the whole block (it lists the row's
   // fields), which is why the guarantee is stated on the diff above: a description
   // is not a write. The reload confirms the document keeps resolving the same.
