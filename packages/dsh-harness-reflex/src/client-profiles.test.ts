@@ -28,6 +28,7 @@ interface PanelModule {
   EMPTY_DRAFT: Record<string, any>;
   draftFromLayers(value: unknown, base: unknown): any;
   groupWrites(draft: unknown, group: string): { op?: string; path: string[]; value?: unknown }[];
+  diffDraft(original: unknown, draft: unknown, user?: unknown): { op: string; path: string[]; value?: unknown }[];
   profileRowsFrom(value: unknown): any[];
   unnamedFilledRows(draft: unknown): number[];
   validateDraft(draft: unknown): { errors: string[]; values: Record<string, string>; ok: boolean };
@@ -253,9 +254,22 @@ test('an unnamed row is still never written, but it is no longer silently accept
   assert.equal(validation.values.errProfileName, '3', 'the error must name which row is unnamed');
 });
 
-test('the active name is written, and an empty one is an unset rather than left stale', () => {
-  assert.equal(writeAt(panel.groupWrites(draftWith([row()], 'secondary'), 'backend'), ['systemOne', 'active'])?.value, 'secondary');
-  assert.equal(writeAt(panel.groupWrites(draftWith([row()], ''), 'backend'), ['systemOne', 'active'])?.value, undefined);
+test('the active name is written only when it changes, and never as an unset (g-067)', () => {
+  // `groupWrites` describes one draft and no longer states the activation: what
+  // to write depends on what the save does to the rows, which only the diff of
+  // two drafts knows (g-067 — a fresh document drafts the factory row as active
+  // without anything on disk saying so).
+  assert.equal(writeAt(panel.groupWrites(draftWith([row()], 'secondary'), 'backend'), ['systemOne', 'active']), undefined);
+  const seed = { ...panel.EMPTY_DRAFT, backend: { ...panel.EMPTY_DRAFT.backend, backend: 'jev', active: 'primary', storedActive: 'primary', profiles: [row()] } };
+  const chosen = { ...seed, backend: { ...seed.backend, active: 'secondary' } };
+  const ops = panel.diffDraft(seed, chosen);
+  const written = writeAt(ops as never, ['systemOne', 'active']);
+  assert.equal(written?.value, 'secondary', 'the chosen row must be written');
+  // Clearing the activation is never a lone `unset`, which the Host would rebuild
+  // as `{}` — the fresh document that gets the factory connection back.
+  const cleared = panel.diffDraft(seed, { ...seed, backend: { ...seed.backend, active: '' } });
+  const activationOps = (cleared as { path: string[] }[]).filter((op) => op.path.join('.') === 'systemOne.active');
+  assert.equal(activationOps.every((op) => (op as { op?: string }).op !== 'unset'), true, JSON.stringify(activationOps));
 });
 
 //#region row identity (g-062)
@@ -805,9 +819,10 @@ test('an explicit activation choice wins over following a rename', async () => {
     assert.equal(await store.save(), true, `the save went through: ${store.getState().errors}`);
     const ops = form.mutations.flatMap((mutation) => mutation.ops) as { op: string; path: string[]; value?: unknown }[];
     const written = ops.find((op) => op.path.join('.') === 'systemOne.active');
-    // An empty activation is an explicit `unset`, a chosen row is a `set` — and
-    // in both cases it is what the user asked for, not what the rename implies.
-    if (chosen.length === 0) assert.equal(written?.op, 'unset', 'clearing the activation must be an unset');
+    // A chosen row is written; clearing is never a lone `unset` (which the Host
+    // would rebuild as `{}`, resurrecting the factory row — g-067). Either way it
+    // is what the user asked for, not what the rename implies.
+    if (chosen.length === 0) assert.notEqual(written?.op, 'unset', 'clearing must not be an unset');
     else assert.equal(written?.value, chosen, 'the chosen row must be the one written');
     assert.equal(hasSubtreeUnset(ops, 'a'), true, 'the old name is still deleted');
   }

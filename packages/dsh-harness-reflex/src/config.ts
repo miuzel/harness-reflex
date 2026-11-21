@@ -7,6 +7,11 @@ import { parseFallback, type ModelPoolEntry, type ModelPools, type PhysicalTarge
 // list is exactly the drift this import removes. `./tools.js` imports this
 // module for types only, so no runtime cycle exists.
 import { REFLEX_TOOL_DEFAULT_ENABLED, REFLEX_TOOL_SUFFIXES, type ReflexToolSuffix } from './tools.js';
+// The factory connection re-states the *project's* official endpoint and model
+// rather than a second copy of the strings: `api.typesafe.ai/v1/systemone` and
+// `jev-latest` are owned by the backend implementation, and a literal here would
+// be a drift waiting to happen the next time the gateway moves.
+import { DEFAULT_SYSTEMONE_ENDPOINT } from './vendor/harness-reflex/backend/jev.js';
 
 /**
  * Deployment configuration for the reflex plugin.
@@ -115,6 +120,75 @@ export interface ReflexSystemOneProfile {
   timeoutMs?: number;
   /** Backend override for this profile (`auto`/`mock`/`jev`/`vllm`). */
   backend?: string;
+}
+
+/** Row name of the factory connection, as the panel shows it. */
+export const FACTORY_PROFILE_NAME = 'JEV official';
+
+/** The environment variable the factory connection locks onto — never another. */
+export const FACTORY_PROFILE_API_KEY_ENV = 'JEV_API_KEY';
+
+/**
+ * The factory connection (g-067): the project's own Jev gateway, switched on.
+ *
+ * A deployment whose settings document declares **no** `systemOne` block is a
+ * **fresh document**, and it should not open on "no connection, nothing works":
+ * the plugin ships with one working remote connection already named, already
+ * active, pointing at the official endpoint and model, and locked onto
+ * {@link FACTORY_PROFILE_API_KEY_ENV}.
+ *
+ * It is deliberately a normal profile — an entry of `systemOne.profiles` with
+ * nothing special about it — and it is supplied by the **schema default**
+ * (`Config.systemOne`), which schemastery applies only to an *absent* key. That
+ * single rule is the whole distinction between "fresh" and "the owner said
+ * something":
+ *
+ * - **deactivate** — the page writes `systemOne.active: ''`; the section is
+ *   stated, resolves as `no-active-profile`, and **no** factory row is filled
+ *   back in (the row stays listed, switched off);
+ * - **delete** — the page unsets the row *and* states the empty activation, so
+ *   the section is `{profiles: {}, active: ''}` → `no-profiles`, and nothing is
+ *   filled back in;
+ * - **rename / replace** — any authored `systemOne` block wins outright; the
+ *   factory row is only ever materialized into a document that has none.
+ *
+ * The one write that would blur the line is a cleared path whose parent is then
+ * rebuilt from nothing (`{}`, which schemastery does not default): that is why
+ * the page never unsets `systemOne.active` or the last profile row on its own —
+ * it states an explicit empty activation instead.
+ *
+ * The lock matters as much as the row. `apiKeyEnv` **names** the variable, and
+ * naming locks (g-059): with no `JEV_API_KEY` exported the connection reports
+ * "named but empty" and sends no key — it never reaches for
+ * `SYSTEM_ONE_API_KEY`, `VLLM_API_KEY` or `OPENAI_API_KEY` behind the owner's
+ * back. Only the variable *name* is ever authored; the secret itself is never
+ * written into a settings document by this row.
+ */
+export const FACTORY_SYSTEMONE_PROFILE = Object.freeze({
+  baseUrl: DEFAULT_SYSTEMONE_ENDPOINT,
+  model: 'jev-latest',
+  apiKeyEnv: FACTORY_PROFILE_API_KEY_ENV
+  // Deliberately no `backend`: a factory *connection* names where to connect,
+  // not which implementation runs here. Pinning `jev` would overrule the
+  // deployment's own `backend` selector (a `mock` deployment would still open a
+  // gateway), while following it means the documented precedence keeps working —
+  // `auto` picks the implementation from the environment, and an explicit
+  // `mock`/`jev`/`vllm` is honoured exactly as it is for every authored row.
+}) satisfies Readonly<ReflexSystemOneProfile>;
+
+/**
+ * `systemOne` block a settings document starts from.
+ *
+ * Returned fresh on every call, because schemastery stores the default it is
+ * given: a shared object would let one caller's edit leak into the next
+ * resolution.
+ * @returns a new factory block.
+ */
+function factorySystemOneBlock() {
+  return {
+    profiles: { [FACTORY_PROFILE_NAME]: { ...FACTORY_SYSTEMONE_PROFILE } },
+    active: FACTORY_PROFILE_NAME
+  };
 }
 
 /**
@@ -757,7 +831,17 @@ export const Config: Schemastery<any> = z.object({
   ledgerPath: z.string().description('JSONL audit sink; omit to keep the ledger in memory.').volatile(),
   pruneThreshold: z.natural().default(500).volatile(),
   calibrationPath: z.string().description('Calibration curve JSON applied to choice confidences.').volatile(),
-  systemOne: SystemOneSchema.default({}),
+  // The factory connection lives here, on the real schema default, rather than in
+  // `resolveSystemOneConfig` (g-067). Schemastery applies a default to a
+  // top-level key the document omits, and a fresh profile omits it: its patch
+  // file starts as `[]`, so the loader entry's config is `{}` and this key never
+  // appears. That is the only shape that gets the factory row from here — see
+  // `withFactoryProfile` for the one the schema cannot reach.
+  //
+  // It also puts the row where the Host settings form can see it: the form
+  // projects the *resolved* config, so a default the schema never produces would
+  // be a connection the panel shows and the settings page does not.
+  systemOne: SystemOneSchema.default(factorySystemOneBlock()),
   routing: RoutingSchema.default({}),
   effort: EffortSchema.default({}),
   tools: ToolsSchema.default({}),

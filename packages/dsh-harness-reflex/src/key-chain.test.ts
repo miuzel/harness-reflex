@@ -309,7 +309,10 @@ test('createBackend connects nothing without an active profile, whatever the env
   // build a live Jev backend and start talking to a gateway nobody selected.
   const env = { JEV_API_KEY: 'sk-only-in-the-environment', SYSTEM_ONE_BASE_URL: 'http://env-gateway' };
   const documents: Record<string, ReturnType<typeof resolveConfig>> = {
-    'no profiles': resolveConfig({ systemOne: {} }),
+    // g-067: `systemOne: {}` is the *fresh document*, which now resolves to the
+    // factory connection. "Nothing is configured" is written explicitly instead —
+    // this is exactly what the panel stores when the last row is deactivated.
+    'no profiles': resolveConfig({ systemOne: { active: '', profiles: {} } }),
     'profiles but none active': resolveConfig({ systemOne: { profiles: { p: CONNECTION } } }),
     'active name missing': resolveConfig({ systemOne: { active: 'typo', profiles: { p: CONNECTION } } }),
     'only the legacy flat fields': resolveConfig({
@@ -602,7 +605,7 @@ test('an unconfigured activation makes no external request, even with a gateway 
   const stub = captureFetch(() => ({ answers: {} }));
   try {
     for (const [label, authored] of [
-      ['no profiles', { backend: 'auto', systemOne: {} }],
+      ['no profiles', { backend: 'auto', systemOne: { active: '', profiles: {} } }],
       ['none active', { backend: 'auto', systemOne: { profiles: { p: { baseUrl: 'http://written' } } } }],
       ['active name missing', { backend: 'auto', systemOne: { active: 'typo', profiles: { p: { baseUrl: 'http://written' } } } }],
       ['legacy flat fields only', { backend: 'auto', systemOne: { baseUrl: 'http://old', model: 'm' } }]

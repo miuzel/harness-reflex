@@ -23,8 +23,15 @@ import { buildProbeRequest, probeSystemOne } from './systemone-probe.js';
  */
 
 test('a document without an active profile resolves to nothing, and says why', () => {
-  // No profiles at all.
+  // No profiles at all. (The *empty section* is not this: since g-067 an
+  // authored section that states nothing resolves to the factory connection —
+  // see `systemone-factory.test.ts` — so "nothing configured" is stated here as
+  // the explicit empty profiles map, which is what the panel writes.)
   assert.deepEqual(resolveSystemOneConfig(undefined, undefined), { backend: 'auto', unconfigured: 'no-profiles' });
+  // The schema arrives here with a declared `profiles` field, so an empty map is
+  // what a document that states no profiles hands the resolver. g-067 made the
+  // *absent* section mean the factory connection; the explicit empty map still
+  // means "nothing configured", which is what the panel stores after deactivation.
   assert.deepEqual(resolveSystemOneConfig('jev', { profiles: {} }), {
     backend: 'jev',
     unconfigured: 'no-profiles'

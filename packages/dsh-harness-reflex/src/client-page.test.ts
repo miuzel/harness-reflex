@@ -1414,7 +1414,11 @@ test('the flat connection editor is gone, and its fields are not rendered anywhe
 
 test('an unconfigured document says so, and names which absence it is', async () => {
   const cases: { authored: ReflexConfig; marker: string; needle: string }[] = [
-    { authored: { backend: 'jev', systemOne: {} } as ReflexConfig, marker: 'no-profiles', needle: '还没有任何连接配置' },
+    // g-067: an authored section that states nothing is no longer the "not
+    // configured" case — the *absent* section is the fresh document, which ships
+    // with the factory connection. "Not configured" is written explicitly, which
+    // is exactly what the page stores when the last row is removed.
+    { authored: { backend: 'jev', systemOne: { profiles: {}, active: '' } } as ReflexConfig, marker: 'no-profiles', needle: '还没有任何连接配置' },
     {
       authored: { backend: 'jev', systemOne: { profiles: { p: { baseUrl: 'http://a' } } } } as ReflexConfig,
       marker: 'no-active-profile',
@@ -2652,6 +2656,21 @@ function leafPaths(value: unknown, prefix = ''): string[] {
   return out;
 }
 
+/**
+ * Whether a resolved path names one *profile row's* field, e.g.
+ * `systemOne.profiles.JEV official.baseUrl`.
+ *
+ * A row field's path depends on the row's name, which is data, not schema: the
+ * page renders those by shape on every row it lists. The shape is what
+ * `OPTIONAL_SCHEMA_PATHS` carries, so a concrete row's path is not a separate
+ * field to account for.
+ * @param path - a dotted path from {@link leafPaths}.
+ * @returns true for a path under a named profile.
+ */
+function isProfileRowPath(path: string): boolean {
+  return /^systemOne\.profiles\.[^.]+\.[^.]+$/.test(path);
+}
+
 /** Schema leaves that a default config leaves unset, so they have no resolved key. */
 const OPTIONAL_SCHEMA_PATHS = [
   'routing.fallback',
@@ -2676,7 +2695,22 @@ const OPTIONAL_SCHEMA_PATHS = [
  * "nothing connects" banner, and it is covered by its own test, which asserts the
  * four reasons and the copy each one shows.
  */
-const DERIVED_SCHEMA_PATHS = new Set(['systemOne.backend', 'interventions.enabled', 'systemOne.unconfigured']);
+const DERIVED_SCHEMA_PATHS = new Set([
+  'systemOne.backend',
+  'interventions.enabled',
+  'systemOne.unconfigured',
+  // The connection in force, projected from the active row (g-066). The page
+  // renders *no* field for any of them: they are what the row the user edits
+  // resolves to, and they appear on the page as the row's own editors plus the
+  // activation marker. g-067 made `active` and the resolved connection fields
+  // non-empty in the default config (the factory connection is active by
+  // default), which is why they are enumerated here rather than only when a
+  // deployment happened to author them.
+  'systemOne.active',
+  'systemOne.baseUrl',
+  'systemOne.model',
+  'systemOne.apiKeyEnv'
+]);
 
 /** Schema path → the page group that renders it. */
 function tabOfPath(path: string): string {
@@ -2774,7 +2808,12 @@ test('every schema field carries a placeholder and a four-part (?) explanation',
   // it up from `resolveConfig` rather than from a local pending list.
   assert.equal(resolved.interventions.pruneJudgeMinChars, 10000, 'the Host default for the judge threshold changed');
   const expectedPaths = [
-    ...leafPaths(resolved).filter((path) => !DERIVED_SCHEMA_PATHS.has(path)),
+    // The factory connection is part of the default document now (g-067), so its
+    // row's leaves arrive here with the profile name baked into the path. They
+    // are *row* fields: the page renders them by shape, once per row it lists,
+    // which is what `OPTIONAL_SCHEMA_PATHS` states below — so they are carried as
+    // the shape, not as this one row's paths.
+    ...leafPaths(resolved).filter((path) => !DERIVED_SCHEMA_PATHS.has(path) && !isProfileRowPath(path)),
     ...OPTIONAL_SCHEMA_PATHS
   ];
   const uniquePaths = [...new Set(expectedPaths)];

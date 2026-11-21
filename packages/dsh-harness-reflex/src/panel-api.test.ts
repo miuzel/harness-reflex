@@ -414,7 +414,10 @@ test('an activation with no adaptive decision yet reports null, not a blank row'
 });
 
 test('optional connection fields are omitted rather than sent as undefined', () => {
-  const minimal = resolveConfig({ backend: 'auto' });
+  // No connection at all: since g-067 the default document carries the factory
+  // row (and so names a base URL, a model and a key variable), which is a
+  // *different* fact — it is asserted in its own case below.
+  const minimal = resolveConfig({ backend: 'auto', systemOne: { active: '', profiles: {} } });
   const snapshot = buildPanelSnapshot(facts(0, { config: minimal, pools: [] }));
   assert.equal('baseUrl' in snapshot.systemOne, false);
   assert.equal('model' in snapshot.systemOne, false);
@@ -869,8 +872,10 @@ test('an active name matching no profile is surfaced, not hidden', () => {
 
 test('a deployment with no profiles projects an empty list and an unconfigured state', () => {
   // A config that authors nothing at all — the shape every other fixture avoids
-  // precisely because it no longer connects anything.
-  const view = buildPanelSnapshot(facts(1, { config: resolveConfig({ backend: 'jev', systemOne: {} }) })).systemOne;
+  // precisely because it no longer connects anything. g-067 made `systemOne: {}`
+  // mean the *fresh* document (the factory connection, active), so the explicit
+  // empty document is what is projected here.
+  const view = buildPanelSnapshot(facts(1, { config: resolveConfig({ backend: 'jev', systemOne: { active: '', profiles: {} } }) })).systemOne;
   assert.deepEqual(view.profiles, []);
   assert.equal(view.activeProfile, undefined);
   assert.equal(view.activeProfileMissing, false);

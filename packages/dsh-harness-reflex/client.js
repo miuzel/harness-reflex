@@ -1899,7 +1899,7 @@ window.__ModuleLoader__.load({
 			exports.EMPTY_DRAFT = {
 			    routing: { enabled: true, virtualProvider: 'reflex', fallback: '', maxTaskChars: '400', pools: [] },
 			    effort: { setting: '', fallback: 'low', minConfidence: '0.3', enabled: true },
-			    backend: { backend: 'auto', active: '', profiles: [] },
+			    backend: { backend: 'auto', active: '', storedActive: '', profiles: [] },
 			    runtime: { toolPrefix: 'reflex_', ledgerPath: '', pruneThreshold: '500', calibrationPath: '' },
 			    interventions: {
 			        mode: 'observe',
@@ -2339,6 +2339,10 @@ window.__ModuleLoader__.load({
 			            // top of `systemOne` here (g-066), so a document that still carries the
 			            // old flat keys seeds no editor for them and the page cannot write them.
 			            active: asText(systemOne.active),
+			            // The activation as read, kept beside the editable one so a save can tell
+			            // "the user chose this" from "this is what the document resolved to"
+			            // (g-067). Never written.
+			            storedActive: asText(systemOne.active),
 			            // A row is seeded from the authored profile only. The key is NOT seeded:
 			            // the Host never sends it, and `apiKeyPresent` is filled from the live
 			            // snapshot (see `PanelStore.#applyProfilePresence`), which is the only
@@ -2670,11 +2674,11 @@ window.__ModuleLoader__.load({
 			            // what keeps a document that still carries them unchanged on disk.
 			            //
 			            // An empty name is an explicit "no active profile", which must be written
-			            // as an unset rather than left as the previous name.
-			            if (present(draft.backend.active) === undefined)
-			                writes.push({ path: ['systemOne', 'active'], value: undefined });
-			            else
-			                writes.push({ path: ['systemOne', 'active'], value: draft.backend.active.trim() });
+			            // as an *empty* activation rather than left as the previous name.
+			            //
+			            // The activation is written by `diffDraft`, not here (g-067): what to write
+			            // depends on what the *save* does to the rows, which one draft cannot say.
+			            // See the block there.
 			            for (const profile of draft.backend.profiles) {
 			                const name = profile.name.trim();
 			                // A row with no name cannot be addressed by a path, so it is not written
@@ -2919,6 +2923,49 @@ window.__ModuleLoader__.load({
 			        // ever carried, including `apiKey`, which the page cannot restate because
 			        // the Host never sent it. Field-by-field unsets would leave a key behind.
 			        ops.push({ op: 'unset', path: ['systemOne', 'profiles', oldName] });
+			    }
+			    // Removing the last row must not leave the section looking *fresh* (g-067).
+			    //
+			    // `applyPathOp` clears a path by rebuilding its parent, so `{profiles: {}}` is
+			    // what "every row removed" and "the document states nothing" both store — and
+			    // the second is exactly the document that gets the factory connection. Writing
+			    // the activation explicitly keeps the section stated: the reader then sees an
+			    // empty profile map with a deliberate empty activation, not an absent section.
+			    if (draft.backend.profiles.length === 0 && retiredProfileNames(original, draft).length > 0) {
+			        ops.push({ op: 'set', path: ['systemOne', 'active'], value: '' });
+			    }
+			    // ## The activation (g-067)
+			    //
+			    // A fresh document resolves to the factory connection, so the page drafts an
+			    // active row before anything on disk says so; writing that *display* value back
+			    // on every save would turn the factory default into a decision nobody made. The
+			    // value is therefore written only when the draft names an activation and the
+			    // document does not already say the same thing (`storedActive` is page state
+			    // the save never writes).
+			    //
+			    // Clearing the activation needs no write of its own: the page has no "switch
+			    // off" control, and every path that leaves `active` empty (renaming the active
+			    // row away, removing it) already writes the rows or retires them — and the
+			    // section stays stated by those writes. What must never happen is a lone
+			    // `unset systemOne.active`, which the Host rebuilds as `{}` — byte-identical
+			    // to the fresh document that gets the factory row back.
+			    const activationTarget = draft.backend.active.trim();
+			    const storedActivation = (original.backend.storedActive ?? '').trim();
+			    if (activationTarget.length > 0 && activationTarget !== storedActivation) {
+			        ops.push({ op: 'set', path: ['systemOne', 'active'], value: activationTarget });
+			        // A row that exists only because the schema defaulted it in is unknown to
+			        // `applyPathOp`, so a lone activation write would drop it; restating the
+			        // draft's rows keeps them. `apiKey` is deliberately never restated — the page
+			        // cannot know it, and clearing it is the explicit Clear action's job.
+			        for (const write of groupWrites(draft, 'backend')) {
+			            if (write.path[0] !== 'systemOne' || write.path[1] !== 'profiles')
+			                continue;
+			            if (write.path[write.path.length - 1] === 'apiKey')
+			                continue;
+			            if (write.value === undefined)
+			                continue;
+			            ops.push({ op: 'set', path: write.path, value: write.value });
+			        }
 			    }
 			    // The user layer this panel will replace. A group write is a whole-section
 			    // value, so anything already stored there under a sibling key would be deleted
