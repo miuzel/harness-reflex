@@ -81,6 +81,27 @@ OpenCode** 四个新宿主，并做了一次前置重构；五个宿主包与核
 - pi 需要 `>= 22.19.0`（根包为 `>= 18`）；其 `package.json` 的 `pi.extensions` 指向源码 `./src/index.ts`，
   即**发布会直接发 TypeScript 源码**，由 pi 自己加载。
 
+### DSH 插件：全新配置默认带一条可用的 JEV 官方连接（g-067）
+
+此前 DSH 插件装上后 System 1 后端是「未配置」：页面列表为空、什么都不连，用户得先手填一条连接。
+现在**全新的设置文档**出厂就带一条已经激活的连接：
+
+| 字段 | 出厂值 | 来源 |
+| --- | --- | --- |
+| 名称 | `JEV official` | 普通连接配置，和用户自己加的一条没有区别 |
+| URL | `https://api.typesafe.ai/v1/systemone` | 项目官方默认（`DEFAULT_SYSTEMONE_ENDPOINT`），不是另抄一份字面量 |
+| 模型 | `jev-latest` | 同上 |
+| 凭据 | 只写变量名 `JEV_API_KEY` | 密钥值永不写入设置文档 |
+
+它由 `Config` 的 schema 默认值提供，而 schemastery 的默认值**只在键缺失时生效**，所以「全新」与
+「用户说过话」的区分完全由这条规则决定：
+
+- **停用/删除**：删掉那一行、或改名换成自己的连接，文档里就有了 `systemOne` 块，默认值不再参与——不会被覆盖回来；
+- **没有 `JEV_API_KEY`**：点名即锁定（g-059），连接报「已点名但变量为空」且**不借用** `SYSTEM_ONE_API_KEY` /
+  `VLLM_API_KEY` / `OPENAI_API_KEY`，也不会偷偷回退到本地启发式 mock；
+- **显式清空**：页面从不把 `systemOne.active` 或最后一行写成「unset」——那会让 Host 把整段重建成 `{}`，
+  读起来又变回全新文档、把出厂行复活。清空一律写成显式空值。
+
 ### 升级说明（0.1.0 → 0.3.0）
 
 - **版本**：根包 `harness-reflex`、`dsh-harness-reflex`、`claude-reflex` 以及新增四包统一 `0.3.0`；
