@@ -27,7 +27,7 @@
  *
  * @module dsh-reflex/systemone-probe
  */
-import { resolveApiKeyWithSource, resolvedKeyOf } from './config.js';
+import { connectionImplementation, resolveApiKeyWithSource, resolvedKeyOf } from './config.js';
 import { normalizeSystemOneEndpoint } from './vendor/harness-reflex/backend/jev.js';
 
 /** Model the Jev gateway serves when nothing overrides it (mirrors the vendor backend). */
@@ -179,10 +179,18 @@ export function buildProbeRequest(
   target: ProbeTarget,
   env: Record<string, string | undefined> = process.env
 ): { spec: ProbeRequestSpec } | { status: ProbeStatus; detail: string } {
-  const backend = target.backend === 'auto' ? 'jev' : target.backend;
+  // The *runtime's* implementation resolver, not a second opinion (g-067 att-002):
+  // `auto` is decided from the environment by the vendored factory the runtime
+  // builds, so the probe asks that same precedence instead of assuming Jev. A
+  // hard-coded `auto → jev` here is how the test button once reported green on
+  // the official URL while the runtime dialled a vLLM endpoint.
+  const backend = connectionImplementation(target.backend, env);
   const timeoutMs = clampTimeout(target.timeoutMs);
   if (backend === 'mock') {
-    return { status: 'misconfigured', detail: 'this profile resolves to the mock backend: there is no remote endpoint to test' };
+    return {
+      status: 'misconfigured',
+      detail: `this profile resolves to the ${target.backend === 'mock' ? '' : 'auto-selected '}mock backend: there is no remote endpoint to test`
+    };
   }
   // A connection whose selected model cannot be sent is refused here, before the
   // key is read and long before any address is used: the runtime builds no
@@ -429,9 +437,10 @@ export async function probeSystemOne(target: ProbeTarget, options: ProbeOptions 
   // Everything the detail must never echo.
   const secrets = [target.apiKey, spec.authorization];
   const endpoint = safeUrl(spec.url);
-  // The same "auto means Jev" resolution `buildProbeRequest` applied, so the
-  // success-envelope check below looks for the protocol actually spoken.
-  const backend = target.backend === 'auto' ? 'jev' : target.backend;
+  // The implementation the request was actually built for (g-067 att-002): the
+  // success-envelope check below must look for the protocol that spec speaks, and
+  // a `mock` target never reaches this point.
+  const backend = connectionImplementation(target.backend, env) === 'vllm' ? 'vllm' : 'jev';
   // The model the request *carries*, read back out of the built body rather than
   // recomputed: a second `?? DEFAULT` here could name a model the spec does not
   // send (g-066 att-002).
@@ -459,7 +468,7 @@ export async function probeSystemOne(target: ProbeTarget, options: ProbeOptions 
       signal: controller.signal
     });
     const latencyMs = Math.max(0, Math.round(now() - started));
-    const classified = await classifyResponse(response, latencyMs, secrets, backend === 'vllm' ? 'vllm' : 'jev');
+    const classified = await classifyResponse(response, latencyMs, secrets, backend);
     return {
       ...classified,
       model,

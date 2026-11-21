@@ -11,7 +11,6 @@ import {
   SimpleJevDecisionBackend,
   StagnationDetector,
   ToolResultPruner,
-  createSystemOneBackend,
   scoreStatement
 } from './vendor/harness-reflex/index.js';
 import type {
@@ -35,7 +34,7 @@ import type {
   ResolvedSystemOneConfig,
   ResolvedToolsConfig
 } from './config.js';
-import { resolveApiKeyWithSource, resolvedKeyOf, resolveConfig, volatileSnapshots } from './config.js';
+import { connectionImplementation, resolveApiKeyWithSource, resolvedKeyOf, resolveConfig, volatileSnapshots } from './config.js';
 import { EffortInterceptor, EffortStatusFeed, type ReflexEffortStatus } from './effort.js';
 import type { DelegatedEffortInheritance } from './effort-delegation.js';
 import type { DelegationHealth } from './delegation-health.js';
@@ -1040,9 +1039,21 @@ export function createBackend(
     return new UnconfiguredBackend(config.systemOne.unconfigured);
   }
   const apiKey = resolvedKeyOf(resolveApiKeyWithSource(config.systemOne, env));
-  // `backend` is narrowed to the three network implementations by the guard
-  // above; the switch below covers exactly those.
-  switch (backend) {
+  // `auto` is resolved by the *one* function the connection test asks as well
+  // (g-067 att-002), so the runtime and the "Test" button can never describe two
+  // different transports for the same connection. Before this, `auto` here was
+  // a delegation to the vendored factory and `auto` there was a hard-coded Jev:
+  // with `SYSTEM_ONE_BACKEND=vllm` exported, the button went green on the
+  // official URL while this function built a request carrying the very same
+  // resolved key to a vLLM endpoint. The factory is still what `auto` *means* —
+  // `connectionImplementation` reads the same precedence it does — it is just no
+  // longer consulted twice.
+  const implementation = backend === 'auto' ? connectionImplementation('auto', env) : backend;
+  switch (implementation) {
+    case 'mock':
+      // The environment's `auto` answer is the in-process mock: it opens no
+      // socket, so nothing configured (or resolved) leaves this process.
+      return new MockDecisionBackend();
     case 'jev':
       return new JevDecisionBackend({
         ...(baseUrl === undefined ? {} : { baseUrl }),
@@ -1055,7 +1066,8 @@ export function createBackend(
         // backend only reads the environment when no explicit value is given.
         pruneJudgeMinChars: config.interventions.pruneJudgeMinChars
       });
-    case 'vllm':
+    default:
+      // `vllm`, and `auto` when the environment selected the logits backend.
       return new SimpleJevDecisionBackend({
         ...(baseUrl === undefined ? {} : { vllmBaseUrl: baseUrl }),
         ...(apiKey === undefined ? {} : { apiKey }),
@@ -1065,13 +1077,6 @@ export function createBackend(
         ...(model === undefined ? {} : { model }),
         ...(timeoutMs === undefined ? {} : { timeoutMs })
       });
-    default:
-      // `auto` (the DEFAULT backend) delegates to the vendored factory, which
-      // keeps choosing a provider from the environment but now takes the
-      // already-resolved credential instead of reading one of its own (g-059).
-      // Without this the lock would not hold on the default configuration —
-      // only a deployment that explicitly chose `jev`/`vllm` would be safe.
-      return createSystemOneBackend({ apiKeyResolved: true, ...(apiKey === undefined ? {} : { apiKey }) });
   }
 }
 

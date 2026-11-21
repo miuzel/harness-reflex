@@ -163,17 +163,37 @@ export const FACTORY_PROFILE_API_KEY_ENV = 'JEV_API_KEY';
  * `SYSTEM_ONE_API_KEY`, `VLLM_API_KEY` or `OPENAI_API_KEY` behind the owner's
  * back. Only the variable *name* is ever authored; the secret itself is never
  * written into a settings document by this row.
+ *
+ * ## The implementation is bound, not left to `auto` (g-067 att-002)
+ *
+ * The row pins `backend: 'jev'` rather than inheriting the top-level selector.
+ * An independent review blocked the first attempt for exactly this: with no
+ * `backend` on the row, a fresh deployment (top-level `backend: 'auto'`) had its
+ * implementation chosen from the *environment* on every build — `auto` delegates
+ * to the vendored factory, which reads `SYSTEM_ONE_BACKEND`/`REFLEX_BACKEND` and
+ * `VLLM_BASE_URL`/`OPENAI_BASE_URL`. Exporting two variables therefore took the
+ * already-resolved `JEV_API_KEY` and sent it as `Authorization` to a vLLM
+ * endpoint nobody configured, while the panel's connection test — which treats
+ * `auto` as Jev — still probed the official URL and reported green.
+ *
+ * So the factory row states all three of the facts a connection has: where
+ * (official URL), what model, and **which implementation speaks it**. The
+ * implementation is no longer something the environment can change underneath a
+ * connection the plugin shipped. This is a row-level binding, which is the
+ * documented precedence for every profile — not a top-level override: an
+ * authored row, and a deployment's own `backend` selector for authored rows,
+ * are untouched.
+ *
+ * An **explicit** top-level `mock` still answers in-process: a mock never opens
+ * a socket, so it cannot send the key anywhere, and `createBackend` honours it
+ * before any transport is built (see its mock branch). What the binding removes
+ * is the *implicit* `auto` route, which is the one the environment decided.
  */
 export const FACTORY_SYSTEMONE_PROFILE = Object.freeze({
   baseUrl: DEFAULT_SYSTEMONE_ENDPOINT,
   model: 'jev-latest',
-  apiKeyEnv: FACTORY_PROFILE_API_KEY_ENV
-  // Deliberately no `backend`: a factory *connection* names where to connect,
-  // not which implementation runs here. Pinning `jev` would overrule the
-  // deployment's own `backend` selector (a `mock` deployment would still open a
-  // gateway), while following it means the documented precedence keeps working —
-  // `auto` picks the implementation from the environment, and an explicit
-  // `mock`/`jev`/`vllm` is honoured exactly as it is for every authored row.
+  apiKeyEnv: FACTORY_PROFILE_API_KEY_ENV,
+  backend: 'jev'
 }) satisfies Readonly<ReflexSystemOneProfile>;
 
 /**
@@ -835,8 +855,9 @@ export const Config: Schemastery<any> = z.object({
   // `resolveSystemOneConfig` (g-067). Schemastery applies a default to a
   // top-level key the document omits, and a fresh profile omits it: its patch
   // file starts as `[]`, so the loader entry's config is `{}` and this key never
-  // appears. That is the only shape that gets the factory row from here — see
-  // `withFactoryProfile` for the one the schema cannot reach.
+  // appears. That is the only shape that gets the factory row from here: a
+  // document that *states* a `systemOne` block keeps it, which is what makes
+  // deactivation and deletion stick.
   //
   // It also puts the row where the Host settings form can see it: the form
   // projects the *resolved* config, so a default the schema never produces would
@@ -1171,6 +1192,10 @@ export function resolveSystemOneConfig(
   const modelIds = activeProfile.modelIds ?? [];
   const selectedModel = modelForProfile(activeProfile, modelIds);
   const modelSelectionBroken = selectedModel?.missing === true;
+  // The implementation this connection really runs (g-067 att-002), resolved by
+  // the precedence {@link connectionTarget} applies, so the runtime and the
+  // connection test cannot describe two different transports.
+  const implementationSelector = effectiveImplementation(selected, activeProfile.backend, activeProfile);
   // The timeout is already validated per profile (`resolveProfileEntry` runs on
   // every entry, the active one included), so this is a read, not a re-check: a
   // second copy of the predicate here would be a check nothing can reach, and
@@ -1178,10 +1203,12 @@ export function resolveSystemOneConfig(
   const timeoutMs = activeProfile.timeoutMs;
   // Which model the transport would *really* send (g-066 att-002), decided by
   // the one function the connection test reads as well.
-  const planned = plannedModel(modelIds, activeProfile.backend ?? selected, selectedModel);
+  const planned = plannedModel(modelIds, implementationSelector, selectedModel);
   const connection = {
     ...authoredShape,
-    backend: activeProfile.backend ?? selected,
+    // The selector this connection really runs under, *after* the spread so the
+    // authored top-level value cannot re-assert itself over the row's choice.
+    backend: implementationSelector,
     ...(activeProfile.baseUrl === undefined ? {} : { baseUrl: activeProfile.baseUrl }),
     ...(modelSelectionBroken || selectedModel?.model === undefined ? {} : { model: selectedModel.model }),
     ...(activeProfile.apiKeyEnv === undefined ? {} : { apiKeyEnv: activeProfile.apiKeyEnv }),
@@ -1583,7 +1610,10 @@ export function connectionTarget(
   profile: ResolvedSystemOneProfile
 ): ConnectionTarget {
   const baseUrl = optionalText(profile.baseUrl);
-  const backend = profile.backend ?? flat.backend ?? 'auto';
+  // The same rule {@link resolveSystemOneConfig} applies (g-067 att-002): one
+  // function, so the test button cannot describe a transport the runtime does
+  // not run — the divergence that got the first attempt blocked.
+  const backend = effectiveImplementation(flat.backend ?? 'auto', profile.backend, profile);
   const modelIds = profile.modelIds ?? [];
   const resolved = plannedModel(modelIds, backend, modelForProfile(profile, modelIds));
   const model = resolved.model === undefined ? undefined : optionalText(resolved.model);
@@ -1600,6 +1630,129 @@ export function connectionTarget(
     ...(apiKey === undefined ? {} : { apiKey }),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   };
+}
+
+/** The transport a connection resolves to: the three the plugin can build. */
+export type ConnectionImplementation = 'mock' | 'jev' | 'vllm';
+
+/**
+ * Which backend selector one active connection really runs under (g-067 att-002).
+ *
+ * One rule, asked by the resolved connection and by {@link connectionTarget}, so
+ * the runtime and the connection test cannot disagree about the transport.
+ *
+ * The long-standing precedence stands: **a row that names an implementation
+ * decides for itself**, and an unnamed row follows the top-level selector. What
+ * g-067 adds is a single, narrow exception — see {@link isShippedFactoryRow}.
+ *
+ * @param selected - the top-level selector.
+ * @param rowBackend - the profile's own `backend`, when it states one.
+ * @param profile - the profile, so the shipped factory row can be recognised.
+ * @returns the selector to resolve an implementation from.
+ */
+function effectiveImplementation(
+  selected: 'auto' | 'mock' | 'jev' | 'vllm',
+  rowBackend: 'auto' | 'mock' | 'jev' | 'vllm' | undefined,
+  profile: ResolvedSystemOneProfile
+): 'auto' | 'mock' | 'jev' | 'vllm' {
+  // The shipped factory row binds `jev` so the *environment* cannot redirect it —
+  // but that binding must not silently overrule a deployment that stated its own
+  // implementation. Two explicit top-level settings therefore still win over the
+  // shipped row, and only over it: an authored row keeps the usual precedence.
+  //
+  // - `mock` answers in-process and opens no socket, so honouring it cannot send
+  //   the connection's credential anywhere. Without this, `backend: mock` — the
+  //   setting every fixture in this package runs on — would dial the official
+  //   gateway with whatever key the chain resolved.
+  // - `vllm` asks the runtime to speak the logits protocol; leaving it on the
+  //   row's bound `jev` would answer in a protocol the deployment did not choose.
+  //   Its own endpoint is the row's, so nothing is reached that the connection
+  //   does not name.
+  //
+  // `jev` needs no exception (it is what the row already binds), and `auto` is
+  // precisely the case the binding exists to override.
+  if ((selected === 'mock' || selected === 'vllm') && rowBackend === 'jev' && isShippedFactoryRow(profile)) {
+    return selected;
+  }
+  return rowBackend ?? selected;
+}
+
+/**
+ * Whether one profile is the **unedited** shipped factory connection.
+ *
+ * The exception above must not leak to an authored row that merely resembles the
+ * factory one: a user who edited the address, the model or the key variable has
+ * stated their own connection, and the usual precedence must apply to it. Value
+ * equality is the only stable handle — schemastery materializes the default into
+ * a fresh object on every resolution.
+ *
+ * The model is read through {@link modelForProfile}, the rule every consumer of
+ * a profile's model uses, so the schema's legacy `model` beside an empty
+ * `modelIds` is recognised exactly like an explicit one-entry list.
+ *
+ * @param profile - a resolved profile.
+ * @returns true for the shipped factory row, unedited.
+ */
+function isShippedFactoryRow(profile: ResolvedSystemOneProfile): boolean {
+  const modelIds = profile.modelIds ?? [];
+  return (
+    profile.baseUrl === FACTORY_SYSTEMONE_PROFILE.baseUrl &&
+    profile.apiKeyEnv === FACTORY_SYSTEMONE_PROFILE.apiKeyEnv &&
+    profile.backend === FACTORY_SYSTEMONE_PROFILE.backend &&
+    modelForProfile(profile, modelIds).model === FACTORY_SYSTEMONE_PROFILE.model
+  );
+}
+
+/**
+ * The implementation a connection's backend selector really builds (g-067 att-002).
+ *
+ * The one place `auto` is turned into a concrete transport, asked by both ends
+ * of the same connection: {@link createBackend} builds from it, and the
+ * connection test probes with it. Any second derivation is a divergence waiting
+ * to happen — and one already happened: the probe hard-coded `auto → jev` while
+ * `auto` in the runtime delegated to the vendored factory, which reads the
+ * environment. Under `SYSTEM_ONE_BACKEND=vllm` the test button probed the
+ * official Jev URL and reported green while the runtime dialled a vLLM endpoint
+ * with the same key.
+ *
+ * `auto` is modelled exactly as far as it is deterministic: the vendored
+ * factory's own precedence, read from the environment —
+ *
+ * 1. an explicit `SYSTEM_ONE_BACKEND` / `REFLEX_BACKEND` selects that provider
+ *    (`jev`, or `vllm`/`simple-jev`/`logits` as the logits backend);
+ * 2. with no selector, a Jev credential (`SYSTEM_ONE_API_KEY` / `JEV_API_KEY`)
+ *    selects Jev, then a vLLM endpoint selects the logits backend;
+ * 3. anything else is the in-process mock.
+ *
+ * Note what this function does **not** do: it does not make `auto` safe. It
+ * makes the two halves honest about the same answer. A connection that must not
+ * follow the environment pins its own `backend` instead — which is what the
+ * factory row does ({@link FACTORY_SYSTEMONE_PROFILE}).
+ *
+ * The one deviation from the factory is deliberate: with a selector naming a
+ * provider, the factory's "any other name falls through to the mock" is kept,
+ * because that is what the runtime really builds — guessing Jev there would
+ * reintroduce the false green from the other side.
+ *
+ * @param selector - the connection's effective backend selector.
+ * @param env - the environment the `auto` factory would read.
+ * @returns the transport that would be built.
+ */
+export function connectionImplementation(
+  selector: string,
+  env: Record<string, string | undefined> = process.env
+): ConnectionImplementation {
+  if (selector === 'mock') return 'mock';
+  if (selector === 'jev') return 'jev';
+  if (selector === 'vllm') return 'vllm';
+  // `auto` (and anything unexpected reaching here): the factory's own order.
+  const provider = (env.SYSTEM_ONE_BACKEND ?? env.REFLEX_BACKEND ?? '').trim().toLowerCase();
+  if (provider === 'jev') return 'jev';
+  if (provider === 'vllm' || provider === 'simple-jev' || provider === 'logits') return 'vllm';
+  if (provider.length > 0) return 'mock';
+  if (env.SYSTEM_ONE_API_KEY || env.JEV_API_KEY) return 'jev';
+  if (env.VLLM_BASE_URL || env.OPENAI_BASE_URL) return 'vllm';
+  return 'mock';
 }
 
 /**

@@ -28,6 +28,7 @@ import test from 'node:test';
 import {
   Config,
   FACTORY_PROFILE_API_KEY_ENV,
+  connectionTarget,
   FACTORY_PROFILE_NAME,
   FACTORY_SYSTEMONE_PROFILE,
   plainConfig,
@@ -38,6 +39,7 @@ import {
 } from './config.js';
 import { createBackend } from './bridge.js';
 import { UnconfiguredBackend } from './unconfigured-backend.js';
+import { buildProbeRequest, probeSystemOne } from './systemone-probe.js';
 import { DEFAULT_SYSTEMONE_ENDPOINT } from './vendor/harness-reflex/backend/jev.js';
 
 //#region helpers
@@ -126,9 +128,11 @@ test('the factory connection uses the project constants, not a second copy of th
   assert.match(String(FACTORY_SYSTEMONE_PROFILE.baseUrl), /^https:\/\/api\.typesafe\.ai\/v1\/systemone$/);
   assert.equal(FACTORY_SYSTEMONE_PROFILE.model, 'jev-latest');
   assert.equal(FACTORY_SYSTEMONE_PROFILE.apiKeyEnv, 'JEV_API_KEY');
-  // A connection states where to connect, not which implementation runs: no
-  // `backend` is pinned, so a deployment's own selector still decides.
-  assert.equal('backend' in FACTORY_SYSTEMONE_PROFILE, false, 'the factory row must not overrule the deployment backend');
+  // The implementation is bound too (g-067 att-002). Leaving it to `auto` is what
+  // the review blocked: `auto` delegates to a factory that reads
+  // `SYSTEM_ONE_BACKEND`, so exporting one variable moved the connection's key to
+  // a vLLM endpoint while the test button still probed the official one.
+  assert.equal(FACTORY_SYSTEMONE_PROFILE.backend, 'jev', 'the factory row must bind the implementation it names');
   // The secret slot is never authored: only the variable *name* is.
   assert.equal('apiKey' in FACTORY_SYSTEMONE_PROFILE, false, 'the factory row must never carry a key');
 });
@@ -140,8 +144,8 @@ test('the factory row is a plain profile, so the panel can edit it like any othe
   assert.equal(view.baseUrl, DEFAULT_SYSTEMONE_ENDPOINT);
   assert.deepEqual(view.modelIds, ['jev-latest']);
   assert.equal(view.apiKeyEnv, 'JEV_API_KEY');
-  // No `backend` override: the top-level selector decides.
-  assert.equal(view.backend, undefined);
+  // The row states its own implementation, exactly like an authored one would.
+  assert.equal(view.backend, 'jev');
 });
 
 //#endregion
@@ -294,6 +298,208 @@ test('an explicitly empty document builds no transport, even with a gateway expo
     const answer = await backend.choice({ question: 'ship it?', options: ['yes', 'no'] });
     assert.ok(answer.bestOption.length > 0, 'the local fallback answered nothing');
   });
+});
+
+//#endregion
+
+//#region the factory connection cannot be redirected by the environment (att-002)
+
+/**
+ * A stub transport: records every request, answers nothing real.
+ *
+ * The point of this region is that **no** request may leave the process with the
+ * JEV key, so the assertions are made against a `fetch` that never reaches a
+ * socket. Reaching the network would make the test pass or fail for reasons that
+ * have nothing to do with the code under test.
+ */
+function recordingFetch(): { fetch: typeof fetch; calls: Array<{ url: string; headers: Record<string, string>; body: string }> } {
+  const calls: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+  const impl = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = Object.fromEntries(new Headers(init?.headers ?? {}).entries());
+    calls.push({ url, headers, body: String(init?.body ?? '') });
+    // A well-formed response so a caller that awaits a decision completes; its
+    // content is irrelevant, because every assertion is about *where* the request
+    // went and *what* it carried.
+    return new Response(JSON.stringify({ answers: { choice: { probabilities: { yes: 0.9, no: 0.1 } } } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }) as typeof fetch;
+  return { fetch: impl, calls };
+}
+
+/** The environment that used to take the factory connection's key elsewhere. */
+const REDIRECTING_ENV = {
+  SYSTEM_ONE_BACKEND: 'vllm',
+  REFLEX_BACKEND: 'vllm',
+  VLLM_BASE_URL: 'http://attacker-openai:8000',
+  OPENAI_BASE_URL: 'http://attacker-openai:8000',
+  SYSTEM_ONE_BASE_URL: 'http://attacker-system-one:9000'
+} as const;
+
+test('a fresh document keeps its key on the official endpoint under a redirecting environment', async () => {
+  // The exact scenario the independent review captured as a key leak: a fresh
+  // document, `JEV_API_KEY` exported, and `SYSTEM_ONE_BACKEND=vllm` with a vLLM
+  // base URL. Before the fix the runtime built the logits backend and sent
+  // `Authorization: Bearer <JEV key>` to `http://attacker-openai:8000/v1/completions`.
+  await withEnv({ ...REDIRECTING_ENV, JEV_API_KEY: 'sk-jev-must-stay-home' }, async () => {
+    const config = resolveConfig({});
+    const backend = createBackend(config);
+    assert.equal(backend.name, 'system-one-jev', `the factory row must bind its implementation, got ${backend.name}`);
+
+    const { fetch: stub, calls } = recordingFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stub;
+    try {
+      await backend.choice({ question: 'ship it?', options: ['yes', 'no'] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(calls.length, 1, `exactly one request may be sent, got ${JSON.stringify(calls.map((call) => call.url))}`);
+    const [call] = calls;
+    assert.equal(call!.url, DEFAULT_SYSTEMONE_ENDPOINT, `the official endpoint only, got ${call!.url}`);
+    assert.equal(call!.headers.authorization, 'Bearer sk-jev-must-stay-home', 'the key reaches its own gateway');
+    // And nowhere else: the stub is the only transport, so any other URL would
+    // have been recorded above. This asserts the environment left no trace.
+    for (const call of calls) {
+      assert.equal(
+        /attacker-openai|attacker-system-one/.test(call.url),
+        false,
+        `a request reached a redirecting endpoint: ${call.url}`
+      );
+    }
+  });
+});
+
+test('a fresh document never builds the logits backend, whatever the environment says', async () => {
+  // The implementation is a property of the connection, not of the process.
+  const cases = [
+    { SYSTEM_ONE_BACKEND: 'vllm' },
+    { REFLEX_BACKEND: 'simple-jev' },
+    { SYSTEM_ONE_BACKEND: 'logits' },
+    { VLLM_BASE_URL: 'http://attacker-openai:8000' },
+    { OPENAI_BASE_URL: 'http://attacker-openai:8000' }
+  ] as const;
+  for (const extra of cases) {
+    await withEnv({ ...extra, JEV_API_KEY: 'sk-jev-must-stay-home' }, () => {
+      const backend = createBackend(resolveConfig({}));
+      assert.equal(backend.name, 'system-one-jev', `${JSON.stringify(extra)} must not move the factory connection`);
+    });
+  }
+});
+
+test('a fresh document with no JEV_API_KEY is keyless, and still points at the official endpoint', async () => {
+  // The lock survives the binding: no other variable may supply the credential,
+  // and the address is still the official one (so a 401 is the honest answer).
+  await withEnv({ ...REDIRECTING_ENV, SYSTEM_ONE_API_KEY: 'sk-borrowed-must-not-be-sent' }, async () => {
+    const backend = createBackend(resolveConfig({}));
+    assert.equal(backend.name, 'system-one-jev');
+    const { fetch: stub, calls } = recordingFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stub;
+    try {
+      await backend.choice({ question: 'ship it?', options: ['yes', 'no'] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const [call] = calls;
+    assert.equal(call!.url, DEFAULT_SYSTEMONE_ENDPOINT);
+    assert.equal(call!.headers.authorization, undefined, 'no other variable may stand in for JEV_API_KEY');
+  });
+});
+
+test('the connection test probes exactly what the runtime runs, under a redirecting environment', async () => {
+  // The second half of the block: the test button said "ok" on the official URL
+  // while the runtime dialled vLLM. Both ends now answer from one resolver.
+  await withEnv({ ...REDIRECTING_ENV, JEV_API_KEY: 'sk-jev-must-stay-home' }, async () => {
+    const config = resolveConfig({});
+    const backend = createBackend(config);
+    const target = connectionTarget(config.systemOne, FACTORY_PROFILE_NAME, config.systemOne.profiles![FACTORY_PROFILE_NAME]!);
+    assert.equal(target.backend, 'jev', 'the probe must treat the factory row as Jev, as the runtime does');
+
+    const { fetch: stub, calls } = recordingFetch();
+    const probe = await probeSystemOne(target, { env: process.env, fetch: stub });
+    assert.equal(probe.ok, true, `the probe reached its stub: ${JSON.stringify(probe)}`);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, DEFAULT_SYSTEMONE_ENDPOINT, `the probe must test the runtime endpoint, got ${calls[0]!.url}`);
+    assert.equal(
+      (backend as unknown as { endpoint?: string }).endpoint,
+      calls[0]!.url,
+      'the probed endpoint is the built transport endpoint, byte for byte'
+    );
+  });
+});
+
+test('the probe and the runtime resolve an `auto` row to the same implementation', async () => {
+  // The precise divergence the review captured: an `auto` connection (a user's own
+  // row that does not bind an implementation) under an environment that selects
+  // vLLM. The runtime must follow the environment — that is what `auto` means —
+  // and the probe must follow it to the *same* place. Hard-coding `auto -> jev` in
+  // the probe is what made the test button green while the runtime dialled
+  // elsewhere. This test fails if either end derives `auto` on its own.
+  await withEnv({ ...REDIRECTING_ENV, JEV_API_KEY: 'sk-jev-must-stay-home' }, async () => {
+    const config = resolveConfig({
+      backend: 'auto',
+      systemOne: { active: 'mine', profiles: { mine: { baseUrl: 'http://mine-gateway:8080', model: 'my-model', apiKeyEnv: 'JEV_API_KEY' } } }
+    });
+    assert.equal(config.systemOne.backend, 'auto', 'the row names no implementation, so the selector decides');
+    const backend = createBackend(config);
+    assert.equal(backend.name, 'system-one-logits', 'the runtime follows the environment for `auto`');
+
+    const target = connectionTarget(config.systemOne, 'mine', config.systemOne.profiles!.mine!);
+    const built = buildProbeRequest(target, process.env);
+    assert.ok('spec' in built, `the probe could build a request: ${JSON.stringify(built)}`);
+    assert.equal(
+      built.spec.url,
+      'http://mine-gateway:8080/v1/completions',
+      'the probe must speak the protocol the runtime speaks (logits), not Jev'
+    );
+  });
+});
+
+test('a mock deployment answers in-process even though the factory row is active', async () => {
+  // The factory row binds `jev`, and every fixture in this package runs on
+  // `backend: mock`. The binding must not turn "answer locally" into a live call.
+  await withEnv({ JEV_API_KEY: 'sk-jev-must-stay-home' }, async () => {
+    const backend = createBackend(resolveConfig({ backend: 'mock' }));
+    assert.equal(backend.name, 'mock-heuristic-v1');
+    const { fetch: stub, calls } = recordingFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stub;
+    try {
+      const answer = await backend.choice({ question: 'ship it?', options: ['yes', 'no'] });
+      assert.ok(answer.bestOption.length > 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(calls.length, 0, 'a mock sends nothing, ever');
+  });
+});
+
+test('the row precedence an authored row already had is unchanged', () => {
+  // The narrow exception above must not become a general reordering: a row that
+  // names its implementation still wins, exactly as before g-067.
+  const rowWins = resolveSystemOneConfig('jev', {
+    active: 'local',
+    profiles: { local: { backend: 'vllm', baseUrl: 'http://127.0.0.1:8000' } }
+  });
+  assert.equal(rowWins.backend, 'vllm', 'an authored row still decides its own implementation');
+  const underAuto = resolveSystemOneConfig('auto', { active: 'local', profiles: { local: { backend: 'vllm' } } });
+  assert.equal(underAuto.backend, 'vllm');
+});
+
+test('an edited factory-shaped row keeps the usual precedence, not the shipped exception', () => {
+  // The exception is keyed to the *unedited* shipped row. A user who repointed it
+  // has stated their own connection, and `mock` must not silently swallow it.
+  const edited = resolveSystemOneConfig('mock', {
+    active: FACTORY_PROFILE_NAME,
+    profiles: {
+      [FACTORY_PROFILE_NAME]: { baseUrl: 'http://my-own-gateway', model: 'jev-latest', apiKeyEnv: 'JEV_API_KEY', backend: 'jev' }
+    }
+  });
+  assert.equal(edited.backend, 'jev', 'an edited row is not the shipped row');
 });
 
 //#endregion

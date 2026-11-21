@@ -91,7 +91,14 @@ OpenCode** 四个新宿主，并做了一次前置重构；五个宿主包与核
 | 名称 | `JEV official` | 普通连接配置，和用户自己加的一条没有区别 |
 | URL | `https://api.typesafe.ai/v1/systemone` | 项目官方默认（`DEFAULT_SYSTEMONE_ENDPOINT`），不是另抄一份字面量 |
 | 模型 | `jev-latest` | 同上 |
+| 实现 | 显式绑定 `jev` | 不由 `auto` 按环境变量挑选 |
 | 凭据 | 只写变量名 `JEV_API_KEY` | 密钥值永不写入设置文档 |
+
+「实现」这一行是独立评审阻塞后的修正：只写 URL 不够。`auto` 会交给 vendored factory，而它按
+`SYSTEM_ONE_BACKEND` / `REFLEX_BACKEND` 和 `VLLM_BASE_URL` / `OPENAI_BASE_URL` 挑实现——导出两个环境变量，
+出厂连接就会把 `JEV_API_KEY` 发到一个没人配置过的 vLLM 地址，而页面的「测试连接」仍测官方 URL、显示绿灯。
+现在出厂连接自带实现选择，环境无法改道；「测试连接」与运行时也改用同一个实现解析（`auto` 才读环境），
+两者不会再各说各话。顶层显式 `mock` / `vllm` 仍然生效：前者只在进程内作答、不开 socket，后者只说协议。
 
 它由 `Config` 的 schema 默认值提供，而 schemastery 的默认值**只在键缺失时生效**，所以「全新」与
 「用户说过话」的区分完全由这条规则决定：

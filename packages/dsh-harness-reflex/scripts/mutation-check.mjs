@@ -1109,8 +1109,36 @@ const MUTATIONS = [
     name: 'auto-backend-forgets-the-resolved-key',
     area: 'the default `auto` backend honours the locked lookup (g-059)',
     file: 'src/bridge.ts',
-    from: '      return createSystemOneBackend({ apiKeyResolved: true, ...(apiKey === undefined ? {} : { apiKey }) });',
-    to: '      return createSystemOneBackend();'
+    from: '        ...(apiKey === undefined ? {} : { apiKey }),\n        // The chain above is the whole chain: no second read behind its back.\n        apiKeyResolved: true,',
+    to: '        // The chain above is the whole chain: no second read behind its back.\n        apiKeyResolved: true,'
+  },
+  {
+    // g-067 att-002, the blocking defect itself: the shipped factory row must bind
+    // its implementation. Without `backend` a fresh document resolves to `auto`,
+    // which reads the environment — the key leak the review captured.
+    name: 'factory-row-does-not-bind-its-implementation',
+    area: 'the factory connection cannot be redirected by the environment (g-067 att-002)',
+    file: 'src/config.ts',
+    from: "  apiKeyEnv: FACTORY_PROFILE_API_KEY_ENV,\n  backend: 'jev'\n}) satisfies Readonly<ReflexSystemOneProfile>;",
+    to: "  apiKeyEnv: FACTORY_PROFILE_API_KEY_ENV\n}) satisfies Readonly<ReflexSystemOneProfile>;"
+  },
+  {
+    // The test button must ask the same resolver as the runtime. Pinning it back
+    // to "auto means Jev" is the false green the review found.
+    name: 'probe-hardcodes-auto-as-jev',
+    area: 'the connection test probes what the runtime runs (g-067 att-002)',
+    file: 'src/systemone-probe.ts',
+    from: '  const backend = connectionImplementation(target.backend, env);',
+    to: "  const backend = target.backend === 'auto' ? 'jev' : target.backend;"
+  },
+  {
+    // An explicit top-level `mock` must keep meaning "answer in-process": the
+    // factory row's bound `jev` otherwise turns local deployments into live calls.
+    name: 'factory-binding-overrules-an-explicit-mock',
+    area: 'an explicit mock deployment still answers in-process (g-067 att-002)',
+    file: 'src/config.ts',
+    from: "  if ((selected === 'mock' || selected === 'vllm') && rowBackend === 'jev' && isShippedFactoryRow(profile)) {",
+    to: "  if (false && (selected === 'mock' || selected === 'vllm') && rowBackend === 'jev' && isShippedFactoryRow(profile)) {"
   },
   {
     // The factory must not re-read the environment for the key once the caller
