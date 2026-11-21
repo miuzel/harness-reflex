@@ -982,3 +982,49 @@ test('a probe that throws becomes a classified failure, not a 500', async () => 
   assert.equal(body.status, 'bad-response');
   assert.equal(JSON.stringify(body).includes(SECRET), false, 'a thrown message is redacted at the boundary too');
 });
+
+test('the panel ledger row carries the System One connection, requested model and source, and marks the model a request', () => {
+  // BLOCK-5. The first attempt projected nothing onto the Web ledger, so the
+  // panel's "recent decisions" table could not show which connection answered
+  // or whether the answer was remote at all. The row is the wire shape the page
+  // renders from, so asserting on it pins the rendering contract.
+  const entries = [
+    {
+      id: 'ref_1',
+      timestamp: '2026-11-21T12:00:00.000Z',
+      type: 'choice' as const,
+      backend: 'system-one-jev',
+      latencyMs: 3,
+      details: { systemOneConnection: 'gw', systemOneModel: 'sys-one-a', systemOneSource: 'remote' }
+    },
+    {
+      id: 'ref_2',
+      timestamp: '2026-11-21T12:00:01.000Z',
+      type: 'gate' as const,
+      backend: 'system-one-jev',
+      latencyMs: 0,
+      passed: false,
+      details: { systemOneConnection: 'gw', systemOneModel: 'sys-one-a', systemOneSource: 'rejected', systemOneDetail: 'fetch failed' }
+    },
+    {
+      id: 'ref_3',
+      timestamp: '2026-11-21T12:00:02.000Z',
+      type: 'prune' as const,
+      backend: 'mock-heuristic-v1',
+      latencyMs: 1,
+      // An entry written before g-068 carries no provenance at all.
+      details: {}
+    }
+  ];
+  const snapshot = buildPanelSnapshot(
+    facts(0, { ledger: { getSummary: () => SUMMARY, getEntries: () => entries, getLogPath: () => null } })
+  );
+  const rows = snapshot.ledger.recent;
+  assert.equal(rows[0]?.systemOneConnection, 'gw');
+  assert.equal(rows[0]?.systemOneModel, 'sys-one-a', 'the row carries the requested model');
+  assert.equal(rows[0]?.systemOneSource, 'remote');
+  assert.equal(rows[1]?.systemOneSource, 'rejected', 'a rejection is projected as a rejection');
+  assert.equal(rows[1]?.systemOneDetail, 'fetch failed', 'the reason travels with it');
+  assert.equal(rows[2]?.systemOneConnection, undefined, 'a legacy entry is given no connection it never recorded');
+  assert.equal(rows[2]?.systemOneSource, undefined);
+});
