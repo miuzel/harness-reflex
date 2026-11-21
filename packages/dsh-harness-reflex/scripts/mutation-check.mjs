@@ -83,7 +83,16 @@ const testGlob = path.posix.join('dist', '**', '*.test.js');
  * No test was deleted: the two survivors assert the row is still never written
  * *and* is now refused with the row number.
  */
-const EXPECTED_TESTS = 735;
+/**
+ * Lower bound on the plugin suite's size; the run is refused below it, so a
+ * loader bug that silently executes nothing cannot pass for a green baseline.
+ *
+ * g-068 (att-002) raised the observed count to 780 with five tests that pin
+ * per-call attribution under overlapping calls, the append-only ledger, the
+ * vLLM "no evidence means unknown" rule and the panel projection. The floor
+ * follows the real count so the comment no longer drifts from the suite.
+ */
+const EXPECTED_TESTS = 780;
 
 /** Each fault targets one acceptance area of the goal. */
 const MUTATIONS = [
