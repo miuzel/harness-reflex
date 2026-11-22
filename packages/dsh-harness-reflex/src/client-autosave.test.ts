@@ -833,6 +833,144 @@ test('choosing a model with no other local edit writes exactly that one path', a
 
 //#endregion
 
+//#region activating a connection is a write (g-069 att-006)
+
+/**
+ * The authored document with a *second* connection the user can activate.
+ *
+ * Activation is only a change when there is another row to point `active` at,
+ * so the reported flow needs a real choice. `secondary` differs from `primary`
+ * in every field so a diff of the two rows is unambiguous.
+ */
+const TWO_PROFILES: Record<string, any> = {
+  ...JSON.parse(JSON.stringify(AUTHORED)),
+  systemOne: {
+    active: 'primary',
+    profiles: {
+      primary: { baseUrl: 'http://a.example/v1', modelIds: ['jev-latest'], timeoutMs: 4000 },
+      secondary: { baseUrl: 'http://b.example/v1', modelIds: ['other-latest'], timeoutMs: 5000 }
+    }
+  }
+};
+
+/** The page identity of one row, by name. */
+function rowId(store: AnyStore, name: string): string {
+  const row = store.getState().draft.backend.profiles.find((candidate: any) => candidate.name === name);
+  assert.ok(row !== undefined, `no row named ${name}`);
+  return row.id as string;
+}
+
+/** The activation the Host's document holds. */
+function hostActive(form: ReturnType<typeof makeForm>): unknown {
+  return JSON.parse(JSON.stringify(storedDocument(form).value.systemOne?.active));
+}
+
+test('activating another connection is written, and survives an immediate close and reopen', async () => {
+  // The user's report against att-005: activate another connection, close the
+  // dialog at once, reopen it — the old connection is still active. The root
+  // cause was that `dirtyGroups` compared group writes only, and the activation
+  // is deliberately not a group write (g-067), so a page whose *only* edit was an
+  // activation read as clean: the queue's no-op rule dropped the write before
+  // `diffDraft` — which does emit `set systemOne.active` — ever ran.
+  const ns = namespace('activate-close-reopen');
+  const { store, form } = makeStore({ namespace: ns, value: TWO_PROFILES });
+  await settle();
+  assert.equal(hostActive(form), 'primary', 'the fixture does not start with primary active');
+
+  const gate = form.hold();
+  assert.equal(store.setActiveProfile(rowId(store, 'secondary')), true, 'the row could not be activated');
+  await settle();
+  assert.equal(form.writes.length, 1, 'activating a connection did not start a write');
+
+  // The dialog is closed while that write is still in flight, then reopened.
+  store.dispose();
+  const reopened = makeStore({ namespace: ns, form });
+  await settle();
+  gate.release();
+  await settle();
+
+  assert.equal(hostActive(form), 'secondary', 'the Host still holds the old connection after activation');
+  assert.equal(reopened.store.getState().draft.backend.active, 'secondary', 'the reopened page shows the old connection active');
+
+  // A *fresh* settings store — the dialog opened again later — must see it too,
+  // which is what "persisted" means; an optimistic draft would not satisfy this.
+  reopened.store.dispose();
+  const again = makeStore({ namespace: ns, form });
+  await settle();
+  assert.equal(again.store.getState().draft.backend.active, 'secondary', 'a fresh page does not read the activated connection back');
+  assert.equal(again.store.getState().draft.backend.storedActive, 'secondary', 'the fresh page read the activation from its own draft, not the document');
+  again.store.dispose();
+});
+
+test('an activation alone writes `systemOne.active` and nothing else', async () => {
+  // Precision is the other half of the report: the fix must not turn "activating a
+  // connection" into a rewrite of the connection block. `setActiveProfile` changes
+  // the activation and no row field, so the write is that one path — plus the
+  // rows the diff restates *because* a lone activation write would otherwise drop
+  // a schema-defaulted row. Here both rows are authored, so nothing needs restating.
+  const ns = namespace('activate-precision');
+  const { store, form } = makeStore({ namespace: ns, value: TWO_PROFILES });
+  await settle();
+  store.setActiveProfile(rowId(store, 'secondary'));
+  await settle();
+  assert.equal(form.writes.length, 1, 'activating a connection did not write');
+  const paths = pathsOf(form.writes[0]);
+  assert.ok(paths.includes('systemOne.active'), `the write does not name the activation: ${paths.join(',')}`);
+  const rowPaths = paths.filter((path) => path.startsWith('systemOne.profiles.'));
+  // The rows may be restated (see `diffDraft`), but only with what the document
+  // already holds: no authored field may change value.
+  const host = storedDocument(form).value;
+  assert.equal(host.systemOne.profiles.primary.baseUrl, 'http://a.example/v1', 'the activation rewrote the un-activated row');
+  assert.equal(host.systemOne.profiles.secondary.baseUrl, 'http://b.example/v1', 'the activation rewrote the activated row');
+  assert.deepEqual(host.systemOne.profiles.secondary.modelIds, ['other-latest'], 'the activation changed a model list');
+  for (const path of rowPaths) {
+    assert.ok(
+      path.startsWith('systemOne.profiles.primary.') || path.startsWith('systemOne.profiles.secondary.'),
+      `the activation wrote a path outside the rows: ${path}`
+    );
+  }
+  store.dispose();
+});
+
+test('re-activating the connection the document already holds is not a write', async () => {
+  // The no-op rule still holds where it should: an activation that names what the
+  // Host already holds must not write. This is the guard against "fix it by always
+  // writing the activation", which would rewrite the document on every click of
+  // the row that is already active.
+  const ns = namespace('activate-noop');
+  const { store, form } = makeStore({ namespace: ns, value: TWO_PROFILES });
+  await settle();
+  assert.equal(store.setActiveProfile(rowId(store, 'primary')), true, 'clicking the active row was refused');
+  await settle();
+  assert.equal(form.writes.length, 0, 'activating the connection already in force wrote to the Host');
+  assert.equal(store.getState().autosave.phase, 'idle', 'a no-op activation reported a write');
+  store.dispose();
+});
+
+test('a resolved factory activation nobody chose is not written', async () => {
+  // g-067's rule has to survive the fix: a fresh document resolves to the factory
+  // connection, so the page drafts it as active without anything on disk saying
+  // so. That is a *display* value, and the dirty measure must not start reporting
+  // it as an unsaved edit — otherwise every unrelated save would turn the factory
+  // default into an authored decision.
+  const ns = namespace('activate-factory');
+  // No `systemOne` at all: the schema default supplies the factory row.
+  const fresh = { backend: 'jev', toolPrefix: 'reflex_', routing: { enabled: true, virtualProvider: 'reflex', models: {} } };
+  const { store, form } = makeStore({ namespace: ns, value: fresh });
+  await settle();
+  const state = store.getState();
+  assert.equal(state.draft.backend.active, state.original.backend.active, 'the page invented an activation in its draft');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(panelModule.dirtyGroups(state.original, state.draft))),
+    [],
+    'a freshly seeded page reads its own resolved activation as an unsaved edit'
+  );
+  assert.equal(form.writes.length, 0, 'a freshly seeded page wrote on mount');
+  store.dispose();
+});
+
+//#endregion
+
 //#region the Host moves while a draft is unsaved
 
 /**

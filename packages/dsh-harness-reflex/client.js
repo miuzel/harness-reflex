@@ -2241,6 +2241,7 @@ window.__ModuleLoader__.load({
 			exports.retiredProfileNames = retiredProfileNames;
 			exports.diffDraft = diffDraft;
 			exports.withPreservedSiblings = withPreservedSiblings;
+			exports.activationChanged = activationChanged;
 			exports.dirtyGroups = dirtyGroups;
 			exports.addPool = addPool;
 			exports.removePool = removePool;
@@ -3532,8 +3533,7 @@ window.__ModuleLoader__.load({
 			    // `unset systemOne.active`, which the Host rebuilds as `{}` — byte-identical
 			    // to the fresh document that gets the factory row back.
 			    const activationTarget = draft.backend.active.trim();
-			    const storedActivation = (original.backend.storedActive ?? '').trim();
-			    if (activationTarget.length > 0 && activationTarget !== storedActivation) {
+			    if (activationChanged(original, draft)) {
 			        ops.push({ op: 'set', path: ['systemOne', 'active'], value: activationTarget });
 			        // A row that exists only because the schema defaulted it in is unknown to
 			        // `applyPathOp`, so a lone activation write would drop it; restating the
@@ -3616,9 +3616,40 @@ window.__ModuleLoader__.load({
 			        return write;
 			    return { ...write, value: { ...preserved, ...written } };
 			}
+			/**
+			 * Whether two drafts name different activations, by the rule {@link diffDraft}
+			 * writes them under (g-069, att-006).
+			 *
+			 * The activation is deliberately absent from {@link groupWrites} — whether to
+			 * write it depends on what the *save* does, which one draft cannot say (g-067),
+			 * and `client-profiles.test.ts` pins that absence. Comparing group writes alone
+			 * therefore read a page whose only edit was an activation as **clean**, and the
+			 * autosave queue's no-op rule dropped the write before `diffDraft` ever ran:
+			 * activating another connection did nothing, the Host kept the old one, and a
+			 * closed-and-reopened dialog showed the old connection active — the user's
+			 * report against att-005.
+			 *
+			 * This restates exactly `diffDraft`'s activation predicate — a non-empty target
+			 * that differs from the document's own name — so the two can never disagree: a
+			 * resolved factory default that nobody touched is still not a change.
+			 * @param original - the draft seeded from the Host.
+			 * @param draft - the edited draft.
+			 * @returns whether the chosen activation is one the Host does not hold.
+			 */
+			function activationChanged(original, draft) {
+			    const target = draft.backend.active.trim();
+			    return target.length > 0 && target !== (original.backend.storedActive ?? '').trim();
+			}
 			/** Which groups of a draft differ from the seeded original. */
 			function dirtyGroups(original, draft) {
-			    return exports.DRAFT_GROUPS.filter((group) => !sameValue(groupWrites(original, group), groupWrites(draft, group)));
+			    const dirty = exports.DRAFT_GROUPS.filter((group) => !sameValue(groupWrites(original, group), groupWrites(draft, group)));
+			    // The activation is not one of the group writes (see `activationChanged`), so an
+			    // edit that only re-points it has to be reported here or "the page is dirty" and
+			    // "there is something to write" disagree — and autosave, which trusts the first,
+			    // never writes.
+			    if (dirty.includes('backend'))
+			        return dirty;
+			    return activationChanged(original, draft) ? [...dirty, 'backend'] : dirty;
 			}
 			/** Append an empty virtual model to a draft. */
 			function addPool(pools, modelId = '') {
