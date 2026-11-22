@@ -160,6 +160,7 @@ function makeForm(
   writes: Write[];
   /** Replace the document and notify. */
   push(next: unknown): void;
+  setWritable(writable: boolean): void;
   /** Hold the next write open until the returned handle releases or rejects it. */
   hold(): { release: (accept?: boolean) => void; reject: (error: unknown) => void };
 } {
@@ -193,6 +194,10 @@ function makeForm(
     writes,
     push: (next: unknown) => {
       snapshot = { ...snapshot, value: next, revision: Number(snapshot.revision ?? 0) + 1 };
+      for (const listener of [...listeners]) listener();
+    },
+    setWritable: (writable) => {
+      snapshot = { ...snapshot, writable };
       for (const listener of [...listeners]) listener();
     },
     hold: () => {
@@ -307,6 +312,28 @@ function typePrefix(store: AnyStore, value: string): void {
 function rowModelIds(store: AnyStore): string {
   return String(store.getState().draft.backend.profiles[0]?.modelIds ?? '');
 }
+
+test('queued autosave does not mutate after the form becomes read-only', async () => {
+  const { store, form, clock } = makeStore({ namespace: namespace('read-only-before-drain') });
+  try {
+    assert.equal(store.getState().writable, true);
+    typePrefix(store, 'read_only_probe_');
+    assert.equal(toolPrefix(store), 'read_only_probe_');
+    assert.equal(clock.armed().length, 1, 'the writable edit must queue a debounce');
+    assert.equal(form.writes.length, 0, 'the edit wrote before its pause');
+
+    // Flip only capability without changing the document or its revision. The
+    // queued entry still carries writable=true, so the live write fence matters.
+    form.setWritable(false);
+    assert.equal(store.getState().writable, false);
+    assert.equal(clock.armed().length, 1, 'the debounce must still reach the live write fence');
+    clock.fireLast();
+    await settle();
+    assert.equal(form.writes.length, 0, 'queued autosave called mutate on a read-only form');
+  } finally {
+    store.dispose();
+  }
+});
 
 //#region a decision writes at once, typing coalesces
 

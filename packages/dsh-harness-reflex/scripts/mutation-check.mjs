@@ -344,7 +344,9 @@ const MUTATIONS = [
   },
   {
     name: 'panel-writes-when-read-only',
-    area: 'a read-only settings document is never written',
+    area: 'an autosave queued while writable cannot write after the form becomes read-only',
+    // The queue checks capability at edit time; save() must check it again at
+    // drain time, after the Host can have changed the live document capability.
     file: 'src/client/store.ts',
     from: '    if (!this.#state.writable) return false;',
     to: '    if (false) return false;'
