@@ -35,6 +35,8 @@ interface AnyStore {
   getState(): any;
   start(): void;
   edit(mutate: (draft: any) => any, mode?: 'immediate' | 'text'): void;
+  /** Make one row the active connection, addressed by its page identity (g-069 att-006). */
+  setActiveProfile(id: string): boolean;
   save(): Promise<boolean>;
   retryAutosave(): Promise<boolean>;
   discardRetained(): void;
