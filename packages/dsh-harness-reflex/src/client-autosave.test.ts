@@ -835,6 +835,187 @@ test('choosing a model with no other local edit writes exactly that one path', a
 
 //#endregion
 
+//#region a no-op decision must not disturb the typing behind it (g-070)
+
+/** Edit the one row's model list, the way a keystroke reaches the textarea. */
+function typeModelIds(store: AnyStore, value: string): void {
+  store.edit(
+    (draft: any) => ({
+      ...draft,
+      backend: { ...draft.backend, profiles: draft.backend.profiles.map((row: any) => ({ ...row, modelIds: value })) }
+    }),
+    'text'
+  );
+}
+
+/**
+ * A decision whose draft is **exactly** what the Host holds — the queue's own
+ * definition of a no-op, with nothing typed into the row it touches.
+ *
+ * The page-level re-selection is a narrower case and is covered in
+ * `client-page.test.ts`: there the click is never *reported* as an edit at all,
+ * because a radio that is already checked is not a change. What is pinned here
+ * is the queue's half of the rule, which does not depend on that: an edit whose
+ * draft states the Host's own value must not cancel a pause it has no claim on.
+ * @param store - the page.
+ */
+function decideNothing(store: AnyStore): void {
+  // `routing` is the row-free decision: the draft it produces is the Host's own
+  // value for every group, since the typed row is not part of it.
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing } }));
+}
+
+test('a decision that equals the Host cannot cancel the pause of the typing behind it (g-070)', async () => {
+  // The queue's half of the reported race, stated as narrowly as it is true.
+  //
+  // In the page the click is now never reported as an edit at all (a radio that
+  // is already checked is not a change — see `client-page.test.ts`). The queue is
+  // the second line of defence, for a decision entry whose own draft says what
+  // the Host holds *while a typed burst waits behind it*: that entry used to
+  // supersede the burst, and `#drain` then dropped it by the no-op rule — after
+  // `#cancelTimer` had disarmed the pause the burst depended on. The keystrokes
+  // were then written by nothing at all.
+  //
+  // Driven through the store, not the bare queue: on the store path the decision
+  // carries the typed row in its draft, so it is a real edit and flushes — which
+  // is why this pins the flush/serialization behaviour rather than serving as the
+  // red-to-green case. The red-to-green evidence for the queue rule itself is
+  // `a decision with nothing to write leaves the waiting burst to its own pause`
+  // below, driven against `Autosave` directly.
+  const ns = namespace('noop-decision-keeps-pause');
+  const { store, form, clock } = makeStore({ namespace: ns });
+  await settle();
+
+  typeModelIds(store, 'jev-latest\ntyped-partial');
+  await settle();
+  assert.equal(clock.armed().length, 1, 'the typing did not arm its pause');
+  assert.equal(form.writes.length, 0, 'the typing wrote before its pause');
+
+  // A decision whose draft states the Host's own routing — and, because it is
+  // built from the page's live draft, the typed row as well. The page reports it
+  // as a decision; the queue must treat the typed row as the user's edit.
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing } }));
+  await settle();
+  assert.equal(form.writes.length, 1, 'the decision did not write');
+  assert.deepEqual(
+    pathsOf(form.writes[0]),
+    ['systemOne.profiles.primary.modelIds'],
+    'the decision did not carry exactly the typed row'
+  );
+  assert.equal(clock.armed().length, 0, 'the flushed burst left its pause armed, so it would be written twice');
+  await settle();
+  assert.equal(form.writes.length, 1, 'the flushed burst was written a second time at its pause');
+  assert.deepEqual(JSON.parse(JSON.stringify(hostModelIds(form))), ['jev-latest', 'typed-partial'], 'the typed list never reached the Host');
+  store.dispose();
+});
+
+test('a decision with nothing to write leaves the waiting burst to its own pause (g-070)', async () => {
+  // The queue rule in isolation, where the "nothing to write" part is exact: the
+  // decision's draft *is* the baseline, and a burst waits behind it. Before the
+  // fix the decision superseded the burst, `#cancelTimer` disarmed the burst's
+  // pause, and `#drain` then dropped the combined entry by the no-op rule — the
+  // burst was never written, by its pause or by anything else.
+  const autosaveModule = loadModule('autosave') as { Autosave: new (options: Record<string, unknown>) => any };
+  const timers: { fire: () => void }[] = [];
+  const written: string[] = [];
+  const queue = new autosaveModule.Autosave({
+    write: async (entry: { draft: { v: string } }) => {
+      written.push(entry.draft.v);
+      return true;
+    },
+    changed: (base: { v: string }, draft: { v: string }) => base.v !== draft.v,
+    original: () => ({ v: 'host' }),
+    rebase: (draft: { v: string }) => draft,
+    retain: () => undefined,
+    setTimer: (callback: () => void) => {
+      timers.push({ fire: callback });
+      return timers.length;
+    },
+    clearTimer: () => undefined
+  });
+  queue.baseline({ v: 'host' });
+
+  // Typing: queued, pause armed, nothing written.
+  await queue.submit({ draft: { v: 'typed' }, errors: [], writable: true, revision: 1, before: { v: 'host' } }, 'text');
+  assert.equal(queue.queued, true, 'the typing is not queued');
+  assert.equal(timers.length, 1, 'the typing did not arm a pause');
+
+  // A decision whose draft says exactly what the Host holds: nothing to write.
+  await queue.submit({ draft: { v: 'host' }, errors: [], writable: true, revision: 1, before: { v: 'host' } }, 'immediate');
+  assert.equal(queue.queued, true, 'the no-op decision dropped the waiting burst');
+
+  // Its pause still carries the burst.
+  timers[0]!.fire();
+  for (let round = 0; round < 6; round += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(written, ['typed'], 'the waiting burst never reached the Host');
+});
+
+test('a list typed behind a re-selection survives closing and reopening the dialog (g-070)', async () => {
+  // Criterion 3 of the goal: the fix must not disturb the close/reopen contract.
+  // The typed list is still waiting at its pause when the dialog is closed; the
+  // queue outlives the page, so the burst must be written rather than dropped —
+  // and a fresh page must then read it from the Host.
+  const ns = namespace('noop-close-reopen');
+  const { store, form } = makeStore({ namespace: ns });
+  await settle();
+
+  typeModelIds(store, 'jev-latest\ntyped-before-close');
+  await settle();
+
+  // A decision that states the Host value, arriving just before the close.
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing } }));
+  store.dispose();
+  await settle();
+
+  const reopened = makeStore({ namespace: ns, form });
+  await settle();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(hostModelIds(form))),
+    ['jev-latest', 'typed-before-close'],
+    'the list typed before the close never reached the Host'
+  );
+  assert.equal(
+    String(reopened.store.getState().draft.backend.profiles[0]?.modelIds ?? ''),
+    'jev-latest\ntyped-before-close',
+    'the reopened page does not show the list the Host holds'
+  );
+  reopened.store.dispose();
+});
+
+test('a re-selection and a typed list name only the row, never a field the Host moved (g-070)', async () => {
+  // The "unrelated Host configuration" half of criterion 2, in the shape this
+  // goal's edits actually take: a re-selection plus a typed model list must not
+  // carry a *different* group the Host has moved in the meantime. (A genuine
+  // revision conflict is covered by `a write fenced by a revision the Host has
+  // moved past` above; this pins that the decision path cannot smuggle in an
+  // older value of a field the user never touched.)
+  const ns = namespace('reselection-narrow');
+  const { store, form } = makeStore({ namespace: ns });
+  await settle();
+
+  // Another window moves a field that is not part of this row.
+  form.push(authoredWith({ pruneThreshold: 999 }));
+  await settle();
+  assert.equal(storedDocument(form).value.pruneThreshold, 999, 'the Host did not move the unrelated field');
+
+  typeModelIds(store, 'jev-latest\ntyped-narrow');
+  await settle();
+  // The decision that carries the burst (the shape the page sends when a real
+  // change and a pending keystroke share one draft).
+  store.edit((draft: any) => ({ ...draft, routing: { ...draft.routing } }));
+  await settle();
+
+  assert.ok(form.writes.length > 0, 'nothing was written at all');
+  for (const write of form.writes) {
+    for (const path of pathsOf(write)) {
+      assert.ok(path.startsWith('systemOne.profiles.primary.'), `a re-selection carried a field outside the row: ${path}`);
+    }
+  }
+  assert.equal(storedDocument(form).value.pruneThreshold, 999, 'the page reverted a Host value the user never touched');
+  assert.deepEqual(JSON.parse(JSON.stringify(hostModelIds(form))), ['jev-latest', 'typed-narrow'], 'the typed list did not reach the Host');
+  store.dispose();
+});
+
 //#region activating a connection is a write (g-069 att-006)
 
 /**

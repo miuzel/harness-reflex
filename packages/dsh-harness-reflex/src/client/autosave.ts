@@ -307,6 +307,11 @@ export class Autosave<T> {
    * An **invalid** draft is still not written, by either path: the flush never
    * bypasses validation, and a decision on an invalid draft waits like typing
    * does (the page already lists what is wrong with it).
+   *
+   * A **no-op decision** — one whose draft equals what the Host is known to hold
+   * — is not a write and must not disturb the text waiting behind it (g-070):
+   * re-selecting the model already in force cancels neither the pause nor the
+   * draft of a list the user is still typing.
    * @param entry - the draft, its validation and its revision.
    * @param mode - `immediate` for a decision, `text` for typing.
    * @returns settles when this change has been written or given up on; never rejects.
@@ -329,15 +334,57 @@ export class Autosave<T> {
       this.#arm();
       return Promise.resolve(false);
     }
-    // A decision supersedes a typing burst that has not been written yet, and
-    // carries it: the queued entry is replaced by one that states both edits,
-    // measured from the oldest pending baseline so the burst's fields are kept.
+    // A decision *the user actually made* supersedes a typing burst that has not
+    // been written yet, and carries it: the queued entry is replaced by one that
+    // states both edits, measured from the oldest pending baseline so the burst's
+    // fields are kept.
+    //
+    // A decision that changed nothing is **not** a decision (g-070). The model
+    // group is a radio list, and the browser fires `change` only for a different
+    // radio — but a click that re-selects the id already in force still reaches
+    // the page as an edit, as does every other "decision" whose draft came out
+    // identical. Letting one supersede the queue cancelled the pause the user's
+    // typing had armed, installed a pending entry equal to what the Host holds,
+    // and `#drain` then dropped it by the no-op rule — so the textarea's
+    // half-typed list was neither written at its pause nor ever again: the
+    // characters the user had just typed simply went away. The waiting text is
+    // the user's actual edit and must keep its own pause; the no-op decision
+    // adds nothing to write, and must not flush, cancel or re-time it either.
     const waiting = this.#pending;
-    if (waiting !== null) entry = { ...entry, before: waiting.before };
+    if (waiting !== null) {
+      if (!this.#changedSinceBaseline(entry)) {
+        // Nothing to write, but the burst behind it still is: leave it exactly as
+        // it was, debounce included, and report that this call wrote nothing.
+        return Promise.resolve(false);
+      }
+      entry = { ...entry, before: waiting.before };
+    } else if (!this.#changedSinceBaseline(entry)) {
+      // A lone no-op decision: no request, and nothing armed. It also must not
+      // leave `#failure` cleared or a baseline moved — it is not a write.
+      return Promise.resolve(false);
+    }
     this.#pending = entry;
     this.#failure = null;
     this.#cancelTimer();
     return this.#drain();
+  }
+
+  /**
+   * Whether `entry`'s draft says anything the queue believes the Host lacks.
+   *
+   * Deliberately **not** the same question {@link #drain} asks before writing.
+   * `#drain` also refuses an unwritable or invalid draft, but "cannot be written
+   * now" and "says nothing new" are different answers, and conflating them is
+   * what lost the keystrokes in g-070: a half-typed model list is invalid
+   * (it no longer lists the selected id), so a re-selection reported against that
+   * same unchanged draft counted as a real edit, superseded the typed burst, and
+   * was then dropped by `#drain` as a no-op — taking the burst with it. Here only
+   * the comparison decides; validity is `#drain`'s business, at its own time.
+   * @param entry - the candidate edit.
+   * @returns whether it states something the baseline does not.
+   */
+  #changedSinceBaseline(entry: AutosaveEntry<T>): boolean {
+    return this.#differs(entry.draft);
   }
 
   /**

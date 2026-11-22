@@ -3407,6 +3407,152 @@ test('choosing the first listed model clears the stored selection instead of wri
   mounted.unmount();
 });
 
+/**
+ * The model list a row shows, as the textarea carries it.
+ *
+ * Read off the rendered element rather than the store, so the test measures
+ * exactly what the user is looking at — the raw value, trailing partial line and
+ * whitespace included.
+ * @param tree - the rendered page.
+ * @param name - the row's name.
+ * @returns the textarea's raw value, or `''` when the row has no list field.
+ */
+function modelListValue(tree: unknown, name: string): string {
+  const row = namedRow(tree, name);
+  if (row === undefined) return '';
+  return String(modelListOf(row)?.props.value ?? '');
+}
+
+/** Every write's ops, across one fixture's whole lifetime. */
+function allOps(mutations: readonly { ops: unknown }[]): { op: string; path: string[]; value: unknown }[] {
+  return mutations.flatMap((mutation) => plain(mutation.ops) as { op: string; path: string[]; value: unknown }[]);
+}
+
+/** The row named `name`, asserting it is on the page. */
+function requireRow(tree: unknown, name: string): Element {
+  const row = namedRow(tree, name);
+  assert.ok(row !== undefined, `no row named ${name}`);
+  return row;
+}
+
+/** The radio of `row` whose value is `id`, asserting it exists. */
+function requireRadio(row: Element, id: string): Element {
+  const radio = modelRadios(row).find((candidate) => String(candidate.props.value) === id);
+  assert.ok(radio !== undefined, `no radio for ${id} among [${modelRadios(row).map((r) => String(r.props.value)).join(', ')}]`);
+  return radio;
+}
+
+/** The ops that named one dotted path. */
+function opsFor(mutations: readonly { ops: unknown }[], dotted: string): { op: string; path: string[]; value: unknown }[] {
+  return allOps(mutations).filter((op) => op.path.join('.') === dotted);
+}
+
+test('re-selecting the model already in force never writes and never un-arms the list edit (g-070)', async () => {
+  // The reported race, at the element a user actually touches. The user is
+  // appending a model: the list is mid-edit ("alpha\nbeta\n" plus a partial
+  // "gamm" with no trailing newline — the id in force, `beta`, is still listed),
+  // when the current model's radio is clicked again.
+  //
+  // Two defects met here. `ModelSelection` reported that click as a *decision*,
+  // so it saved at once; and the queue let a decision supersede the text waiting
+  // behind it — after which the no-op rule dropped the combined draft, and the
+  // pause that would have carried the typing had been cancelled. The characters
+  // the user had just typed were gone: never written, and never written later.
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  // A half-typed list: a trailing partial line, with no trailing newline yet.
+  type(modelListOf(requireRow(tree, 'multi')), 'alpha\nbeta\ngamm');
+  tree = await mounted.runtime.flush();
+  assert.equal(modelListValue(tree, 'multi'), 'alpha\nbeta\ngamm', 'the keystrokes are not on the page');
+
+  // The click a user makes on the model they already run.
+  const current = requireRadio(requireRow(tree, 'multi'), 'beta');
+  assert.equal(current.props.checked, true, 'the fixture does not start on `beta`');
+  fire(current, 'onChange', { target: { value: 'beta' } });
+  tree = await mounted.runtime.flush();
+
+  // No write was started by it, and the typed text keeps its value on the page.
+  assert.deepEqual(mutations, [], 're-selecting the current model wrote to the Host');
+  assert.equal(modelListValue(tree, 'multi'), 'alpha\nbeta\ngamm', 're-selecting the current model dropped the typed characters');
+
+  // The typing's own pause still carries the edit once the list is finished, and
+  // it is still what the user last typed. The finished list deliberately differs
+  // from the Host's own (`gamma-2`): landing back on the authored value would be
+  // indistinguishable from a lost edit, and would pass for the wrong reason.
+  type(modelListOf(requireRow(tree, 'multi')), 'alpha\nbeta\ngamma-2\n');
+  tree = await mounted.runtime.flush();
+  // The raw value, trailing newline and all, is what the keystrokes left.
+  assert.equal(modelListValue(tree, 'multi'), 'alpha\nbeta\ngamma-2\n', 'the keystrokes are not on the page');
+  tree = await flushAutosave(mounted, tree);
+  const lists = opsFor(mutations, 'systemOne.profiles.multi.modelIds');
+  assert.deepEqual(
+    lists.map((op) => [op.op, op.value]),
+    [['set', ['alpha', 'beta', 'gamma-2']]],
+    'the list edit never reached the Host, or reached it more than once'
+  );
+  // And selecting nothing new was written along with it.
+  assert.deepEqual(opsFor(mutations, 'systemOne.profiles.multi.selectedModel'), [], 'the re-selection was written after all');
+  mounted.unmount();
+});
+
+test('re-selecting the current model does not flush a still-typing list ahead of its pause (g-070)', async () => {
+  // The same click with text that is *valid* on its own. The click must not write
+  // it early either: a decision writes at once only when it is itself an edit, and
+  // a re-selection is not — the pause still owns the list's timing.
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  type(modelListOf(requireRow(tree, 'multi')), 'alpha\nbeta\ngamma\ndelta');
+  tree = await mounted.runtime.flush();
+  fire(requireRadio(requireRow(tree, 'multi'), 'beta'), 'onChange', { target: { value: 'beta' } });
+  tree = await mounted.runtime.flush();
+  assert.deepEqual(mutations, [], 'a re-selection flushed the list before its pause');
+  assert.equal(modelListValue(tree, 'multi'), 'alpha\nbeta\ngamma\ndelta');
+
+  tree = await flushAutosave(mounted, tree);
+  assert.deepEqual(
+    opsFor(mutations, 'systemOne.profiles.multi.modelIds').map((op) => [op.op, op.value]),
+    [['set', ['alpha', 'beta', 'gamma', 'delta']]],
+    'the paused list edit was not written exactly once'
+  );
+  assert.equal(mutations.length, 1, `the re-selection caused a write of its own: ${JSON.stringify(allOps(mutations))}`);
+  mounted.unmount();
+});
+
+test('a real model switch still saves at once, and keeps text typed behind it (g-070)', async () => {
+  // The half of the rule that must not regress: choosing a *different* model is a
+  // decision and writes at once. Its write carries the list too when the list is
+  // mid-edit, because a decision flushes the burst in the same draft — and the
+  // newer text must survive the answer.
+  const { form, mutations } = settingsForm(MULTI_MODEL);
+  const mounted = await mountPanel({ facts: multiModelFacts(), form });
+  openTab(mounted.tree, 'System 1 后端');
+  let tree = await mounted.runtime.flush();
+
+  type(modelListOf(requireRow(tree, 'multi')), 'alpha\nbeta\ngamma');
+  tree = await mounted.runtime.flush();
+  fire(requireRadio(requireRow(tree, 'multi'), 'gamma'), 'onChange', { target: { value: 'gamma' } });
+  tree = await mounted.runtime.flush();
+  tree = await flushAutosave(mounted, tree);
+
+  // The switch landed at once, and the list went with it rather than being lost.
+  assert.ok(
+    opsFor(mutations, 'systemOne.profiles.multi.selectedModel').length > 0,
+    'a real model switch did not save'
+  );
+  // The Host's own document, as the page's writes left it.
+  const host = plain((form['getSnapshot'] as () => Record<string, any>)()) as Record<string, any>;
+  assert.equal(host.value.systemOne.profiles.multi.selectedModel, 'gamma', 'the switch never reached the Host');
+  assert.deepEqual(host.value.systemOne.profiles.multi.modelIds, ['alpha', 'beta', 'gamma'], 'the list typed before the switch was lost');
+  assert.equal(modelListValue(tree, 'multi'), 'alpha\nbeta\ngamma', 'the list was rolled back after the switch');
+  mounted.unmount();
+});
+
 test('a selection that is no longer in the list is refused, and the row says why', async () => {
   // Editing the list under a selection is how an unusable state arises — the
   // radio group cannot produce it, but typing can. The save must be refused,

@@ -1128,7 +1128,19 @@ function ModelSelection(props: {
                 // Choosing a model is a draft edit like any other: nothing is
                 // written until the user saves, so an exploratory click cannot
                 // change what the running transport sends.
-                onChange: () => onEdit({ selectedModel: id })
+                //
+                // A click on the model **already in force** is not a decision, and
+                // must not be reported as one (g-070). `selectedModel` may be blank
+                // while the row runs its first listed id, and `id === effective`
+                // then still means "unchanged"; writing it would store a redundant
+                // field, and reporting it as a decision cancelled the pause of a
+                // model list the user was still typing — losing those keystrokes.
+                // The comparison is against the *effective* selection, so clicking
+                // the id the row already resolves to is a no-op in every case.
+                onChange: () => {
+                  if (id === effective) return;
+                  onEdit({ selectedModel: id });
+                }
               }),
               h('span', { style: S.mono }, id)
             )
