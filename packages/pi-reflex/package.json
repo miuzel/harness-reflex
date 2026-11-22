@@ -1,5 +1,5 @@
 {
-  "name": "pi-reflex",
+  "name": "pi-harness-reflex",
   "version": "0.3.0",
   "description": "harness-reflex System One interventions and reflex_* tools for the pi coding agent: in-process TypeScript extension, zero runtime dependencies.",
   "type": "module",

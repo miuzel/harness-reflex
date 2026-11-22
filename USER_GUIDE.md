@@ -595,7 +595,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 | `dsh-harness-reflex-<version>.tgz` | 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、`client.js`（内含本手册）、`cordis.patch.yml`、`locale/` |
 | `harness-reflex-claude-code-<version>.tgz` | Claude Code 插件：`.claude-plugin/`、`hooks/`、`.mcp.json` |
 | `harness-reflex-codex-<version>.tgz` | Codex 配置包：`hooks.json`、`config.toml` |
-| `pi-reflex-<version>.tgz` | pi 扩展：`src/`（发布会直接跑源码）、`scripts/`、`dist/` 声明 |
+| `pi-harness-reflex-<version>.tgz` | pi 扩展：`src/`（发布会直接跑源码）、`scripts/`、`dist/` 声明 |
 | `harness-reflex-kimi-code-<version>.tgz` | Kimi Code 配置包：`hooks.toml`、`hooks/reflex-stop-exit2.sh`、`mcp.json` |
 | `harness-reflex-opencode-<version>.tgz` | OpenCode 插件：`plugin/reflex.js`、`opencode.json` |
 | `SHA256SUMS` | 全部 tarball 的 SHA-256 校验和 |
@@ -632,7 +632,7 @@ npm run release:pack     # 只打包并校验（不跑测试；注意需先 buil
 ## 13. 版本与兼容性
 
 - 版本：`harness-reflex` 与 `dsh-harness-reflex` 同步发布，v0.3.0；五个宿主插件包同版本；
-- Node：`>= 18`（根包 `engines`；`pi-reflex` 为 `>= 22.19.0`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
+- Node：`>= 18`（根包 `engines`；`pi-harness-reflex` 为 `>= 22.19.0`）；DSH Host 依赖 `@deepseek-ai/*@0.2.1-alpha.4`；
 - 插件以 `peerDependencies` 声明 Host 契约，运行时不重复打包 Host 模块；
 - stdio MCP 的 8 工具表面自 v0.1.0 起冻结，Host 侧变更不得静默改动其载荷；
 - DSH 插件侧的工具表面自 v0.1.0 起是 **5 个可开关能力、默认注册 4 个**

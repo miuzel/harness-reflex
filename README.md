@@ -253,7 +253,7 @@ npm run release -- --keep       # 全量构建、七套测试及变异测试通�
 | `release/dsh-harness-reflex-<version>.tgz` | DSH Host 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
 | `release/harness-reflex-claude-code-<version>.tgz` | Claude Code 插件（`private`） |
 | `release/harness-reflex-codex-<version>.tgz` | Codex 配置包（`private`） |
-| `release/pi-reflex-<version>.tgz` | pi 扩展 |
+| `release/pi-harness-reflex-<version>.tgz` | pi 扩展 |
 | `release/harness-reflex-kimi-code-<version>.tgz` | Kimi Code 配置包与 shim（`private`） |
 | `release/harness-reflex-opencode-<version>.tgz` | OpenCode JS 插件与配置（`private`） |
 | `release/SHA256SUMS` | 七份 tarball 的 SHA-256 校验和；在 `release/` 内运行 `sha256sum -c SHA256SUMS` |

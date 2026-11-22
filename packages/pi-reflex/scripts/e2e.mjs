@@ -165,7 +165,7 @@ function textOf(entry) {
   return parts.join('\n');
 }
 
-console.log('pi-reflex e2e');
+console.log('pi-harness-reflex e2e');
 console.log(`  work dir: ${workDir}`);
 
 // 0. Preconditions.

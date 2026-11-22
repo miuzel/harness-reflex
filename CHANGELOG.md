@@ -17,4 +17,4 @@
 ### 升级与分发
 
 - 从 `0.1.0` 直接升至 `0.3.0`，没有发布过 `0.2.0`。旧账本可继续读取；旧 alpha 包 `dsh-reflex` 与 `dsh-harness-reflex` 是不同的安装，配置不会自动迁移。DSH 插件要求 `>=0.2.2-rc.1 <0.2.3`；同版本重装须加 `--force`。
-- 发布构建生成七份 tarball。`harness-reflex`、`dsh-harness-reflex`、`pi-reflex` 可作为 npm 包发布；Claude Code、Codex、Kimi Code 和 OpenCode 的配置或插件包标记为 `private`，按各自 README 接入。仓库内的 `release/RELEASE-0.3.0.md` 提供安装与验证背景。
+- 发布构建生成七份 tarball。`harness-reflex`、`dsh-harness-reflex`、`pi-harness-reflex` 可作为 npm 包发布；Claude Code、Codex、Kimi Code 和 OpenCode 的配置或插件包标记为 `private`，按各自 README 接入。仓库内的 `release/RELEASE-0.3.0.md` 提供安装与验证背景。

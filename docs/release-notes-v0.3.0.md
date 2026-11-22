@@ -141,12 +141,14 @@ opencode 14，mutation 51/51，pi 真机 e2e 10/10。
 
 ## 产物指纹
 
+上面的验证记录使用改名前的候选包；最终的 pi npm 包名为 `pi-harness-reflex`。
+
 | 包 | 文件 |
 |---|---|
 | 核心/MCP | `harness-reflex-0.3.0.tgz` |
 | DSH 插件 | `dsh-harness-reflex-0.3.0.tgz` |
 | Claude Code | `harness-reflex-claude-code-0.3.0.tgz` |
 | Codex | `harness-reflex-codex-0.3.0.tgz` |
-| pi | `pi-reflex-0.3.0.tgz` |
+| pi | `pi-harness-reflex-0.3.0.tgz` |
 | Kimi Code | `harness-reflex-kimi-code-0.3.0.tgz` |
 | OpenCode | `harness-reflex-opencode-0.3.0.tgz` |

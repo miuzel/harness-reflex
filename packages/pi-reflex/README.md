@@ -1,4 +1,4 @@
-# pi-reflex
+# pi-harness-reflex
 
 harness-reflex for the [pi coding agent](https://pi.dev): the eight `reflex_*`
 tools, plus the four automatic interventions (prune, stagnation, correction,
@@ -14,7 +14,10 @@ directly with jiti — there is no build step for the extension itself.
 ## Install
 
 ```bash
-# As a pi package (recommended)
+# From npm, once published
+pi install npm:pi-harness-reflex
+
+# Or install from a repository checkout
 pi install ./packages/pi-reflex
 
 # Or load it for one run, without installing anything
