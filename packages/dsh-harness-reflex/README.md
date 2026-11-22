@@ -67,11 +67,15 @@ DSH_HOST_MODULES=/path/to/dsh/node_modules npm run build:all
 
 ## 在 Host 中启用
 
+本版要求 DSH `>=0.2.2-rc.1 <0.2.3`。
+
 `package.json` 里的 `dsh.bundle.patch` 已指向 `cordis.patch.yml`，因此按 DSH bundle 插件的通用方式安装即可：
 
 ```bash
 # 从发布 tarball 安装（同版本重装必须 --force）
-dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.1.0.tgz
+dsh plugin --profile web add --force ./release/dsh-harness-reflex-0.3.0.tgz
+# 0.3.0 上架 npm 后也可按包名安装
+dsh plugin --profile web add dsh-harness-reflex@0.3.0
 # 开发时也可以直接装目录（会链接当前构建）
 dsh plugin --profile web add ./packages/dsh-harness-reflex
 ```
@@ -80,7 +84,7 @@ dsh plugin --profile web add ./packages/dsh-harness-reflex
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `backend` | `auto` | `auto` 按环境变量选择 backend；也可强制 `mock` / `jev` / `vllm`。无任何环境变量时 `auto` 落到**离线 mock**（确定性、无网络） |
+| `backend` | `auto` | 连接未指定实现时使用的选择器。全新配置的 `JEV official` 连接指定 `jev`，只读取 `JEV_API_KEY`；显式设为 `mock` 可使用离线模拟后端。 |
 | `toolPrefix` | `reflex_` | 工具名前缀，例如配成 `rv_` 就是 `rv_choice` |
 | `ledgerPath` | 省略 | 省略 = 台账**只留内存**（不写用户项目）；填路径则追加 JSONL 并可回放 |
 | `pruneThreshold` | `500` | 字符数阈值，低于此长度的输出不剪枝 |
@@ -199,7 +203,7 @@ ctx.effect(() => {
 ```bash
 npm test                 # 根包测试（ledger / score / route / route-prompt / MCP 表面 / 打包清单）
 npm run test:plugin      # 插件测试（工具面 / 命令 / 校验 / 生命周期 / 路由 / 面板 / 使用说明）
-npm run test:all         # 构建 + 两套测试
+npm run test:all         # 构建 + 七套测试
 npm run test:mutation    # 负向对照：注入故障，要求被测试或编译器抓住
 ```
 

@@ -22,9 +22,9 @@
 
 ---
 
-## 五个 Harness 的能力差异（选型只看这张表）
+## 宿主能力对照
 
-v0.3.0 起，同一套决策引擎接进了五个宿主。**它们的能力并不对等**——宿主没有给出对应钩子时，
+v0.3.0 产物覆盖下表六个宿主。**它们的能力并不对等**——宿主没有给出对应钩子时，
 这个能力就是做不到，而不是「配置一下就好」。下表按「能力在模型侧是否真的生效」写：
 
 | 能力 | Claude Code | DSH（`dsh-harness-reflex`） | Codex CLI | pi | Kimi Code | OpenCode |
@@ -125,7 +125,7 @@ v0.3.0 起，同一套决策引擎接进了五个宿主。**它们的能力并�
      模型，只有明显更合适才切换；`model-route` 台账记 `currentModel` / `switched` / `contextTokens`。
    - 详见 [`docs/dsh-plugin.md`](docs/dsh-plugin.md) 与 [`packages/dsh-harness-reflex/README.md`](packages/dsh-harness-reflex/README.md)。
 
-5. **Claude Code 插件三件套（v0.2.0）**：
+5. **Claude Code 插件三件套（v0.3.0）**：
    - `packages/claude-reflex/` 同时携带 **mod**（`turn.step` effort 接线）、**settings hooks**
      （PreToolUse / PostToolUse / PostToolUseFailure / Stop / SubagentStop（默认关）/ SessionStart / SessionEnd，
      逐事件调用 `harness-reflex hook <event>`）与 **MCP server**（根包 8 个 `reflex_*` 工具）。
@@ -136,6 +136,10 @@ v0.3.0 起，同一套决策引擎接进了五个宿主。**它们的能力并�
 ---
 
 ## 快速安装与配置
+
+在 `0.3.0` 上架 npm 后，可运行 `npm install -g harness-reflex@0.3.0` 安装核心 CLI 与 stdio MCP。
+上架前可从发布产物安装：`npm install -g ./release/harness-reflex-0.3.0.tgz`。
+以下构建和配置示例从源码仓库根目录运行。
 
 ### 1. 构建
 ```bash
@@ -173,7 +177,8 @@ dsh plugin --profile web add dsh-harness-reflex@0.3.0
 安装后重启 / 重载 `dsh`，设置页会出现「Reflex 决策运行时」面板；`/dsh-reflex/api/health`
 应返回 `{"ok":true,"name":"dsh-reflex","version":"0.3.0"}`。
 
-### 5. 配置 System One 决策后端（可选）
+### 5. 配置核心 CLI / MCP 的 System One 决策后端（可选）
+DSH 插件使用设置面板中的连接配置；全新配置预置并启用 `JEV official`，凭证读取 `JEV_API_KEY`。
 默认内置本地快速启发式决策器（`<5ms` 延迟，零外部依赖）。可随时无缝切换到其他 System One API：
 
 ```bash
@@ -220,7 +225,7 @@ node dist/cli/index.js ledger
 npm test                 # 根包：ledger / score / route / route-prompt / MCP 表面 / 打包清单
 npm run test:plugin      # DSH 插件：注册、严格校验、工具面与 /reflex-ledger、生命周期、虚拟 provider 路由（含上下文感知与会话粘性）、设置面板与使用说明
 npm run test:claude-plugin  # Claude Code 插件：manifest/hooks/.mcp.json、7 事件、observe diff=0、崩溃放行
-npm run test:all         # 构建根包 + 插件，然后跑三套测试
+npm run test:all         # 构建后运行七套测试：核心、DSH、Claude Code、Codex、pi、Kimi Code、OpenCode
 npm run test:mutation    # 负向对照：注入故障，要求被测试（或编译器）抓住
 ```
 
@@ -228,14 +233,16 @@ npm run test:mutation    # 负向对照：注入故障，要求被测试（或�
 
 ## 使用说明与发布产物
 
+- 版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
 - **[`USER_GUIDE.md`](USER_GUIDE.md)**（中文）与 **[`docs/USER_GUIDE.en.md`](docs/USER_GUIDE.en.md)**（English）：
   插件架构、虚拟 Provider 模型池配置、自适应思考等级（`reflex` / `auto`）、System 1 后端接入、
   MCP 与原生 DSH 工具对照、决策账本、测试与发布流程。这两份文档会被嵌入插件前端，
   可在 DSH 设置页 **Reflex → 使用说明 / Guide** 标签页内直接切换中英文阅读。
 
 ```bash
-npm run release:pack     # 打包两个包到 release/：结构审计 + 离线安装冒烟 + SHA256SUMS
-npm run release          # 全量构建与测试通过后再打包（发布闸门）
+npm run release:pack -- --keep  # 构建后打包七份 tarball；保留已跟踪的发布草稿和打包暂存目录
+npm run release -- --keep       # 全量构建、七套测试及变异测试通过后再以相同方式打包
 ```
 
 产物路径：
@@ -244,11 +251,16 @@ npm run release          # 全量构建与测试通过后再打包（发布闸�
 | --- | --- |
 | `release/harness-reflex-<version>.tgz` | 根包：核心运行时、CLI、stdio MCP、适配器、`dist/`（含类型与自包含 source map）、`USER_GUIDE.md`、`docs/` |
 | `release/dsh-harness-reflex-<version>.tgz` | DSH Host 插件 `dsh-harness-reflex`（npm pack 命名）：`dist/`、单文件浏览器端 `client.js`（含内嵌使用说明）、`cordis.patch.yml`、`locale/` |
-| `release/SHA256SUMS` | 两份 tarball 的 SHA-256 校验和 |
+| `release/harness-reflex-claude-code-<version>.tgz` | Claude Code 插件（`private`） |
+| `release/harness-reflex-codex-<version>.tgz` | Codex 配置包（`private`） |
+| `release/pi-reflex-<version>.tgz` | pi 扩展 |
+| `release/harness-reflex-kimi-code-<version>.tgz` | Kimi Code 配置包与 shim（`private`） |
+| `release/harness-reflex-opencode-<version>.tgz` | OpenCode JS 插件与配置（`private`） |
+| `release/SHA256SUMS` | 七份 tarball 的 SHA-256 校验和；在 `release/` 内运行 `sha256sum -c SHA256SUMS` |
 | `release/release-report.json` | 逐项打包核验记录（文件清单、死链、依赖声明、安装冒烟） |
-| `release/RELEASE-<version>.md` | 发布说明：安装方式、核验清单、内容构成 |
+| `release/RELEASE-<version>.artifacts.md` | 自动生成的产物与核验说明 |
 
-`npm run release:pack` 不止于「打包成功」：它解压两份 tarball，核对必需文件、
+`npm run release:pack` 不止于「打包成功」：它解压七份 tarball，核对必需文件、
 拒绝测试构建产物、临时目录与本地绝对路径，解析全部相对引用与 source map 目标（零死链，
 且不允许未声明的运行时依赖），再对根包做一次真实 `npm install`（`bin`、具名 import 与
 stdio MCP `tools/list` 冒烟）。
