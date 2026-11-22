@@ -1037,8 +1037,8 @@ const MUTATIONS = [
     name: 'panel-writes-the-whole-system-one-group',
     area: 'the page writes the connection block on narrow paths only',
     file: 'src/client/panel.ts',
-    from: "  if (activationTarget.length > 0 && activationTarget !== storedActivation) {\n    ops.push({ op: 'set', path: ['systemOne', 'active'], value: activationTarget });",
-    to: "  if (activationTarget.length > 0 && activationTarget !== storedActivation) {\n    ops.push({ op: 'set', path: ['systemOne'], value: { active: activationTarget } });"
+    from: "  if (activationChanged(original, draft)) {\n    ops.push({ op: 'set', path: ['systemOne', 'active'], value: activationTarget });",
+    to: "  if (activationChanged(original, draft)) {\n    ops.push({ op: 'set', path: ['systemOne'], value: { active: activationTarget } });"
   },
   {
     // Empty input means "leave the stored key alone": treating it as a write
